@@ -14,7 +14,8 @@
       "PowerShell(ruff check .)",
       "PowerShell(pytest)",
       "PowerShell(Get-ChildItem -Force | Where-Object { $_.Name -in @\\(\"playbook.md\",\"memo.md\",\"CLAUDE.md\"\\) } | Select-Object Name, Length, LastWriteTime)",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "PowerShell(pytest -v)"
     ]
   }
 }
