@@ -21,15 +21,29 @@ class AppError(Exception):
 
     Subclass and override `status_code`, `error_type`, `title` to declare a new
     error category. `detail` (instance-specific) is passed at raise time.
+
+    `default_headers` is a tuple of (name, value) pairs added to the HTTP
+    response. Used e.g. for `WWW-Authenticate` on 401. Tuple, not dict, to
+    avoid the mutable-default-class-attribute pitfall.
     """
 
     status_code: int = status.HTTP_500_INTERNAL_SERVER_ERROR
     error_type: str = "internal"
     title: str = "Internal Server Error"
+    default_headers: tuple[tuple[str, str], ...] = ()
 
-    def __init__(self, detail: str | None = None, **extras: Any) -> None:
+    def __init__(
+        self,
+        detail: str | None = None,
+        *,
+        headers: dict[str, str] | None = None,
+        **extras: Any,
+    ) -> None:
         super().__init__(detail or self.title)
         self.detail = detail or self.title
+        self.headers: dict[str, str] = dict(self.default_headers)
+        if headers:
+            self.headers.update(headers)
         self.extras = extras
 
 
@@ -41,6 +55,7 @@ def _problem_response(
     detail: str,
     instance: str,
     extras: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     body: dict[str, Any] = {
         "type": f"{DEFAULT_TYPE_BASE}/{error_type}",
@@ -55,6 +70,7 @@ def _problem_response(
         status_code=status_code,
         content=body,
         media_type=PROBLEM_CONTENT_TYPE,
+        headers=headers or None,
     )
 
 
@@ -66,6 +82,7 @@ async def _handle_app_error(request: Request, exc: AppError) -> JSONResponse:
         detail=exc.detail,
         instance=request.url.path,
         extras=exc.extras or None,
+        headers=exc.headers or None,
     )
 
 
