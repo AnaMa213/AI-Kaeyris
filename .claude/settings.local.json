@@ -7,7 +7,14 @@
       "Bash(git add *)",
       "Bash(git commit *)",
       "Bash(git push *)",
-      "Bash(git ls-tree *)"
+      "Bash(git ls-tree *)",
+      "Bash(.venv\\\\Scripts\\\\activate.ps1)",
+      "Bash(ruff check *)",
+      "PowerShell(.venv\\\\Scripts\\\\Activate.ps1)",
+      "PowerShell(ruff check .)",
+      "PowerShell(pytest)",
+      "PowerShell(Get-ChildItem -Force | Where-Object { $_.Name -in @\\(\"playbook.md\",\"memo.md\",\"CLAUDE.md\"\\) } | Select-Object Name, Length, LastWriteTime)",
+      "Bash(git check-ignore *)"
     ]
   }
 }
