@@ -239,3 +239,25 @@ A jalon is considered complete when ALL of these are true:
 - Wants explanations of trade-offs and alternatives, not just decisions
 - Wants to learn enterprise architecture practices, not just "code that runs"
 - Pragmatic about norms: 12-Factor + OWASP + basic observability are mandatory; deeper standards (DDD strict, hexagonal) only if/when needed
+
+---
+
+## 10. Documents transverses : `playbook.md` et `memo.md`
+
+Deux fichiers à la racine, complémentaires et tenus à jour par Claude :
+
+**`playbook.md` — méthodo générale**
+- Guide projet logiciel pro **agnostique du projet courant** (applicable à toute API, portail, plateforme scalable).
+- Phases A→K (cadrage, archi, qualité, ops, delivery…), questions à se poser, frameworks de référence (12-Factor, OWASP, C4, DORA…).
+- Léger et scannable. Si une section dépasse ~20 lignes, condenser.
+- Sources citées avec URL.
+
+**`memo.md` — aide-mémoire technique**
+- Référence rapide : commandes essentielles + raisons en 1 ligne par choix techno et par étape.
+- Format = tableaux denses, pas de prose. Pour retrouver vite "comment fait-on X" et "pourquoi on a choisi Y".
+- Spécifique à la stack du projet ; à enrichir quand un nouveau geste/outil est adopté.
+
+**Règles communes**:
+- Ne jamais dupliquer `CLAUDE.md` — y faire référence.
+- Pas d'historique des jalons dans ces fichiers (cela va dans `docs/journal.md`).
+- Mettre à jour dans la même session que le changement qui les concerne.
