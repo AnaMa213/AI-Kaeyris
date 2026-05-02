@@ -118,6 +118,27 @@ git push
 
 ---
 
+## Créer un nouveau service métier
+
+Le pattern (ADR 0002) : 3 fichiers par service, jamais d'imports croisés entre services, `logic.py` ne touche pas FastAPI.
+
+```powershell
+Copy-Item -Recurse app\services\_template app\services\<mon_service>
+```
+
+Puis dans le nouveau dossier :
+
+1. **`schemas.py`** — modèles Pydantic des inputs/outputs (renommer `EchoRequest`/`EchoResponse`).
+2. **`logic.py`** — logique métier pure, signature `func(input_schema) -> output_schema`. Aucun import FastAPI.
+3. **`router.py`** — adapter le `prefix="/services/<mon_service>"` et `tags=["<mon_service>"]`.
+4. **`app/main.py`** — ajouter `app.include_router(<mon_service>.router)` (à la différence de `_template` qui n'est pas monté).
+5. **`tests/services/<mon_service>/`** — créer `__init__.py`, `conftest.py` (fixture mini-app), `test_router.py`.
+6. **Erreurs métier** — créer une sous-classe de `AppError` dans `app/core/errors.py` (ou un module dédié si la liste grossit).
+
+**Format d'erreur** : RFC 9457 Problem Details (https://www.rfc-editor.org/rfc/rfc9457.html). Géré par `register_exception_handlers()`. Les handlers couvrent `AppError` (custom), `RequestValidationError` (Pydantic 422), et `Exception` (catch-all 500).
+
+---
+
 ## Réflexes par situation
 
 | Situation | Réflexe |
