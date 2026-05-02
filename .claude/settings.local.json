@@ -15,7 +15,9 @@
       "PowerShell(pytest)",
       "PowerShell(Get-ChildItem -Force | Where-Object { $_.Name -in @\\(\"playbook.md\",\"memo.md\",\"CLAUDE.md\"\\) } | Select-Object Name, Length, LastWriteTime)",
       "Bash(git check-ignore *)",
-      "PowerShell(pytest -v)"
+      "PowerShell(pytest -v)",
+      "PowerShell(pip install -e \".[dev]\")",
+      "PowerShell(python scripts/generate_api_key.py demo)"
     ]
   }
 }
