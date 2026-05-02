@@ -2,12 +2,14 @@ from fastapi import FastAPI
 
 from app.core.config import settings
 from app.core.errors import register_exception_handlers
+from app.core.security_headers import SecurityHeadersMiddleware
 
 app = FastAPI(
     title="AI-Kaeyris",
     version=settings.APP_VERSION,
     description="Plateforme AI personnelle — monolithe modulaire FastAPI.",
 )
+app.add_middleware(SecurityHeadersMiddleware)
 register_exception_handlers(app)
 
 
