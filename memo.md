@@ -137,6 +137,40 @@ Puis dans le nouveau dossier :
 
 **Format d'erreur** : RFC 9457 Problem Details (https://www.rfc-editor.org/rfc/rfc9457.html). Géré par `register_exception_handlers()`. Les handlers couvrent `AppError` (custom), `RequestValidationError` (Pydantic 422), et `Exception` (catch-all 500).
 
+**Auth obligatoire** : monter le router avec `app.include_router(router, dependencies=[Depends(require_api_key)])` pour exiger un Bearer token. Cf. ADR 0003.
+
+---
+
+## Authentification (Jalon 2 — ADR 0003)
+
+```powershell
+# 1. Générer une clé API (et son hash Argon2id)
+python scripts/generate_api_key.py <name>
+
+# 2. Copier la ligne API_KEYS=name:hash dans .env (séparateur ';' entre entrées)
+
+# 3. Tester un endpoint protégé
+curl -H "Authorization: Bearer <plain_key>" http://localhost:8000/<route>
+```
+
+| Élément | Valeur |
+|---|---|
+| Header | `Authorization: Bearer <key>` (RFC 6750) |
+| Hash | Argon2id (`argon2-cffi`) |
+| Stockage | env var `API_KEYS=name1:hash1;name2:hash2` (séparateur `;`) |
+| Routes publiques | `/health`, `/docs`, `/redoc`, `/openapi.json` |
+| Refus | 401 Problem Details + header `WWW-Authenticate: Bearer realm="ai-kaeyris"` |
+| Rate limiting | reporté au Jalon 3 (Redis) |
+
+---
+
+## Workflow git
+
+| Jalon courant | Stratégie | Pourquoi |
+|---|---|---|
+| 0 → 6 | trunk-based, push direct sur `main` | solo, pas de CI, itération rapide (DORA — https://dora.dev) |
+| 7+ (CI activée) | branche `feature/...` + PR + merge | la CI valide avant le merge ; protéger `main` sur GitHub |
+
 ---
 
 ## Réflexes par situation

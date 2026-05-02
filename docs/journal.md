@@ -54,3 +54,42 @@
 - Logging non configuré (Jalon 6 — structlog).
 - Pas de correlation ID propagé dans les logs (Jalon 6).
 - `openapi_tags` (descriptions des tags dans Swagger) non défini ; cosmétique.
+
+---
+
+## 2026-05-02 — Jalon 2 : Authentication
+
+### Ce qui a été fait
+
+- **ADR 0003** rédigé puis accepté (Bearer token RFC 6750, stockage env var `API_KEYS`, hash Argon2id, rate limiting reporté au Jalon 3, security headers fait main, routes publiques explicites, comparaison constant-time).
+- **`app/core/auth.py`** : dataclasses `APIKeyEntry` et `AuthenticatedKey`, fonctions `parse_api_keys()` / `get_registered_keys()`, dépendance FastAPI `require_api_key`. Vérification via `argon2.PasswordHasher.verify()` (constant-time intrinsèque). Sous-classes `UnauthorizedError(AppError)` (401 + `WWW-Authenticate`) et `ForbiddenError(AppError)` (403, prête pour la révocation future).
+- **`app/core/security_headers.py`** : middleware Starlette qui ajoute 5 headers OWASP à toutes les réponses (X-Content-Type-Options, X-Frame-Options, Referrer-Policy, CSP `default-src 'none'`, HSTS).
+- **`app/core/errors.py`** étendu pour supporter des headers HTTP par exception (via attribut de classe `default_headers` immutable). Permet à `UnauthorizedError` d'attacher `WWW-Authenticate` automatiquement.
+- **`app/core/config.py`** : champ `API_KEYS: str` ajouté.
+- **`scripts/generate_api_key.py`** : script CLI qui produit une clé aléatoire (32 octets URL-safe via `secrets.token_urlsafe`) et son hash Argon2id, avec un message d'aide à coller dans `.env`.
+- **`app/main.py`** : middleware `SecurityHeadersMiddleware` enregistré.
+- **`pyproject.toml`** : dépendance `argon2-cffi` ajoutée. `pip install -e ".[dev]"` pour récupérer.
+- **11 nouveaux tests** : 4 sur `parse_api_keys`, 5 sur `require_api_key` (header manquant, malformé, clé inconnue, clé valide, registre vide), 2 sur le middleware (présence des headers en 200 et en 404). Total : **17 tests verts**.
+- **Docs** : `memo.md` (section Authentification + workflow git), `README.md` (section Authentification avec exemples), `.env.example` (champ `API_KEYS=` documenté).
+
+### Ce que j'ai appris
+
+- **Format Argon2** : `$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>`. La présence de virgules dans la section paramètres exige un séparateur autre que `,` quand on liste plusieurs clés dans une env var. Choix : `;`. Ça paraît anodin mais c'est typiquement le genre de détail qui casse une implémentation au pire moment si on ne le voit pas tôt.
+- **Dépendance FastAPI overridable pour les tests** : en faisant `require_api_key` dépendre de `Depends(get_registered_keys)`, on peut overrider `get_registered_keys` dans les tests via `app.dependency_overrides[get_registered_keys] = lambda: ...`. Pattern propre, pas besoin de monkey-patcher `settings`.
+- **Timing attack en pratique** : `argon2.PasswordHasher.verify()` est constant-time par construction. Pour la comparaison du nom de clé éventuellement exposé en log, utiliser `secrets.compare_digest()`. Référence : https://en.wikipedia.org/wiki/Timing_attack.
+- **Mutable class attributes en Python** : un dict comme `headers: dict = {}` au niveau classe est partagé entre toutes les instances et entre toutes les sous-classes — danger réel si quelqu'un mute. Solution : tuple immuable (`default_headers: tuple[tuple[str, str], ...] = ()`) puis copie en dict dans `__init__`.
+- **Pourquoi `setdefault` dans le middleware** : `response.headers.setdefault(k, v)` n'écrase pas un header déjà posé par la route. Permet à un endpoint spécifique d'imposer une politique CSP plus stricte sans être réécrit par le middleware global.
+- **WWW-Authenticate sur 401** : RFC 6750 §3 exige ce header sur les réponses 401 émises par une API qui accepte le schéma Bearer. Sans, certains clients HTTP refusent même de retenter l'authentification.
+- **`secrets.token_urlsafe(32)` produit ~43 caractères** (256 bits encodés base64url sans padding). Suffisant pour résister au brute-force complet quel que soit le hashage choisi.
+- **Séparation "secure by default"** : on a choisi que les routes soient protégées sauf liste publique explicite. Si on oubliait `dependencies=[Depends(require_api_key)]` en montant un service, FastAPI le servirait sans auth. C'est un risque connu — le mitiger via revue de code et tests sera essentiel quand le projet grossira.
+
+### Limitations acceptées (à reprendre)
+
+- **Pas de rate limiting** — Jalon 3 (Redis).
+- **Pas de scopes / permissions par clé** — toutes les clés actives ont les mêmes droits sur tous les services protégés.
+- **Rotation de clé = redémarrage** (la variable d'env est lue au démarrage du conteneur). À résoudre quand on aura un store DB.
+- **Stockage limité à ~5 clés en pratique** (chaîne d'env var devient pénible à éditer).
+- **Pas d'audit log** des authentifications (succès/échecs). Repoussé au Jalon 6 (observabilité).
+- **Pas de mitigation timing-attack inter-entrées** : le temps total de `_verify_against_registry` dépend du nombre d'entrées dans le registre (pas du contenu, mais ça expose la taille du registre). Acceptable à notre échelle.
+- **Pas de handler pour FastAPI `HTTPException`** — toujours pas utilisé en interne.
+- **Pas de `Server` header masqué** : Starlette ne l'ajoute pas, mais Caddy en Jalon 8 pourrait le faire ; à vérifier alors.

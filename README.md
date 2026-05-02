@@ -62,6 +62,23 @@ app/
 
 **Format d'erreur** : toutes les erreurs API suivent la [RFC 9457 Problem Details](https://www.rfc-editor.org/rfc/rfc9457.html) avec `Content-Type: application/problem+json`.
 
+## Authentification
+
+Toutes les routes hors `/health`, `/docs`, `/redoc`, `/openapi.json` exigent un header `Authorization: Bearer <api_key>` (cf. [ADR 0003](./docs/adr/0003-authentication-strategy.md)).
+
+```powershell
+# Générer une clé API
+python scripts/generate_api_key.py mon-laptop
+
+# Coller la ligne API_KEYS=... dans .env, redémarrer l'API, puis :
+curl -H "Authorization: Bearer <plain_key>" http://localhost:8000/<route>
+```
+
+Les clés sont **stockées hashées** (Argon2id). Plusieurs entrées séparées par `;` :
+```
+API_KEYS=laptop:$argon2id$...;pi-monitor:$argon2id$...
+```
+
 ## Créer un nouveau service
 
-Voir la section "Créer un nouveau service" dans [`memo.md`](./memo.md). En résumé : copier `app/services/_template/`, adapter les schémas et le préfixe, monter le router dans `app/main.py`, écrire les tests.
+Voir la section "Créer un nouveau service" dans [`memo.md`](./memo.md). En résumé : copier `app/services/_template/`, adapter les schémas et le préfixe, monter le router dans `app/main.py` avec `dependencies=[Depends(require_api_key)]`, écrire les tests.
