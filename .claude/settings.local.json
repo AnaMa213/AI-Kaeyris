@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -V)",
+      "Bash(python -m pip --version)",
+      "Bash(git status *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ]
+  }
+}
