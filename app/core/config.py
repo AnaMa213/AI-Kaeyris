@@ -16,5 +16,15 @@ class Settings(BaseSettings):
     RATE_LIMIT_PER_MINUTE: int = 60
     RATE_LIMIT_WINDOW_SECONDS: int = 60
 
+    # LLM adapter — see ADR 0005.
+    # Supported providers (all use the OpenAI-compatible SDK): deepinfra,
+    # openai, groq, ollama, vllm, together, mock.
+    LLM_PROVIDER: str = "deepinfra"
+    LLM_MODEL: str = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    LLM_API_KEY: str = ""
+    LLM_BASE_URL: str = ""
+    LLM_TIMEOUT_SECONDS: float = 60.0
+    LLM_MAX_TOKENS_DEFAULT: int = 1000
+
 
 settings = Settings()
