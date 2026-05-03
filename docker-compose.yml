@@ -1,4 +1,12 @@
 services:
+  redis:
+    image: redis:7-alpine
+    # No host port mapping: Redis is reachable only from the Compose
+    # network (security — see ADR 0004).
+    volumes:
+      - redis-data:/data
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+
   api:
     build:
       context: .
@@ -9,4 +17,25 @@ services:
       - ./app:/app/app
     env_file:
       - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ./app:/app/app
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+    command: ["rq", "worker", "default", "--url", "redis://redis:6379/0"]
+
+volumes:
+  redis-data:
