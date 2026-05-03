@@ -11,5 +11,10 @@ class Settings(BaseSettings):
     # Empty by default → all authenticated routes reject every request.
     API_KEYS: str = ""
 
+    # Async jobs and rate limiting — see ADR 0004.
+    REDIS_URL: str = "redis://localhost:6379/0"
+    RATE_LIMIT_PER_MINUTE: int = 60
+    RATE_LIMIT_WINDOW_SECONDS: int = 60
+
 
 settings = Settings()
