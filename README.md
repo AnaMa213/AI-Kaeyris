@@ -79,6 +79,24 @@ Les clés sont **stockées hashées** (Argon2id). Plusieurs entrées séparées 
 API_KEYS=laptop:$argon2id$...;pi-monitor:$argon2id$...
 ```
 
+## LLM adapter (vendor-neutral)
+
+Voir [ADR 0005](./docs/adr/0005-llm-adapter-and-providers.md). Interface unique `LLMAdapter` (Protocol PEP 544) avec une méthode `complete(system, user, max_tokens)`. Une implémentation `OpenAICompatibleLLMAdapter` couvre tous les providers compatibles OpenAI : **DeepInfra, OpenAI, Groq, Ollama, vLLM, Together AI**.
+
+```bash
+# Cloud DeepInfra (défaut)
+LLM_PROVIDER=deepinfra
+LLM_API_KEY=<your_key>
+
+# Local sur GPU avec Ollama
+LLM_PROVIDER=ollama
+LLM_MODEL=llama3.1:8b-instruct-q4_K_M
+LLM_BASE_URL=http://host.docker.internal:11434/v1
+LLM_API_KEY=ollama-noop
+```
+
+Le code métier ne référence **jamais** un nom de fournisseur — il appelle `LLMAdapter.complete()`. Le prompt système (style narratif, formel, technique…) est défini par chaque service dans son propre module. Détails dans [`memo.md`](./memo.md) et [`Jalon4.md`](./Jalon4.md).
+
 ## Async jobs et rate limiting
 
 Voir [ADR 0004](./docs/adr/0004-async-jobs-and-rate-limiting.md). Stack : **Redis 7 + RQ**, une queue `default`, retry exponentiel sur erreurs transient, TTL résultats 24h / échecs 7j.

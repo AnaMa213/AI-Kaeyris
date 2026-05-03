@@ -134,3 +134,45 @@
 - **Race condition microscopique** sur le sliding window (ZREMRANGEBYSCORE → ZCARD → ZADD non atomique). À notre échelle, négligeable. À résoudre via script Lua si besoin.
 - **Worker pas de hot-reload** : RQ ne le supporte pas, workaround manuel.
 - **Pas de monitoring** des jobs (rq-dashboard, Prometheus exporter) : reporté Jalon 6.
+
+---
+
+## 2026-05-02 — Jalon 4 : Adapters + Spec Kit intro
+
+### Ce qui a été fait
+
+- **ADR 0005** rédigé puis accepté (LLMAdapter via `typing.Protocol`, SDK `openai>=1.50` pour 6+ providers compatibles, méthode unique `complete(system, user, max_tokens)`, MockLLMAdapter pour tests, factory paramétrée par env vars, mapping HTTP → TransientLLMError/PermanentLLMError).
+- **`app/adapters/llm.py`** : interface `LLMAdapter` (Protocol), `OpenAICompatibleLLMAdapter` paramétrable (DeepInfra/Ollama/Groq/vLLM/Together/OpenAI), `MockLLMAdapter` déterministe, factory `build_llm_adapter()` + `get_llm_adapter()` (FastAPI dependency, cache `lru_cache`).
+- **Tableau des `_DEFAULT_BASE_URLS`** : 6 providers OpenAI-compatibles préconfigurés.
+- **Hiérarchie d'erreurs** : `LLMError` racine, `TransientLLMError` (5xx, timeout, 429), `PermanentLLMError` (4xx hors 429, auth invalide, prompt malformé).
+- **`app/jobs/llm.py::llm_complete`** : premier vrai job, générique (`system` + `user` paramètres), mapping `LLMError` → `JobError` pour que la retry policy de RQ s'applique.
+- **`app/core/config.py`** : 6 nouvelles env vars `LLM_*`.
+- **`.env.example`** : section LLM avec exemple Ollama commenté pour le RTX 4090.
+- **`pyproject.toml`** : dépendance `openai>=1.50`.
+- **18 nouveaux tests** : 14 sur l'adapter (Mock, factory, error mapping pour 8 types d'erreurs OpenAI), 4 sur le job (mock, transient mapping, permanent mapping). **47 tests verts** au total.
+- **Doc** : `memo.md` (section LLM adapter avec switching cloud/Ollama), `README.md` (section vendor-neutral), `Jalon4.md` (walkthrough en cours).
+
+### Ce que j'ai appris
+
+- **`Protocol` (PEP 544) vs `ABC`** : `Protocol` permet le **structural subtyping** — une classe est un `LLMAdapter` si elle a les bonnes méthodes, **sans héritage explicite**. C'est plus pythonique, mieux outillé par mypy/pyright, et plus naturel pour des mocks de test (pas besoin d'hériter pour mocker). Réf : https://peps.python.org/pep-0544/.
+- **Pourquoi `complete(system, user)` et pas `summarize(text)`** : le résumé est une **stratégie métier** (style narratif JDR vs formel réunion vs technique notes) — son template appartient au service, pas à l'adapter. Mettre `summarize` dans l'adapter casserait la séparation services/adapters de CLAUDE.md §2.4. Cette discussion en cours de jalon a clarifié le pattern et conduit à simplifier l'interface.
+- **Un seul SDK pour 6 providers** : DeepInfra, Ollama, vLLM, Groq, Together AI, OpenAI exposent **tous** une API compatible OpenAI. Le SDK `openai` Python paramétré par `base_url` couvre tout. Gros multiplicateur : on apprend une API, on accède à tout l'écosystème.
+- **Mapping HTTP → exceptions de l'adapter** : le SDK `openai` expose des classes typées (`AuthenticationError`, `RateLimitError`, `InternalServerError`…). On les attrape catégoriquement (transient vs permanent) et on remap vers nos exceptions. Cohérent avec la retry policy ADR 0004 : `TransientLLMError` → `TransientJobError` → RQ retry, `PermanentLLMError` → `PermanentJobError` → fail franc.
+- **`asyncio.run` dans un job RQ sync** : RQ exécute des jobs sync, mais le SDK `openai` moderne est async. On franchit la frontière par `asyncio.run(adapter.complete(...))`. Coût : ~5 ms par appel (création d'event loop), négligeable face à des appels LLM de plusieurs secondes.
+- **`lru_cache(maxsize=1)` sur la factory** : un seul adapter par processus → connection pool partagé du `AsyncOpenAI`. Pour les tests, `get_llm_adapter.cache_clear()` à invoquer (fixture `autouse=True`).
+- **Logging des `usage` tokens** : DeepInfra/OpenAI renvoient `prompt_tokens`, `completion_tokens` dans la réponse. On les logge mais on ne les expose pas dans la signature de `complete` (YAGNI). Antichambre du tracking de coûts du Jalon 6.
+- **Distinction "providers locaux" vs "cloud"** : Ollama et vLLM tolèrent une clé bidon (placeholder), DeepInfra/OpenAI exigent une vraie clé. La factory ne lève pas d'erreur sur clé vide pour ollama/vllm.
+- **Construction d'instances `APIStatusError` en tests** : les exceptions OpenAI demandent un objet `Response` réel à leur constructeur. Pour les tests, on bypass via `cls.__new__(cls)` + setattr manuel des champs (status_code, message, body…). Pratique pour tester le mapping sans monter un serveur HTTP.
+- **`monkeypatch.setattr` sur `app.adapters.llm.settings.LLM_PROVIDER`** plutôt que sur `app.core.config.settings.LLM_PROVIDER` : il faut viser le **nom local** dans le module qui le lit, pas le module source. Sinon le patch ne s'applique pas (binding au moment de l'import).
+- **Switching cloud → local sans rebuild Docker** : 3 lignes de `.env` à modifier puis `docker compose down && up`. C'est exactement ce que le pattern Adapter promet, validé en pratique.
+
+### Limitations acceptées
+
+- **Pas de streaming** (`complete_stream`) : pas d'UI temps réel à ce stade ; coût futur ~30 lignes.
+- **Pas d'`embed` ni de `chat` multi-tour** dans l'interface : YAGNI, à introduire selon les besoins du Jalon 5+.
+- **Pas de `count_tokens` exposé** : utile pour estimer le coût avant l'appel ; à introduire au besoin.
+- **Pas de fallback automatique** (cloud → local en cas d'échec) : pattern Decorator faisable plus tard, repoussé au Jalon 9.
+- **Pas de validation du modèle au build de l'adapter** : si `LLM_MODEL` est inexistant chez le provider, l'erreur sort à la première requête (404 → PermanentLLMError). Acceptable.
+- **`MockLLMAdapter` ne simule pas la latence** ni les erreurs : si on veut tester un timeout, on patche directement l'adapter dans le test.
+- **Pas d'audit log des appels LLM** côté DB ou métriques agrégées : log structuré seulement, agrégation au Jalon 6.
+- **Spec Kit non installé** : introduction documentaire dans `Jalon4.md`. À essayer en pratique au Jalon 5 si une feature complexe le justifie.

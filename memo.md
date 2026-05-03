@@ -231,6 +231,63 @@ Réponse en cas de dépassement : 429 + `Retry-After: <seconds>` + body Problem 
 
 ---
 
+## LLM adapter (Jalon 4 — ADR 0005)
+
+### Stack
+| Élément | Valeur |
+|---|---|
+| Interface | `LLMAdapter` (typing.Protocol, PEP 544) |
+| Méthode unique | `complete(*, system: str, user: str, max_tokens: int) -> str` |
+| Implémentation cloud | `OpenAICompatibleLLMAdapter` (DeepInfra, OpenAI, Groq, vLLM, Together AI, Ollama) |
+| Implémentation tests | `MockLLMAdapter` (déterministe, sans réseau) |
+| SDK | `openai>=1.50` (couvre tous les providers compatibles OpenAI) |
+| Erreurs | `LLMError` racine, `TransientLLMError` (retry), `PermanentLLMError` (no retry) |
+| Premier job | `app/jobs/llm.py::llm_complete(system, user, max_tokens)` |
+
+### Switcher de provider en 3 lignes (`.env`)
+
+```
+# Cloud DeepInfra (par défaut)
+LLM_PROVIDER=deepinfra
+LLM_MODEL=meta-llama/Meta-Llama-3.1-8B-Instruct
+LLM_API_KEY=<ta_clé_deepinfra>
+
+# OU local sur RTX 4090 + Ollama
+LLM_PROVIDER=ollama
+LLM_MODEL=llama3.1:8b-instruct-q4_K_M
+LLM_BASE_URL=http://host.docker.internal:11434/v1
+LLM_API_KEY=ollama-noop          # placeholder, Ollama l'ignore
+```
+
+### Pattern d'utilisation depuis un service
+
+```python
+# app/services/<feature>/logic.py
+SYSTEM_PROMPT = "Tu es un résumeur narratif..."  # style propre au service
+
+from app.jobs.llm import llm_complete
+from app.jobs import enqueue_job, get_default_queue
+
+queue = get_default_queue(redis_client)
+job = enqueue_job(
+    queue, llm_complete,
+    system=SYSTEM_PROMPT, user=transcript, max_tokens=1500,
+)
+```
+
+### Pourquoi un seul `complete` (et pas `summarize`/`chat`/...)
+Le **prompt système est de la logique métier**, pas de la responsabilité de l'adapter (CLAUDE.md §2.4). Chaque service met son prompt dans `app/services/<feature>/logic.py` et appelle `complete(system, user)`.
+
+### Démarrer Ollama en local (RTX 4090)
+```powershell
+# Installer Ollama : https://ollama.com/download
+ollama pull llama3.1:8b-instruct-q4_K_M
+ollama serve                       # tourne sur localhost:11434
+# Puis docker compose up : depuis le conteneur, host.docker.internal:11434 résout vers l'host
+```
+
+---
+
 ## Workflow git
 
 | Jalon courant | Stratégie | Pourquoi |
