@@ -164,6 +164,73 @@ curl -H "Authorization: Bearer <plain_key>" http://localhost:8000/<route>
 
 ---
 
+## Async jobs et rate limiting (Jalon 3 — ADR 0004)
+
+### Stack
+| Élément | Valeur |
+|---|---|
+| Lib queue | RQ — https://python-rq.org |
+| Broker | Redis 7 (image `redis:7-alpine`) |
+| URL | `redis://redis:6379/0` (Compose) ; `redis://localhost:6379/0` (dev local) |
+| Queue | `default` (une seule pour ce jalon) |
+| TTL résultats | 24h succès / 7j échecs |
+| Retry policy | 3 essais, backoff `[10s, 30s, 90s]` (transient errors uniquement) |
+
+### Écrire un nouveau job
+```python
+# app/jobs/<topic>.py
+from app.jobs import TransientJobError, PermanentJobError
+
+def my_job(arg1: int, arg2: str) -> dict:
+    # Logique pure, args sérialisables (types primitifs ou dataclasses simples).
+    # Lever TransientJobError pour les échecs réseau/timeout (retry).
+    # Lever PermanentJobError pour les erreurs définitives (pas de retry).
+    return {"result": ...}
+```
+
+### Enqueuer depuis un service
+```python
+from app.jobs import enqueue_job, get_default_queue
+from app.jobs.my_topic import my_job
+
+queue = get_default_queue(redis_client)
+job = enqueue_job(queue, my_job, arg1, arg2)
+return {"job_id": job.id}    # 202 Accepted
+```
+
+### Lancer Redis et un worker en local
+```powershell
+# Redis seul (hybride : Redis Docker, API venv)
+docker run -d -p 6379:6379 --name kaeyris-redis redis:7-alpine
+
+# Worker dans le venv (lit REDIS_URL depuis .env)
+.venv\Scripts\Activate.ps1
+rq worker default --url $env:REDIS_URL
+
+# OU tout en Compose
+docker compose up --build
+```
+
+### Inspecter les jobs
+```powershell
+# Stats globales
+docker compose exec redis redis-cli  # puis : KEYS * / LLEN rq:queue:default
+rq info --url redis://localhost:6379/0
+
+# Jobs échoués (FailedJobRegistry)
+rq info --url redis://localhost:6379/0 --queues default
+```
+
+### Rate limiting
+Sliding window Redis, 60 req/min par API key. Activer sur un router :
+```python
+from app.core.rate_limit import enforce_rate_limit
+app.include_router(svc.router, dependencies=[Depends(enforce_rate_limit)])
+```
+Réponse en cas de dépassement : 429 + `Retry-After: <seconds>` + body Problem Details.
+
+---
+
 ## Workflow git
 
 | Jalon courant | Stratégie | Pourquoi |

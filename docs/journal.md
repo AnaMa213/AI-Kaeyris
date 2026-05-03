@@ -93,3 +93,44 @@
 - **Pas de mitigation timing-attack inter-entrées** : le temps total de `_verify_against_registry` dépend du nombre d'entrées dans le registre (pas du contenu, mais ça expose la taille du registre). Acceptable à notre échelle.
 - **Pas de handler pour FastAPI `HTTPException`** — toujours pas utilisé en interne.
 - **Pas de `Server` header masqué** : Starlette ne l'ajoute pas, mais Caddy en Jalon 8 pourrait le faire ; à vérifier alors.
+
+---
+
+## 2026-05-02 — Jalon 3 : Async processing
+
+### Ce qui a été fait
+
+- **ADR 0004** rédigé puis accepté (RQ, Redis, machinerie pure + jobs factices, retry transient/permanent, TTLs 24h/7j, idempotence = discipline dev, **rate limiting maintenant** via sliding window Redis).
+- **`app/core/redis_client.py`** : factory `get_redis()` (FastAPI dependency) avec cache `lru_cache` pour partager une seule connexion.
+- **`app/core/rate_limit.py`** : algorithme sliding window via `ZREMRANGEBYSCORE` + `ZCARD` + `ZADD`, dépendance `enforce_rate_limit` chaînée à `require_api_key`. Exception `RateLimitedError` (429 + header `Retry-After`).
+- **`app/jobs/__init__.py`** : helpers `get_default_queue()`, `enqueue_job()` qui applique TTLs et `Retry(max=3, interval=[10,30,90])`. Exceptions `TransientJobError` / `PermanentJobError` (documentaires).
+- **`app/jobs/demo.py`** : jobs `add(a, b)` et `simulate_long_task(s)` pour valider l'infra.
+- **`app/core/config.py`** : champs `REDIS_URL`, `RATE_LIMIT_PER_MINUTE`, `RATE_LIMIT_WINDOW_SECONDS`.
+- **`docker-compose.yml`** : passage de 1 à 3 services (`redis`, `api`, `worker`). Redis non exposé sur l'host. Volume persistant `redis-data`.
+- **`pyproject.toml`** : dépendances `redis>=5.0`, `rq>=2.0` (runtime) et `fakeredis` (dev).
+- **`.env.example`** : `REDIS_URL`, `RATE_LIMIT_*` documentés.
+- **12 nouveaux tests** : 3 sur l'algorithme rate limit, 3 sur la dépendance `enforce_rate_limit` (allow / block / 401 prioritaire sur 429), 2 sur `add()` direct, 4 sur la policy d'enqueue (TTLs et retry). Total : **29 tests verts**.
+- **Docs** : `memo.md` (sections async jobs et rate limit), `README.md` (mention 3 services Compose + commandes), `docs/journal.md` (cette entrée), `Jalon3.md` (walkthrough).
+
+### Ce que j'ai appris
+
+- **Découplage processus API ↔ worker** : ils partagent la même image Docker mais sont deux processus avec des entrypoints différents (`uvicorn` vs `rq worker`). Le worker doit pouvoir importer le code des jobs (`app.jobs.demo.add`) → `WORKDIR /app` + bind-mount `./app:/app/app` rendent ça transparent.
+- **Sérialisation des arguments de jobs** : RQ pickle les arguments pour les stocker dans Redis. Tu ne peux pas passer un objet "vivant" (connection DB, FastAPI Request, instance avec lambdas, etc.). Discipline : passer **uniquement des types primitifs ou des dataclasses simples**. C'est exactement la même contrainte que pour les paramètres d'un appel REST — pas un hasard.
+- **Sliding window vs fixed window** : avec un fixed window, un client peut burst 60 req à 11h59:59 + 60 req à 12h00:00 = 120 req en 2 secondes. Sliding window évite ce comportement en mesurant les N dernières secondes glissantes. Coût : un sorted set Redis au lieu d'un compteur INCR. ~5 lignes de plus pour ce gain.
+- **fakeredis** : émule Redis en mémoire pour les tests. API compatible avec `redis-py`. 0 setup, 0 démarrage, parfait pour 95% des tests. Limite : ne reproduit pas tous les comportements low-level (cluster, pubsub avancé) — pour ces cas, tester contre un vrai Redis.
+- **Ordre des dépendances FastAPI** : `enforce_rate_limit` dépend de `require_api_key`. Si la requête arrive sans auth, le 401 sort **avant** que le rate limit ne s'évalue. C'est voulu : un attaquant non authentifié ne pollue pas le bucket d'une vraie clé.
+- **Cache des dépendances FastAPI par requête** : `Depends(require_api_key)` peut apparaître plusieurs fois dans une même requête (ex : ajouté à `dependencies=` ET à un `enforce_rate_limit` qui lui-même dépend de `require_api_key`) ; FastAPI cache le résultat pour la requête, ça ne tourne qu'une fois. Argon2 verify (lent) n'est donc pas répété.
+- **`secrets.token_hex(8)` + timestamp** comme membre du sorted set : on ajoute toujours un membre **unique**, sinon `ZADD` agit comme un update du score. L'unicité garantit que chaque requête est compté.
+- **Pourquoi pas de `--reload` pour le worker** : RQ ne propose pas le hot-reload. Workaround dev : `rq worker --burst` qui sort une fois la queue vide, à relancer après chaque modif. Ou `rq worker` simple + Ctrl+C / restart. Acceptable au rythme actuel.
+- **`depends_on` dans Compose ne garantit pas la disponibilité** du service : Redis peut être démarré mais pas encore prêt à accepter des connexions quand l'API démarre. `redis-py` et `rq` gèrent les retry de connexion eux-mêmes — pas besoin d'un healthcheck Compose.
+- **`save 60 1` dans Redis** : snapshot toutes les 60s s'il y a au moins 1 modification. Évite la perte totale en cas de redémarrage du conteneur. Pas de l'AOF (append-only file), qui serait surdimensionné pour notre usage.
+
+### Limitations acceptées
+
+- **Pas de retry jitter** (anti-troupeau) : risque théorique avec un seul worker, négligeable. À ajouter quand on aura plusieurs workers.
+- **Pas de scheduling cron-like** : pas de `rq-scheduler` installé. Si besoin futur (ex : ménage périodique des résultats), à introduire.
+- **Pas d'endpoint statut central des jobs** : repoussé à Jalon 4-5 quand on aura un vrai cas d'usage.
+- **Pas d'idempotency key généralisée** : repoussé à Jalon 5.
+- **Race condition microscopique** sur le sliding window (ZREMRANGEBYSCORE → ZCARD → ZADD non atomique). À notre échelle, négligeable. À résoudre via script Lua si besoin.
+- **Worker pas de hot-reload** : RQ ne le supporte pas, workaround manuel.
+- **Pas de monitoring** des jobs (rq-dashboard, Prometheus exporter) : reporté Jalon 6.

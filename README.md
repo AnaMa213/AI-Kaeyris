@@ -79,6 +79,24 @@ Les clés sont **stockées hashées** (Argon2id). Plusieurs entrées séparées 
 API_KEYS=laptop:$argon2id$...;pi-monitor:$argon2id$...
 ```
 
+## Async jobs et rate limiting
+
+Voir [ADR 0004](./docs/adr/0004-async-jobs-and-rate-limiting.md). Stack : **Redis 7 + RQ**, une queue `default`, retry exponentiel sur erreurs transient, TTL résultats 24h / échecs 7j.
+
+```powershell
+# Tout en Compose (3 services : redis, api, worker)
+docker compose up --build
+
+# OU dev hybride : Redis en Docker, API + worker en venv local
+docker run -d -p 6379:6379 --name kaeyris-redis redis:7-alpine
+uvicorn app.main:app --reload                # terminal 1
+rq worker default --url $env:REDIS_URL       # terminal 2
+```
+
+Un nouveau job se crée dans `app/jobs/<topic>.py` puis s'enqueue via `enqueue_job(queue, func, *args)`. Détails dans [`memo.md`](./memo.md).
+
+**Rate limiting** : 60 req/min par API key (configurable via `RATE_LIMIT_PER_MINUTE`). Activer sur un router avec `dependencies=[Depends(enforce_rate_limit)]`.
+
 ## Créer un nouveau service
 
-Voir la section "Créer un nouveau service" dans [`memo.md`](./memo.md). En résumé : copier `app/services/_template/`, adapter les schémas et le préfixe, monter le router dans `app/main.py` avec `dependencies=[Depends(require_api_key)]`, écrire les tests.
+Voir la section "Créer un nouveau service" dans [`memo.md`](./memo.md). En résumé : copier `app/services/_template/`, adapter les schémas et le préfixe, monter le router dans `app/main.py` avec `dependencies=[Depends(require_api_key), Depends(enforce_rate_limit)]`, écrire les tests.
