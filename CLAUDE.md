@@ -261,3 +261,8 @@ Deux fichiers dans `docs/`, complémentaires et tenus à jour par Claude :
 - Ne jamais dupliquer `CLAUDE.md` — y faire référence.
 - Pas d'historique des jalons dans ces fichiers (cela va dans `docs/journal.md`).
 - Mettre à jour dans la même session que le changement qui les concerne.
+
+<!-- SPECKIT START -->
+For additional context about technologies to be used, project structure,
+shell commands, and other important information, read the current plan
+<!-- SPECKIT END -->

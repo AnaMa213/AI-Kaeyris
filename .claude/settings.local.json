@@ -18,7 +18,16 @@
       "PowerShell(pytest -v)",
       "PowerShell(pip install -e \".[dev]\")",
       "PowerShell(python scripts/generate_api_key.py demo)",
-      "PowerShell(pip install fakeredis)"
+      "PowerShell(pip install fakeredis)",
+      "Bash(where.exe uv *)",
+      "Bash(uv --version)",
+      "PowerShell(uv --version)",
+      "PowerShell($env:PATH = \"$env:USERPROFILE\\\\.local\\\\bin;$env:PATH\"; uv tool install specify-cli --from git+https://github.com/github/spec-kit.git 2>&1)",
+      "PowerShell($env:PATH = \"$env:USERPROFILE\\\\.local\\\\bin;$env:PATH\"; specify init --help 2>&1)",
+      "PowerShell($env:PATH = \"$env:USERPROFILE\\\\.local\\\\bin;$env:PATH\"; specify init --here --integration claude --no-git --script ps --force 2>&1)",
+      "PowerShell($env:PATH = \"$env:USERPROFILE\\\\.local\\\\bin;$env:PATH\"; $env:PYTHONIOENCODING = \"utf-8\"; $env:PYTHONUTF8 = \"1\"; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; specify init --here --integration claude --no-git --script ps --force 2>&1)",
+      "PowerShell(pytest -q)",
+      "Bash(git rm *)"
     ]
   }
 }

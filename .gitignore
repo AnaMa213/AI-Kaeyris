@@ -22,3 +22,11 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Claude Code (worktrees temporaires, jamais à commiter)
+.claude/worktrees/
+
+# Spec Kit (cache et fichiers temporaires d'agent uniquement ;
+# .specify/ et .claude/skills/ restent trackés volontairement pour la pédagogie)
+.specify/cache/
+.specify/.tmp/
