@@ -30,3 +30,11 @@ Thumbs.db
 # .specify/ et .claude/skills/ restent trackés volontairement pour la pédagogie)
 .specify/cache/
 .specify/.tmp/
+
+# Local data (Jalon 5) — SQLite DB, audios en cours de transcription, etc.
+# Le dossier lui-même est tracké via data/.gitkeep mais son contenu non.
+data/*
+!data/.gitkeep
+!data/audios/
+data/audios/*
+!data/audios/.gitkeep
