@@ -27,7 +27,11 @@
       "PowerShell($env:PATH = \"$env:USERPROFILE\\\\.local\\\\bin;$env:PATH\"; specify init --here --integration claude --no-git --script ps --force 2>&1)",
       "PowerShell($env:PATH = \"$env:USERPROFILE\\\\.local\\\\bin;$env:PATH\"; $env:PYTHONIOENCODING = \"utf-8\"; $env:PYTHONUTF8 = \"1\"; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; specify init --here --integration claude --no-git --script ps --force 2>&1)",
       "PowerShell(pytest -q)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "PowerShell(& .\\\\.specify\\\\scripts\\\\powershell\\\\check-prerequisites.ps1 -Json -PathsOnly)",
+      "PowerShell($env:SPECIFY_FEATURE = \"001-kaeyris-jdr\"; & .\\\\.specify\\\\scripts\\\\powershell\\\\check-prerequisites.ps1 -Json -PathsOnly)",
+      "PowerShell($env:SPECIFY_FEATURE = \"001-kaeyris-jdr\"; & .\\\\.specify\\\\scripts\\\\powershell\\\\setup-plan.ps1 -Json)",
+      "PowerShell($env:SPECIFY_FEATURE = \"001-kaeyris-jdr\"; & .\\\\.specify\\\\scripts\\\\powershell\\\\setup-tasks.ps1 -Json)"
     ]
   }
 }
