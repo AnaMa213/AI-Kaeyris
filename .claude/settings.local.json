@@ -31,7 +31,12 @@
       "PowerShell(& .\\\\.specify\\\\scripts\\\\powershell\\\\check-prerequisites.ps1 -Json -PathsOnly)",
       "PowerShell($env:SPECIFY_FEATURE = \"001-kaeyris-jdr\"; & .\\\\.specify\\\\scripts\\\\powershell\\\\check-prerequisites.ps1 -Json -PathsOnly)",
       "PowerShell($env:SPECIFY_FEATURE = \"001-kaeyris-jdr\"; & .\\\\.specify\\\\scripts\\\\powershell\\\\setup-plan.ps1 -Json)",
-      "PowerShell($env:SPECIFY_FEATURE = \"001-kaeyris-jdr\"; & .\\\\.specify\\\\scripts\\\\powershell\\\\setup-tasks.ps1 -Json)"
+      "PowerShell($env:SPECIFY_FEATURE = \"001-kaeyris-jdr\"; & .\\\\.specify\\\\scripts\\\\powershell\\\\setup-tasks.ps1 -Json)",
+      "PowerShell(pip install -e \".[dev]\" 2>&1)",
+      "PowerShell(alembic init -t async migrations 2>&1)",
+      "PowerShell(alembic current 2>&1)",
+      "PowerShell(alembic upgrade head 2>&1)",
+      "PowerShell(pytest -q 2>&1)"
     ]
   }
 }
