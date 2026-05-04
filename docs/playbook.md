@@ -2,7 +2,7 @@
 
 > Guide général, applicable à n'importe quel projet sérieux (API, portail, app scalable, plateforme).
 > Format = questions / commandes / pièges. Ne pas surcharger.
-> Pour la vision du projet courant : [`CLAUDE.md`](./CLAUDE.md). Pour le mémo technique (commandes + raisons) : [`memo.md`](./memo.md).
+> Pour la vision du projet courant : [`CLAUDE.md`](../CLAUDE.md). Pour le mémo technique (commandes + raisons) : [`memo.md`](./memo.md).
 
 ---
 

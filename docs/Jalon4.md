@@ -63,7 +63,7 @@ C'est le jalon où le projet rencontre **enfin** son métier : appeler un LLM. T
 
 ### Ce qui a été fait
 
-Rédaction de [`docs/adr/0005-llm-adapter-and-providers.md`](./docs/adr/0005-llm-adapter-and-providers.md). 10 décisions :
+Rédaction de [`docs/adr/0005-llm-adapter-and-providers.md`](./adr/0005-llm-adapter-and-providers.md). 10 décisions :
 
 1. Interface `typing.Protocol` (PEP 544)
 2. **Une seule méthode** `complete(system, user, max_tokens)` *(décision affinée en cours de jalon — voir étape 5)*
@@ -96,7 +96,7 @@ C'est le genre de question structurante qu'on attrape en concevant l'ADR avant d
 
 ### Ce qui a été fait
 
-Ajout dans [`pyproject.toml`](./pyproject.toml) :
+Ajout dans [`pyproject.toml`](../pyproject.toml) :
 ```toml
 dependencies = [
     ...
@@ -138,7 +138,7 @@ Faire `httpx` direct nous obligerait à réimplémenter ~200 lignes de logique c
 
 ### Ce qui a été fait
 
-6 nouveaux champs dans [`app/core/config.py`](./app/core/config.py) :
+6 nouveaux champs dans [`app/core/config.py`](../app/core/config.py) :
 
 ```python
 LLM_PROVIDER: str = "deepinfra"
@@ -149,7 +149,7 @@ LLM_TIMEOUT_SECONDS: float = 60.0
 LLM_MAX_TOKENS_DEFAULT: int = 1000
 ```
 
-Documentés dans [`.env.example`](./.env.example) avec un exemple Ollama commenté pour le RTX 4090.
+Documentés dans [`.env.example`](../.env.example) avec un exemple Ollama commenté pour le RTX 4090.
 
 ### Pourquoi `LLM_API_KEY` séparé d'`API_KEYS` (Jalon 2)
 
@@ -180,7 +180,7 @@ C'est un compromis : on perd un peu de type safety au profit d'extensibilité. A
 
 ### Ce qui a été fait
 
-Dans [`app/adapters/llm.py`](./app/adapters/llm.py) :
+Dans [`app/adapters/llm.py`](../app/adapters/llm.py) :
 
 ```python
 from typing import Protocol

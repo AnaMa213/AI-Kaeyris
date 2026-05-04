@@ -59,7 +59,7 @@ Référence : OWASP API Security Top 10 — https://owasp.org/API-Security/
 
 ### Ce qui a été fait
 
-Rédaction de [`docs/adr/0003-authentication-strategy.md`](./docs/adr/0003-authentication-strategy.md). 6 décisions structurantes :
+Rédaction de [`docs/adr/0003-authentication-strategy.md`](./adr/0003-authentication-strategy.md). 6 décisions structurantes :
 
 1. Bearer token (RFC 6750)
 2. Stockage env var (à reconsidérer Jalon 5 pour DB)
@@ -84,7 +84,7 @@ C'est typiquement le genre de détail qui surgit pendant la conception et qu'on 
 
 ### Ce qui a été fait
 
-Ajout dans [`pyproject.toml`](./pyproject.toml) :
+Ajout dans [`pyproject.toml`](../pyproject.toml) :
 
 ```toml
 dependencies = [
@@ -125,7 +125,7 @@ OWASP le recommande comme premier choix pour 2024+ : https://cheatsheetseries.ow
 
 ### Ce qui a été fait
 
-Modification de [`app/core/errors.py`](./app/core/errors.py) :
+Modification de [`app/core/errors.py`](../app/core/errors.py) :
 
 - Ajout d'un attribut de classe `default_headers: tuple[tuple[str, str], ...] = ()` à `AppError`
 - Le constructeur copie ces defaults dans un attribut d'instance `self.headers: dict[str, str]`, mergé avec un éventuel paramètre `headers=...`
@@ -165,7 +165,7 @@ Sans ce header, certains clients HTTP refusent même de retenter l'authentificat
 
 ### Ce qui a été fait
 
-Création de [`app/core/auth.py`](./app/core/auth.py). Composants :
+Création de [`app/core/auth.py`](../app/core/auth.py). Composants :
 
 #### Exceptions
 ```python
@@ -251,7 +251,7 @@ Principe **secure by default**. Sans cette vérification, un opérateur qui oubl
 
 ### Ce qui a été fait
 
-Middleware Starlette dans [`app/core/security_headers.py`](./app/core/security_headers.py) qui ajoute :
+Middleware Starlette dans [`app/core/security_headers.py`](../app/core/security_headers.py) qui ajoute :
 
 | Header | Valeur | Rôle |
 |---|---|---|
@@ -292,13 +292,13 @@ Référence : OWASP Secure Headers Project — https://owasp.org/www-project-sec
 
 ### Ce qui a été fait
 
-Ajout d'un champ Pydantic Settings dans [`app/core/config.py`](./app/core/config.py) :
+Ajout d'un champ Pydantic Settings dans [`app/core/config.py`](../app/core/config.py) :
 
 ```python
 API_KEYS: str = ""
 ```
 
-Et dans [`.env.example`](./.env.example) :
+Et dans [`.env.example`](../.env.example) :
 
 ```
 API_KEYS=
@@ -326,7 +326,7 @@ Pour que `parse_api_keys()` puisse l'accepter sans `None` checks supplémentaire
 
 ### Ce qui a été fait
 
-Script CLI dans [`scripts/generate_api_key.py`](./scripts/generate_api_key.py) :
+Script CLI dans [`scripts/generate_api_key.py`](../scripts/generate_api_key.py) :
 
 ```bash
 python scripts/generate_api_key.py mon-laptop
@@ -374,7 +374,7 @@ Ces deux caractères sont les séparateurs du format env var. Si on les autorisa
 
 ### Ce qui a été fait
 
-Ajout de 2 lignes dans [`app/main.py`](./app/main.py) :
+Ajout de 2 lignes dans [`app/main.py`](../app/main.py) :
 
 ```python
 from app.core.security_headers import SecurityHeadersMiddleware

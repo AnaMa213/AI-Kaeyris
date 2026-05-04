@@ -61,7 +61,7 @@ La solution : **enqueue + worker en arrière-plan + statut consultable**.
 
 ### Ce qui a été fait
 
-Rédaction de [`docs/adr/0004-async-jobs-and-rate-limiting.md`](./docs/adr/0004-async-jobs-and-rate-limiting.md). 8 décisions :
+Rédaction de [`docs/adr/0004-async-jobs-and-rate-limiting.md`](./adr/0004-async-jobs-and-rate-limiting.md). 8 décisions :
 
 1. RQ comme lib (déjà acté CLAUDE.md §3)
 2. Périmètre : machinerie + jobs factices, pas de vrai service async
@@ -84,7 +84,7 @@ Pendant la rédaction, on a aussi tranché des sous-questions concrètes : "rate
 
 ### Ce qui a été fait
 
-Ajouts dans [`pyproject.toml`](./pyproject.toml) :
+Ajouts dans [`pyproject.toml`](../pyproject.toml) :
 
 ```toml
 dependencies = [
@@ -124,7 +124,7 @@ Limites : ne reproduit pas certains comportements low-level (cluster, transactio
 
 ## 4. Étape 2 — Configuration et client Redis
 
-### Configuration ([`app/core/config.py`](./app/core/config.py))
+### Configuration ([`app/core/config.py`](../app/core/config.py))
 
 ```python
 REDIS_URL: str = "redis://localhost:6379/0"
@@ -134,7 +134,7 @@ RATE_LIMIT_WINDOW_SECONDS: int = 60
 
 3 nouveaux champs, tous configurables via env var (12-Factor §III). Le défaut `localhost:6379` correspond au cas dev hybride (Redis Docker, API venv). En Compose, surchargé par `REDIS_URL=redis://redis:6379/0`.
 
-### Client ([`app/core/redis_client.py`](./app/core/redis_client.py))
+### Client ([`app/core/redis_client.py`](../app/core/redis_client.py))
 
 ```python
 @lru_cache(maxsize=1)
@@ -168,7 +168,7 @@ Pour permettre l'override en tests via `app.dependency_overrides[get_redis] = la
 
 ### Ce qui a été fait
 
-[`app/core/rate_limit.py`](./app/core/rate_limit.py) implémente :
+[`app/core/rate_limit.py`](../app/core/rate_limit.py) implémente :
 
 - `_check_and_record(redis, bucket, *, limit, window_seconds) -> (allowed, retry_after)`
 - `enforce_rate_limit(auth, redis_client) -> AuthenticatedKey` — la dépendance FastAPI
@@ -270,7 +270,7 @@ Le header `Retry-After` est défini par **RFC 9110 §10.2.3** — https://www.rf
 
 ### Ce qui a été fait
 
-[`app/jobs/__init__.py`](./app/jobs/__init__.py) expose :
+[`app/jobs/__init__.py`](../app/jobs/__init__.py) expose :
 
 - `TransientJobError` / `PermanentJobError` (documentaires)
 - `get_default_queue(redis_client) -> Queue`
@@ -331,7 +331,7 @@ def my_job():
 
 ## 7. Étape 5 — Jobs de démonstration
 
-[`app/jobs/demo.py`](./app/jobs/demo.py) contient :
+[`app/jobs/demo.py`](../app/jobs/demo.py) contient :
 
 ```python
 def add(a: int, b: int) -> int:
@@ -370,7 +370,7 @@ Le test `test_add_propagates_type_error` documente explicitement ce contrat.
 
 Un seul service `api`.
 
-### Après ([docker-compose.yml](./docker-compose.yml))
+### Après ([docker-compose.yml](../docker-compose.yml))
 
 ```yaml
 services:

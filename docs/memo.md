@@ -1,7 +1,7 @@
 # Memo — commandes & raisons
 
 > Aide-mémoire technique : commandes essentielles + raisons des choix techno (1 ligne).
-> Pour la méthodo générale : [`playbook.md`](./playbook.md). Pour la vision projet : [`CLAUDE.md`](./CLAUDE.md).
+> Pour la méthodo générale : [`playbook.md`](./playbook.md). Pour la vision projet : [`CLAUDE.md`](../CLAUDE.md).
 
 ---
 

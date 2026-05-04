@@ -7,8 +7,9 @@ Plateforme AI personnelle, monolithe modulaire en FastAPI, conçue pour héberge
 ## Documentation interne
 
 - [`CLAUDE.md`](./CLAUDE.md) — constitution du projet (principes, stack verrouillée, roadmap des jalons)
-- [`playbook.md`](./playbook.md) — méthodo générale pour mener un projet logiciel pro (toutes phases)
-- [`memo.md`](./memo.md) — aide-mémoire technique (commandes + raisons)
+- [`docs/playbook.md`](./docs/playbook.md) — méthodo générale pour mener un projet logiciel pro (toutes phases)
+- [`docs/memo.md`](./docs/memo.md) — aide-mémoire technique (commandes + raisons)
+- [`docs/Jalon1.md`](./docs/Jalon1.md) … [`docs/Jalon4.md`](./docs/Jalon4.md) — walkthroughs pédagogiques par jalon
 - [`docs/adr/`](./docs/adr/) — Architecture Decision Records (décisions structurantes)
 - [`docs/journal.md`](./docs/journal.md) — journal d'apprentissage par jalon
 
@@ -95,7 +96,7 @@ LLM_BASE_URL=http://host.docker.internal:11434/v1
 LLM_API_KEY=ollama-noop
 ```
 
-Le code métier ne référence **jamais** un nom de fournisseur — il appelle `LLMAdapter.complete()`. Le prompt système (style narratif, formel, technique…) est défini par chaque service dans son propre module. Détails dans [`memo.md`](./memo.md) et [`Jalon4.md`](./Jalon4.md).
+Le code métier ne référence **jamais** un nom de fournisseur — il appelle `LLMAdapter.complete()`. Le prompt système (style narratif, formel, technique…) est défini par chaque service dans son propre module. Détails dans [`docs/memo.md`](./docs/memo.md) et [`docs/Jalon4.md`](./docs/Jalon4.md).
 
 ## Async jobs et rate limiting
 
@@ -111,10 +112,10 @@ uvicorn app.main:app --reload                # terminal 1
 rq worker default --url $env:REDIS_URL       # terminal 2
 ```
 
-Un nouveau job se crée dans `app/jobs/<topic>.py` puis s'enqueue via `enqueue_job(queue, func, *args)`. Détails dans [`memo.md`](./memo.md).
+Un nouveau job se crée dans `app/jobs/<topic>.py` puis s'enqueue via `enqueue_job(queue, func, *args)`. Détails dans [`docs/memo.md`](./docs/memo.md).
 
 **Rate limiting** : 60 req/min par API key (configurable via `RATE_LIMIT_PER_MINUTE`). Activer sur un router avec `dependencies=[Depends(enforce_rate_limit)]`.
 
 ## Créer un nouveau service
 
-Voir la section "Créer un nouveau service" dans [`memo.md`](./memo.md). En résumé : copier `app/services/_template/`, adapter les schémas et le préfixe, monter le router dans `app/main.py` avec `dependencies=[Depends(require_api_key), Depends(enforce_rate_limit)]`, écrire les tests.
+Voir la section "Créer un nouveau service" dans [`docs/memo.md`](./docs/memo.md). En résumé : copier `app/services/_template/`, adapter les schémas et le préfixe, monter le router dans `app/main.py` avec `dependencies=[Depends(require_api_key), Depends(enforce_rate_limit)]`, écrire les tests.

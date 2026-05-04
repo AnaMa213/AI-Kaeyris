@@ -23,7 +23,7 @@
 
 ## 1. Objectif du jalon
 
-Selon [`CLAUDE.md`](./CLAUDE.md) §5, le Jalon 1 doit livrer :
+Selon [`CLAUDE.md`](../CLAUDE.md) §5, le Jalon 1 doit livrer :
 
 > **Service `_template`, error handling, OpenAPI doc**
 
@@ -37,7 +37,7 @@ Concrètement, on transforme le squelette du Jalon 0 (qui n'avait qu'un `/health
 
 ### Ce qui a été fait
 
-Avant la première ligne de code, on a rédigé [`docs/adr/0002-service-structure-and-error-format.md`](./docs/adr/0002-service-structure-and-error-format.md). L'ADR (Architecture Decision Record) acte trois décisions :
+Avant la première ligne de code, on a rédigé [`docs/adr/0002-service-structure-and-error-format.md`](./adr/0002-service-structure-and-error-format.md). L'ADR (Architecture Decision Record) acte trois décisions :
 
 1. Chaque service métier = trois fichiers (`router.py`, `schemas.py`, `logic.py`) avec règles d'imports strictes.
 2. Le `_template` n'est **pas monté** dans l'app principale.
@@ -63,7 +63,7 @@ C'est une bonne pratique de la communauté ADR (https://adr.github.io) : un ADR 
 
 ### Ce qui a été fait
 
-Création du module [`app/core/errors.py`](./app/core/errors.py) qui contient :
+Création du module [`app/core/errors.py`](../app/core/errors.py) qui contient :
 
 - Une classe `AppError(Exception)` racine, sous-classable pour chaque type d'erreur métier.
 - Une fonction `register_exception_handlers(app)` qui enregistre 3 handlers FastAPI :
@@ -132,9 +132,9 @@ C'est documenté dans httpx mais subtil quand on découvre.
 
 ### Ce qui a été fait
 
-Le dossier [`app/services/_template/`](./app/services/_template/) contient maintenant :
+Le dossier [`app/services/_template/`](../app/services/_template/) contient maintenant :
 
-#### [`schemas.py`](./app/services/_template/schemas.py) — modèles Pydantic
+#### [`schemas.py`](../app/services/_template/schemas.py) — modèles Pydantic
 
 ```python
 class EchoRequest(BaseModel):
@@ -146,7 +146,7 @@ class EchoResponse(BaseModel):
 
 Rôle : déclarer le **contrat public** du service. Les clients voient ces champs dans Swagger UI. Pydantic valide automatiquement les inputs (longueur, type, présence) et génère la doc.
 
-#### [`logic.py`](./app/services/_template/logic.py) — métier pur
+#### [`logic.py`](../app/services/_template/logic.py) — métier pur
 
 ```python
 def echo(payload: EchoRequest) -> EchoResponse:
@@ -157,7 +157,7 @@ Rôle : la **logique métier**, totalement indépendante de FastAPI ou HTTP. Tes
 
 **Règle absolue** : `logic.py` n'importe **jamais** `fastapi`. Si tu vois un `from fastapi import ...` dans un `logic.py`, c'est un bug architectural à corriger.
 
-#### [`router.py`](./app/services/_template/router.py) — routage HTTP
+#### [`router.py`](../app/services/_template/router.py) — routage HTTP
 
 ```python
 router = APIRouter(prefix="/services/_template", tags=["_template"])
@@ -220,7 +220,7 @@ Convention Python : un identifiant qui commence par `_` est **privé / interne**
 
 ### Ce qui a été fait
 
-[`app/main.py`](./app/main.py) a été enrichi :
+[`app/main.py`](../app/main.py) a été enrichi :
 
 ```python
 app = FastAPI(
@@ -314,8 +314,8 @@ C'est la **fixture clé** : on crée un FastAPI() dédié au test, on y monte un
 ### Ce qui a été fait
 
 - [`memo.md`](./memo.md) — section "Créer un nouveau service" ajoutée : workflow `Copy-Item` + 6 étapes claires.
-- [`README.md`](./README.md) — refonte avec section Documentation interne, tableau des endpoints (incluant `/docs`, `/redoc`, `/openapi.json`), section Architecture, lien vers RFC 9457.
-- [`docs/journal.md`](./docs/journal.md) — entrée Jalon 1 datée, structurée en "Ce qui a été fait" / "Ce que j'ai appris" / "Limitations acceptées".
+- [`README.md`](../README.md) — refonte avec section Documentation interne, tableau des endpoints (incluant `/docs`, `/redoc`, `/openapi.json`), section Architecture, lien vers RFC 9457.
+- [`docs/journal.md`](./journal.md) — entrée Jalon 1 datée, structurée en "Ce qui a été fait" / "Ce que j'ai appris" / "Limitations acceptées".
 
 ### Pourquoi 3 docs distinctes
 

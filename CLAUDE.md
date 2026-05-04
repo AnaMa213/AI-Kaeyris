@@ -242,9 +242,9 @@ A jalon is considered complete when ALL of these are true:
 
 ---
 
-## 10. Documents transverses : `playbook.md` et `memo.md`
+## 10. Documents transverses : `docs/playbook.md` et `docs/memo.md`
 
-Deux fichiers à la racine, complémentaires et tenus à jour par Claude :
+Deux fichiers dans `docs/`, complémentaires et tenus à jour par Claude :
 
 **`playbook.md` — méthodo générale**
 - Guide projet logiciel pro **agnostique du projet courant** (applicable à toute API, portail, plateforme scalable).
