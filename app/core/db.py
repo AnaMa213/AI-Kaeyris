@@ -1,0 +1,73 @@
+"""Async SQLAlchemy engine and FastAPI session dependency.
+
+ADR 0006 §1. SQLite in dev (driver: aiosqlite), Postgres in prod
+(driver: asyncpg, Jalon 8). The driver is encoded in DATABASE_URL,
+not configured separately, so a single env var bascule.
+
+The engine is built once per process. Each request gets its own
+``AsyncSession`` via the FastAPI dependency ``get_db_session``;
+the dependency commits at the end of the request when no exception
+was raised, otherwise rolls back. Tests override the dependency
+with an in-memory SQLite session via ``app.dependency_overrides``.
+"""
+
+from collections.abc import AsyncIterator
+from functools import lru_cache
+
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import DeclarativeBase
+
+from app.core.config import settings
+
+
+class Base(DeclarativeBase):
+    """Declarative base shared by every ORM model in the project.
+
+    Models live next to their service (e.g. ``app/services/jdr/db/models.py``)
+    but inherit from this central ``Base`` so a single Alembic ``target_metadata``
+    can autogenerate migrations for all services at once.
+    """
+
+
+@lru_cache(maxsize=1)
+def get_engine() -> AsyncEngine:
+    """Process-wide async engine. Cached so the connection pool is reused."""
+    return create_async_engine(
+        settings.DATABASE_URL,
+        # echo=False to keep stdout clean; flip to True locally for SQL debug.
+        echo=False,
+        future=True,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(
+        bind=get_engine(),
+        expire_on_commit=False,
+        class_=AsyncSession,
+    )
+
+
+async def get_db_session() -> AsyncIterator[AsyncSession]:
+    """FastAPI dependency: a session per request with auto commit/rollback.
+
+    Usage::
+
+        async def my_handler(
+            session: Annotated[AsyncSession, Depends(get_db_session)],
+        ): ...
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
