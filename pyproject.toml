@@ -11,6 +11,9 @@ dependencies = [
     "redis>=5.0",
     "rq>=2.0",
     "openai>=1.50",
+    "sqlalchemy>=2.0",
+    "alembic",
+    "aiosqlite",
 ]
 
 [project.optional-dependencies]
