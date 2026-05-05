@@ -21,8 +21,7 @@ from app.core.db import Base
 # *before* Alembic inspects it. Imports are below the Base import to keep
 # the dependency direction clear (env.py is the only place that knows
 # about every model module).
-# Models will be imported here as they are created in subsequent jalons:
-# from app.services.jdr.db import models as jdr_models  # noqa: F401
+from app.services.jdr.db import models as _jdr_models  # noqa: F401
 
 config = context.config
 
