@@ -39,7 +39,9 @@
       "PowerShell(pytest -q 2>&1)",
       "PowerShell(pytest tests/core/test_security_headers.py -v 2>&1)",
       "PowerShell(alembic revision --autogenerate -m \"initial schema for jdr service\" 2>&1)",
-      "PowerShell(alembic downgrade base 2>&1)"
+      "PowerShell(alembic downgrade base 2>&1)",
+      "PowerShell(pytest tests/adapters/test_transcription.py -v 2>&1)",
+      "PowerShell(ruff check . 2>&1)"
     ]
   }
 }
