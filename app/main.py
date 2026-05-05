@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.core.db import get_sessionmaker
 from app.core.errors import register_exception_handlers
 from app.core.security_headers import SecurityHeadersMiddleware
+from app.services.jdr.router import router as jdr_router
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ app = FastAPI(
 )
 app.add_middleware(SecurityHeadersMiddleware)
 register_exception_handlers(app)
+app.include_router(jdr_router)
 
 
 @app.get("/health", tags=["health"], summary="Vérifie que l'API est en vie.")
