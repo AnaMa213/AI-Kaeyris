@@ -14,7 +14,11 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      # Source code: hot-reload without rebuild.
       - ./app:/app/app
+      # Local data dir (SQLite DB, audios during transcription).
+      # Shared with the worker and visible on the host for inspection.
+      - ./data:/app/data
     env_file:
       - .env
     environment:
@@ -29,6 +33,7 @@ services:
       dockerfile: docker/Dockerfile
     volumes:
       - ./app:/app/app
+      - ./data:/app/data
     env_file:
       - .env
     environment:
