@@ -18,9 +18,41 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.services.jdr.db.models import JobKind, JobStatus
+from app.services.jdr.db.models import JobKind, JobStatus, SessionMode, SessionState
 
 T = TypeVar("T")
+
+
+# ---------------------------------------------------------------------------
+# Sessions (US1)
+# ---------------------------------------------------------------------------
+
+
+class SessionCreate(BaseModel):
+    """Payload accepted by ``POST /services/jdr/sessions``."""
+
+    title: str = Field(..., min_length=1, max_length=500)
+    recorded_at: datetime = Field(
+        ...,
+        description=(
+            "When the session actually took place (not the upload time). "
+            "ISO-8601 with timezone."
+        ),
+    )
+
+
+class SessionOut(BaseModel):
+    """Public projection of ``jdr_sessions`` rows."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    title: str
+    recorded_at: datetime
+    mode: SessionMode
+    state: SessionState
+    created_at: datetime
+    updated_at: datetime
 
 
 class JobOut(BaseModel):

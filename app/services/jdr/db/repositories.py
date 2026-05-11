@@ -17,18 +17,21 @@ as a clear runtime error rather than a silent no-op.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.jdr.db.models import Session
+
+if TYPE_CHECKING:
     from app.services.jdr.db.models import (
         ApiKey,
         Artifact,
         Job,
         Pj,
-        Session,
         SessionPjMapping,
         Transcription,
     )
@@ -81,17 +84,35 @@ class SessionRepository(_BaseRepository):
     meaning outside its session)."""
 
     async def create(
-        self, *, title: str, recorded_at, gm_key_id: UUID
+        self, *, title: str, recorded_at: datetime, gm_key_id: UUID
     ) -> Session:
-        raise NotImplementedError("Filled in by US1.")
+        row = Session(
+            title=title,
+            recorded_at=recorded_at,
+            gm_key_id=gm_key_id,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
 
     async def list_for_gm(self, gm_key_id: UUID) -> list[Session]:
-        raise NotImplementedError("Filled in by US1.")
+        stmt = (
+            select(Session)
+            .where(Session.gm_key_id == gm_key_id)
+            .order_by(Session.created_at)
+        )
+        result = await self._session.scalars(stmt)
+        return list(result.all())
 
     async def get_for_gm(
         self, session_id: UUID, gm_key_id: UUID
     ) -> Session | None:
-        raise NotImplementedError("Filled in by US1.")
+        stmt = select(Session).where(
+            Session.id == session_id,
+            Session.gm_key_id == gm_key_id,
+        )
+        return await self._session.scalar(stmt)
 
     async def store_audio_source(
         self,

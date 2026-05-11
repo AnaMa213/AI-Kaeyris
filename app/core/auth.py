@@ -80,11 +80,13 @@ class APIKeyEntry:
 class AuthenticatedKey:
     """The result of a successful API key verification.
 
-    Carries everything authorisation logic needs: the human name (logging
-    and audit), the role (``gm`` or ``player``), and ``pj_id`` when the
-    role is ``player`` (the PJ the player is bound to).
+    Carries everything authorisation logic needs: the row id (used as
+    ownership key by business tables — sessions, pjs, …), the human name
+    (logging and audit), the role (``gm`` or ``player``), and ``pj_id``
+    when the role is ``player`` (the PJ the player is bound to).
     """
 
+    id: UUID
     name: str
     role: Role
     pj_id: UUID | None
@@ -209,6 +211,7 @@ def _verify_against_registry(
             if _hasher.verify(entry.hash, token):
                 if matched is None:
                     matched = AuthenticatedKey(
+                        id=entry.id,
                         name=entry.name,
                         role=entry.role,
                         pj_id=entry.pj_id,

@@ -1,25 +1,47 @@
 """Top-level router for the JDR service.
 
-Mounted at ``/services/jdr`` (CLAUDE.md §4.2 convention). Every route
-attached here inherits the default dependencies declared on the router:
+Mounted at ``/services/jdr`` (CLAUDE.md §4.2). Every route attached
+here inherits the default dependencies declared on the router:
 
 - ``require_api_key`` enforces a valid Bearer token (jalon 2).
 - ``enforce_rate_limit`` applies a per-key sliding window (jalon 3).
 
-User-story routes are added incrementally by US1..US5. Sub-routers
-(``batch/router.py``, ``live/router.py``) are included from this file.
-
-The two ``/me/*`` endpoints exposed to players (US4) are added directly
-to this router rather than to a sibling: their authorisation is
-expressed by ``Depends(require_player)`` at the route level, which
-takes precedence and replaces the default ``require_api_key`` only by
-*wrapping* it (require_player itself depends on require_api_key).
+Role-based authorisation is expressed at the route level via
+``Depends(require_gm)`` / ``Depends(require_player)``. Both extend
+``require_api_key`` (FastAPI caches the dependency per request).
 """
 
-from fastapi import APIRouter, Depends
+from typing import Annotated
+from uuid import UUID
 
-from app.core.auth import require_api_key
+from fastapi import APIRouter, Depends, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.auth import (
+    AuthenticatedKey,
+    UnauthorizedError,
+    require_api_key,
+    require_gm,
+)
+from app.core.db import get_db_session
+from app.core.errors import AppError
 from app.core.rate_limit import enforce_rate_limit
+from app.services.jdr import logic
+from app.services.jdr.schemas import Page, SessionCreate, SessionOut
+
+
+class SessionNotFoundError(AppError):
+    """Returned when a session does not exist or does not belong to the GM."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "session-not-found"
+    title = "Session not found"
+
+
+# The class above is exported for tests and future error handling; the
+# unused-import linter would otherwise prune the reference.
+_ = UnauthorizedError
+
 
 router = APIRouter(
     prefix="/services/jdr",
@@ -27,6 +49,67 @@ router = APIRouter(
     dependencies=[Depends(require_api_key), Depends(enforce_rate_limit)],
 )
 
-# Sub-routers (batch / live) will be included as they are added by US1
-# and US5. Keeping them out of this file until they exist so static
-# analysis stays accurate.
+
+# ---------------------------------------------------------------------------
+# Sessions (US1)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/sessions",
+    response_model=SessionOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new JDR session.",
+)
+async def create_session(
+    payload: SessionCreate,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SessionOut:
+    """Create a session owned by the authenticated MJ.
+
+    The body holds the human title and the date the session actually
+    took place (``recorded_at``). State starts at ``created``; the
+    audio is uploaded separately via ``POST /sessions/{id}/audio``.
+    """
+    row = await logic.create_session(
+        db,
+        title=payload.title,
+        recorded_at=payload.recorded_at,
+        gm_key_id=auth.id,
+    )
+    return SessionOut.model_validate(row)
+
+
+@router.get(
+    "/sessions",
+    response_model=Page[SessionOut],
+    summary="List the MJ's sessions.",
+)
+async def list_sessions(
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Page[SessionOut]:
+    rows = await logic.list_sessions(db, gm_key_id=auth.id)
+    items = [SessionOut.model_validate(r) for r in rows]
+    return Page[SessionOut](items=items, total=len(items), page=1, size=len(items) or 1)
+
+
+@router.get(
+    "/sessions/{session_id}",
+    response_model=SessionOut,
+    summary="Fetch one of the MJ's sessions.",
+)
+async def get_session(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SessionOut:
+    row = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if row is None:
+        raise SessionNotFoundError(
+            detail=f"Session {session_id} not found."
+        )
+    return SessionOut.model_validate(row)
