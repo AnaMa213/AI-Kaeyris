@@ -21,7 +21,8 @@ from argon2.exceptions import (
     VerificationError,
     VerifyMismatchError,
 )
-from fastapi import Depends, Request, status
+from fastapi import Depends, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,8 +33,20 @@ from app.services.jdr.db.models import ApiKey, ApiKeyStatus, Role
 
 logger = logging.getLogger(__name__)
 
-_BEARER_PREFIX = "bearer "
 _WWW_AUTHENTICATE = 'Bearer realm="ai-kaeyris"'
+
+# Registers the Bearer security scheme in the OpenAPI spec so Swagger UI
+# displays the "Authorize" lock at the top of /docs. `auto_error=False`
+# lets us keep our own RFC 9457 problem-details 401 instead of FastAPI's
+# default plain-JSON HTTPException response.
+_bearer_scheme = HTTPBearer(
+    scheme_name="kaeyris-bearer",
+    description=(
+        "Bearer token issued by the operator. "
+        "Use `python scripts/generate_api_key.py <name>` to create one."
+    ),
+    auto_error=False,
+)
 
 _hasher = PasswordHasher()
 
@@ -158,21 +171,6 @@ async def bootstrap_api_keys_from_env(session: AsyncSession) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Bearer extraction
-# ---------------------------------------------------------------------------
-
-
-def _extract_bearer_token(request: Request) -> str:
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header or not auth_header.lower().startswith(_BEARER_PREFIX):
-        raise UnauthorizedError(detail="Missing or malformed Authorization header.")
-    token = auth_header[len(_BEARER_PREFIX) :].strip()
-    if not token:
-        raise UnauthorizedError(detail="Empty bearer token.")
-    return token
-
-
-# ---------------------------------------------------------------------------
 # DB-backed verification
 # ---------------------------------------------------------------------------
 
@@ -232,15 +230,21 @@ def _verify_against_registry(
 
 
 async def require_api_key(
-    request: Request,
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
+    ],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> AuthenticatedKey:
     """FastAPI dependency: enforce a valid Authorization: Bearer header.
 
     Lookup is DB-backed (``jdr_api_keys`` table). The 401 response carries
-    a ``WWW-Authenticate`` header per RFC 6750 §3.
+    a ``WWW-Authenticate`` header per RFC 6750 §3. ``HTTPBearer`` advertises
+    the scheme in the OpenAPI spec so Swagger UI renders the Authorize
+    lock at the top of /docs.
     """
-    token = _extract_bearer_token(request)
+    if credentials is None or not credentials.credentials.strip():
+        raise UnauthorizedError(detail="Missing or malformed Authorization header.")
+    token = credentials.credentials.strip()
 
     entries = await _list_active_keys(session)
     if not entries:
