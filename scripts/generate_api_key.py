@@ -41,9 +41,14 @@ def main() -> int:
     print()
     print("Send the plain key to the client. NEVER store it server-side.")
     print()
-    print("Append (or replace) in your .env, separating entries with ';' :")
+    print("Append (or replace) in your .env (single quotes are MANDATORY:")
+    print("Argon2 hashes contain '$' characters that python-dotenv would")
+    print("otherwise interpret as variable references):")
     print()
-    print(f"  API_KEYS={args.name}:{hashed}")
+    print(f"  API_KEYS='{args.name}:{hashed}'")
+    print()
+    print("Multiple entries are separated by ';' inside the same quoted value:")
+    print("  API_KEYS='name1:$argon2id$...;name2:$argon2id$...'")
     print()
     return 0
 

@@ -115,6 +115,11 @@ def parse_api_keys(raw: str | None) -> list[APIKeyEntry]:
 
     Format: ``name1:hash1;name2:hash2`` (semicolon separator, since Argon2
     hashes contain commas in their parameter section).
+
+    The ``.env`` value MUST be wrapped in single quotes — Argon2 hashes
+    contain ``$`` characters that python-dotenv would otherwise treat as
+    variable references and silently mangle. A defensive check rejects
+    obviously corrupted hashes early with an actionable message.
     """
     if not raw:
         return []
@@ -126,6 +131,14 @@ def parse_api_keys(raw: str | None) -> list[APIKeyEntry]:
         name, sep, hash_value = part.partition(":")
         if not sep or not name or not hash_value:
             raise ValueError(f"Invalid API_KEYS entry (expected 'name:hash'): {part!r}")
+        if not hash_value.startswith("$argon2id$"):
+            raise ValueError(
+                f"Invalid API_KEYS entry for {name!r}: hash does not start "
+                "with '$argon2id$'. Wrap the API_KEYS value in single quotes "
+                "in your .env (python-dotenv interpolates unquoted '$...' "
+                "sequences and mangles the hash). Example: "
+                "API_KEYS='name:$argon2id$v=19$m=65536,t=3,p=4$...$...'"
+            )
         entries.append(APIKeyEntry(name=name.strip(), hash=hash_value.strip()))
     return entries
 
