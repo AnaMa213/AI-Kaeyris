@@ -41,7 +41,10 @@
       "PowerShell(alembic revision --autogenerate -m \"initial schema for jdr service\" 2>&1)",
       "PowerShell(alembic downgrade base 2>&1)",
       "PowerShell(pytest tests/adapters/test_transcription.py -v 2>&1)",
-      "PowerShell(ruff check . 2>&1)"
+      "PowerShell(ruff check . 2>&1)",
+      "PowerShell(pytest tests/services/jdr/test_sessions.py -q 2>&1)",
+      "PowerShell(pytest tests/services/jdr/test_audio_upload.py -q --no-header 2>&1)",
+      "PowerShell(pytest tests/services/jdr/test_audio_upload.py -q 2>&1)"
     ]
   }
 }
