@@ -20,6 +20,11 @@ from uuid import UUID
 
 from sqlalchemy import select, update
 
+from app.adapters.llm import (
+    PermanentLLMError,
+    TransientLLMError,
+    get_llm_adapter,
+)
 from app.adapters.transcription import (
     PermanentTranscriptionError,
     TranscriptionResult,
@@ -35,7 +40,11 @@ from app.services.jdr.db.models import (
     SessionState,
     Transcription,
 )
-from app.services.jdr.db.repositories import TranscriptionRepository
+from app.services.jdr.db.repositories import (
+    ArtifactRepository,
+    TranscriptionRepository,
+)
+from app.services.jdr.prompts import NARRATIVE_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +61,14 @@ def transcribe_session_job(session_id: UUID) -> None:
     See :func:`_transcribe_session` for the actual logic.
     """
     asyncio.run(_transcribe_session(session_id))
+
+
+def generate_narrative_job(session_id: UUID) -> None:
+    """Generate a French narrative summary from the session's transcription.
+
+    Sync wrapper for RQ. See :func:`_generate_narrative`.
+    """
+    asyncio.run(_generate_narrative(session_id))
 
 
 # ---------------------------------------------------------------------------
@@ -157,9 +174,83 @@ async def _transcribe_session(session_id: UUID) -> None:
         )
 
 
+async def _generate_narrative(session_id: UUID) -> None:
+    """Build a French narrative summary of a transcribed session.
+
+    Refuses to run if the session is not yet ``transcribed`` (PermanentJobError).
+    Maps adapter errors to job errors so the RQ retry policy still applies.
+    """
+    sessionmaker = get_sessionmaker()
+
+    # Step 1: load + validate
+    async with sessionmaker() as db:
+        session_row = await db.scalar(
+            select(Session).where(Session.id == session_id)
+        )
+        if session_row is None:
+            raise PermanentJobError(f"Session {session_id} not found.")
+        if session_row.state != SessionState.TRANSCRIBED:
+            raise PermanentJobError(
+                f"Session {session_id} is not transcribed "
+                f"(state={session_row.state.value}); cannot generate narrative."
+            )
+        transcription = await db.scalar(
+            select(Transcription).where(Transcription.session_id == session_id)
+        )
+        if transcription is None:
+            raise PermanentJobError(
+                f"Session {session_id} has no transcription row "
+                "even though state is 'transcribed' — data inconsistency."
+            )
+        segments = list(transcription.segments_json or [])
+
+    # Step 2: build the user prompt from segments
+    user_prompt = _format_segments_for_narrative(segments)
+
+    # Step 3: call the LLM
+    adapter = get_llm_adapter()
+    try:
+        text = await adapter.complete(
+            system=NARRATIVE_SYSTEM_PROMPT,
+            user=user_prompt,
+            max_tokens=settings.LLM_MAX_TOKENS_DEFAULT,
+        )
+    except TransientLLMError as exc:
+        raise TransientJobError(str(exc)) from exc
+    except PermanentLLMError as exc:
+        raise PermanentJobError(str(exc)) from exc
+
+    # Step 4: UPSERT the artifact
+    model_used = f"{settings.LLM_PROVIDER}:{settings.LLM_MODEL}"
+    async with sessionmaker() as db:
+        await ArtifactRepository(db).upsert(
+            session_id,
+            kind="narrative",
+            content_json={"text": text},
+            model_used=model_used,
+        )
+        await db.commit()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _format_segments_for_narrative(segments: list[dict]) -> str:
+    """Flatten the diarised segments into a chronological transcript.
+
+    Each line: ``[t1.0s → t2.5s] speaker_label : texte``. The LLM uses
+    this to write the narrative summary.
+    """
+    lines: list[str] = []
+    for seg in segments:
+        start = float(seg.get("start_seconds", 0.0) or 0.0)
+        end = float(seg.get("end_seconds", 0.0) or 0.0)
+        label = str(seg.get("speaker_label", "unknown"))
+        text = str(seg.get("text", "")).strip()
+        lines.append(f"[{start:.1f}s → {end:.1f}s] {label} : {text}")
+    return "\n".join(lines) if lines else "(transcription vide)"
 
 
 async def _mark_session_failed(sessionmaker, session_id: UUID) -> None:
@@ -197,6 +288,8 @@ def _segments_to_json(result: TranscriptionResult) -> list[dict]:
 # Re-exported so callers don't need to know about the ORM detail.
 __all__ = [
     "Transcription",
+    "_generate_narrative",
     "_transcribe_session",
+    "generate_narrative_job",
     "transcribe_session_job",
 ]

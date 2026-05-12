@@ -25,6 +25,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.jdr.db.models import (
+    Artifact,
     AudioSource,
     Session,
     SessionState,
@@ -34,7 +35,6 @@ from app.services.jdr.db.models import (
 if TYPE_CHECKING:
     from app.services.jdr.db.models import (
         ApiKey,
-        Artifact,
         Job,
         Pj,
         SessionPjMapping,
@@ -239,13 +239,46 @@ class ArtifactRepository(_BaseRepository):
         content_json: dict,
         model_used: str,
     ) -> Artifact:
-        raise NotImplementedError("Filled in by US1/US2/US3.")
+        from datetime import UTC, datetime
+
+        existing = await self._session.scalar(
+            select(Artifact).where(
+                Artifact.session_id == session_id,
+                Artifact.kind == kind,
+            )
+        )
+        now = datetime.now(UTC)
+        if existing is not None:
+            existing.content_json = content_json
+            existing.model_used = model_used
+            existing.generated_at = now
+            await self._session.flush()
+            return existing
+        row = Artifact(
+            session_id=session_id,
+            kind=kind,
+            content_json=content_json,
+            model_used=model_used,
+            generated_at=now,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
 
     async def get(self, session_id: UUID, kind: str) -> Artifact | None:
-        raise NotImplementedError("Filled in by US1.")
+        return await self._session.scalar(
+            select(Artifact).where(
+                Artifact.session_id == session_id,
+                Artifact.kind == kind,
+            )
+        )
 
     async def list_for_session(self, session_id: UUID) -> list[Artifact]:
-        raise NotImplementedError("Filled in by US1.")
+        rows = await self._session.scalars(
+            select(Artifact).where(Artifact.session_id == session_id)
+        )
+        return list(rows.all())
 
     async def invalidate_pov_artifacts(self, session_id: UUID) -> int:
         """Delete every ``pov:*`` row for this session; called when the

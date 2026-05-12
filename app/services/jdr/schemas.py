@@ -111,6 +111,35 @@ class TranscriptionOut(BaseModel):
     completed_at: datetime
 
 
+# ---------------------------------------------------------------------------
+# Narrative artefact (US1)
+# ---------------------------------------------------------------------------
+
+
+class NarrativeArtifactOut(BaseModel):
+    """Public projection of an ``Artifact(kind='narrative')`` row."""
+
+    session_id: UUID
+    text: str = Field(..., description="French narrative summary produced by the LLM.")
+    model_used: str
+    generated_at: datetime
+
+
+class JobQueuedOut(BaseModel):
+    """Reply to an artefact-trigger POST: a freshly enqueued RQ job.
+
+    Status starts at ``queued``; the worker updates it as it processes.
+    The full lifecycle (running -> succeeded/failed) is observable via
+    GET /jobs/{id} (added in sub-lot 3f).
+    """
+
+    id: str = Field(..., description="RQ job identifier.")
+    kind: JobKind
+    session_id: UUID
+    status: JobStatus = Field(JobStatus.QUEUED, description="Initial status after enqueue.")
+    queued_at: datetime
+
+
 class JobOut(BaseModel):
     """Job status projection — see ``data-model.md`` §8."""
 
