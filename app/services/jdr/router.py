@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Response, status
 from redis import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +37,10 @@ from app.services.jdr.db.models import JobKind, JobStatus, SessionState
 from app.services.jdr.db.repositories import (
     ArtifactRepository,
     TranscriptionRepository,
+)
+from app.services.jdr.markdown import (
+    render_narrative_md,
+    render_transcription_md,
 )
 from app.services.jdr.schemas import (
     JobQueuedOut,
@@ -203,6 +207,33 @@ async def get_transcription(
     )
 
 
+@router.get(
+    "/sessions/{session_id}/transcription.md",
+    response_class=Response,
+    summary="Export the transcription as Markdown (text/markdown).",
+)
+async def get_transcription_md(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Response:
+    session = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    transcription = await TranscriptionRepository(db).get_for_session(session_id)
+    if transcription is None:
+        raise TranscriptionNotReadyError(
+            detail=(
+                f"Transcription for session {session_id} is not available yet."
+            ),
+        )
+
+    md = render_transcription_md(session, transcription)
+    return Response(content=md, media_type="text/markdown; charset=utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Narrative artifact (US1 — sub-lot 3d)
 # ---------------------------------------------------------------------------
@@ -277,3 +308,30 @@ async def get_narrative(
         model_used=artifact.model_used,
         generated_at=artifact.generated_at,
     )
+
+
+@router.get(
+    "/sessions/{session_id}/artifacts/narrative.md",
+    response_class=Response,
+    summary="Export the narrative summary as Markdown (text/markdown).",
+)
+async def get_narrative_md(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Response:
+    session = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    artifact = await ArtifactRepository(db).get(session_id, "narrative")
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"Narrative for session {session_id} has not been generated yet."
+            ),
+        )
+
+    md = render_narrative_md(session, artifact)
+    return Response(content=md, media_type="text/markdown; charset=utf-8")

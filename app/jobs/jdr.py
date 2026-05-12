@@ -242,6 +242,18 @@ def _format_segments_for_narrative(segments: list[dict]) -> str:
 
     Each line: ``[t1.0s → t2.5s] speaker_label : texte``. The LLM uses
     this to write the narrative summary.
+
+    TODO(tech-debt, jalon 5+): single-shot summarisation. For sessions
+    longer than ~1h, the user prompt can reach 30-45k tokens which (a)
+    risks "lost in the middle" with most models, (b) may exceed local
+    Whisper hosts running on consumer GPUs (Llama 3.1 8B with a 32k
+    context fits ~16 GB VRAM on a RTX 4090 — beyond that, the prefill
+    blows up). The plan is to introduce a map-reduce summarisation
+    strategy (chunk into ~5-10 min pieces, summarise each, then combine)
+    when the first real session shows quality issues. See conversation
+    on 2026-05-13 for the rationale; the chunking will be a dedicated
+    sub-lot before US3 (POV summaries, where per-PJ context inflates
+    the token count even more).
     """
     lines: list[str] = []
     for seg in segments:
