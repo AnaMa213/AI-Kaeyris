@@ -79,6 +79,38 @@ class AudioUploadOut(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# Transcription (US1)
+# ---------------------------------------------------------------------------
+
+
+class TranscriptionSegmentOut(BaseModel):
+    """One diarised utterance in a transcription."""
+
+    speaker_label: str = Field(
+        ...,
+        description=(
+            "Raw label produced by the backend ('speaker_1', 'unknown', …). "
+            "The mapping to PJs is a per-session business decision exposed "
+            "via /mapping (US3)."
+        ),
+    )
+    start_seconds: float
+    end_seconds: float
+    text: str
+
+
+class TranscriptionOut(BaseModel):
+    """Public projection of ``jdr_transcriptions`` rows."""
+
+    session_id: UUID
+    segments: list[TranscriptionSegmentOut]
+    language: str = Field(..., description="BCP-47 code, e.g. 'fr'.")
+    model_used: str
+    provider: str = Field(..., description="'cloud' | 'local' | 'mock'.")
+    completed_at: datetime
+
+
 class JobOut(BaseModel):
     """Job status projection — see ``data-model.md`` §8."""
 

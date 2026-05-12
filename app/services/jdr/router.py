@@ -28,7 +28,14 @@ from app.core.errors import AppError
 from app.core.rate_limit import enforce_rate_limit
 from app.services.jdr import logic
 from app.services.jdr.batch.router import router as batch_router
-from app.services.jdr.schemas import Page, SessionCreate, SessionOut
+from app.services.jdr.db.repositories import TranscriptionRepository
+from app.services.jdr.schemas import (
+    Page,
+    SessionCreate,
+    SessionOut,
+    TranscriptionOut,
+    TranscriptionSegmentOut,
+)
 
 
 class SessionNotFoundError(AppError):
@@ -37,6 +44,14 @@ class SessionNotFoundError(AppError):
     status_code = status.HTTP_404_NOT_FOUND
     error_type = "session-not-found"
     title = "Session not found"
+
+
+class TranscriptionNotReadyError(AppError):
+    """Session exists but the transcription has not been produced yet."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "transcription-not-ready"
+    title = "Transcription not ready"
 
 
 # The class above is exported for tests and future error handling; the
@@ -117,3 +132,45 @@ async def get_session(
             detail=f"Session {session_id} not found."
         )
     return SessionOut.model_validate(row)
+
+
+# ---------------------------------------------------------------------------
+# Transcription (US1 — sub-lot 3c)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/sessions/{session_id}/transcription",
+    response_model=TranscriptionOut,
+    summary="Fetch the diarised transcription of a session.",
+)
+async def get_transcription(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> TranscriptionOut:
+    session = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+
+    transcription = await TranscriptionRepository(db).get_for_session(session_id)
+    if transcription is None:
+        raise TranscriptionNotReadyError(
+            detail=(
+                f"Transcription for session {session_id} is not available yet. "
+                "Poll the job status or wait for the worker to finish."
+            ),
+        )
+
+    return TranscriptionOut(
+        session_id=transcription.session_id,
+        segments=[
+            TranscriptionSegmentOut(**seg) for seg in transcription.segments_json
+        ],
+        language=transcription.language,
+        model_used=transcription.model_used,
+        provider=transcription.provider,
+        completed_at=transcription.completed_at,
+    )

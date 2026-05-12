@@ -59,7 +59,19 @@ router = APIRouter()
 )
 async def post_audio(
     session_id: UUID,
-    audio: Annotated[UploadFile, File(description="M4A file (≤ 25 MB for cloud).")],
+    audio: Annotated[
+        UploadFile,
+        File(
+            description=(
+                "Audio file (M4A). The upload itself is streamed to disk and "
+                "has no hard size limit at this layer. Note: with "
+                "TRANSCRIPTION_PROVIDER=cloud, the OpenAI Whisper API caps "
+                "individual requests at 25 MB, so the transcription job has to "
+                "chunk larger files (R3 — to be implemented). With provider=local "
+                "(LAN GPU host running faster-whisper), any size is supported."
+            ),
+        ),
+    ],
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],

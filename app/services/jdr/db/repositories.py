@@ -24,7 +24,12 @@ from uuid import UUID
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.jdr.db.models import AudioSource, Session, SessionState
+from app.services.jdr.db.models import (
+    AudioSource,
+    Session,
+    SessionState,
+    Transcription,
+)
 
 if TYPE_CHECKING:
     from app.services.jdr.db.models import (
@@ -33,7 +38,6 @@ if TYPE_CHECKING:
         Job,
         Pj,
         SessionPjMapping,
-        Transcription,
     )
 
 
@@ -170,12 +174,39 @@ class TranscriptionRepository(_BaseRepository):
         model_used: str,
         provider: str,
     ) -> Transcription:
-        raise NotImplementedError("Filled in by US1.")
+        from datetime import UTC, datetime
+
+        existing = await self._session.scalar(
+            select(Transcription).where(Transcription.session_id == session_id)
+        )
+        now = datetime.now(UTC)
+        if existing is not None:
+            existing.segments_json = segments
+            existing.language = language
+            existing.model_used = model_used
+            existing.provider = provider
+            existing.completed_at = now
+            await self._session.flush()
+            return existing
+        row = Transcription(
+            session_id=session_id,
+            segments_json=segments,
+            language=language,
+            model_used=model_used,
+            provider=provider,
+            completed_at=now,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
 
     async def get_for_session(
         self, session_id: UUID
     ) -> Transcription | None:
-        raise NotImplementedError("Filled in by US1.")
+        return await self._session.scalar(
+            select(Transcription).where(Transcription.session_id == session_id)
+        )
 
 
 class MappingRepository(_BaseRepository):
