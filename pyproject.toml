@@ -14,6 +14,7 @@ dependencies = [
     "sqlalchemy>=2.0",
     "alembic",
     "aiosqlite",
+    "python-multipart",
 ]
 
 [project.optional-dependencies]

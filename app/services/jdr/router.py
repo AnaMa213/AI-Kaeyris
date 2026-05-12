@@ -27,6 +27,7 @@ from app.core.db import get_db_session
 from app.core.errors import AppError
 from app.core.rate_limit import enforce_rate_limit
 from app.services.jdr import logic
+from app.services.jdr.batch.router import router as batch_router
 from app.services.jdr.schemas import Page, SessionCreate, SessionOut
 
 
@@ -48,6 +49,9 @@ router = APIRouter(
     tags=["jdr"],
     dependencies=[Depends(require_api_key), Depends(enforce_rate_limit)],
 )
+
+# Sub-routers — each adds its own routes; auth/rate-limit are inherited.
+router.include_router(batch_router)
 
 
 # ---------------------------------------------------------------------------

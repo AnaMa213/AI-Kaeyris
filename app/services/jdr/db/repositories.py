@@ -21,10 +21,10 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.jdr.db.models import Session
+from app.services.jdr.db.models import AudioSource, Session, SessionState
 
 if TYPE_CHECKING:
     from app.services.jdr.db.models import (
@@ -122,14 +122,39 @@ class SessionRepository(_BaseRepository):
         sha256: str,
         size_bytes: int,
         duration_seconds: int | None,
-    ) -> None:
-        raise NotImplementedError("Filled in by US1.")
+    ) -> AudioSource:
+        row = AudioSource(
+            session_id=session_id,
+            path=path,
+            sha256=sha256,
+            size_bytes=size_bytes,
+            duration_seconds=duration_seconds,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
+    async def get_audio_source(self, session_id: UUID) -> AudioSource | None:
+        return await self._session.scalar(
+            select(AudioSource).where(AudioSource.session_id == session_id)
+        )
 
     async def mark_audio_purged(self, session_id: UUID) -> None:
-        raise NotImplementedError("Filled in by US1.")
+        from datetime import UTC, datetime
 
-    async def update_state(self, session_id: UUID, state) -> None:
-        raise NotImplementedError("Filled in by US1.")
+        await self._session.execute(
+            update(AudioSource)
+            .where(AudioSource.session_id == session_id)
+            .values(purged_at=datetime.now(UTC))
+        )
+
+    async def update_state(self, session_id: UUID, state: SessionState) -> None:
+        await self._session.execute(
+            update(Session)
+            .where(Session.id == session_id)
+            .values(state=state)
+        )
 
 
 class TranscriptionRepository(_BaseRepository):

@@ -55,6 +55,30 @@ class SessionOut(BaseModel):
     updated_at: datetime
 
 
+class AudioUploadOut(BaseModel):
+    """Response of ``POST /sessions/{id}/audio``."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    session_id: UUID
+    path: str = Field(
+        ..., description="Path on disk relative to KAEYRIS_DATA_DIR."
+    )
+    sha256: str
+    size_bytes: int
+    duration_seconds: int | None = Field(
+        None,
+        description=(
+            "Audio duration in seconds. ``null`` when ``ffprobe`` is "
+            "unavailable on the host — non-fatal."
+        ),
+    )
+    uploaded_at: datetime
+    job_id: str = Field(
+        ..., description="RQ job identifier for the queued transcription."
+    )
+
+
 class JobOut(BaseModel):
     """Job status projection — see ``data-model.md`` §8."""
 
