@@ -182,6 +182,40 @@ async def test_permanent_errors_are_remapped(exc):
             await adapter.transcribe(audio_path="x.m4a")
 
 
+async def test_adapter_passes_vad_filter_and_anti_loop_options():
+    """Speaches/faster-whisper hallucinates on silence without VAD.
+    We must always pass vad_filter=True and condition_on_previous_text=False
+    via extra_body to combat the well-known repetition-loop failure mode."""
+    adapter = OpenAICompatibleTranscriptionAdapter(
+        provider="local",
+        model="Systran/faster-whisper-large-v3",
+        api_key="dummy",
+        base_url="http://localhost:8005/v1",
+    )
+
+    captured: dict[str, object] = {}
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+        # Minimal verbose_json shape so the adapter doesn't crash on the
+        # rest of the pipeline.
+        from types import SimpleNamespace
+        return SimpleNamespace(language="fr", segments=[])
+
+    adapter._client.audio.transcriptions.create = _capture  # type: ignore[method-assign]
+
+    with patch("builtins.open", mock_open(read_data=b"fake-audio")):
+        await adapter.transcribe(audio_path="x.m4a", language_hint="fr")
+
+    assert "extra_body" in captured
+    extra = captured["extra_body"]
+    assert isinstance(extra, dict)
+    assert extra["vad_filter"] is True
+    assert extra["condition_on_previous_text"] is False
+    # temperature must be deterministic for transcription
+    assert captured["temperature"] == 0
+
+
 async def test_missing_audio_file_is_permanent_error():
     """OSError on file open must surface as a PermanentTranscriptionError."""
     adapter = OpenAICompatibleTranscriptionAdapter(

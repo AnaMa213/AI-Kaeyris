@@ -164,9 +164,23 @@ class OpenAICompatibleTranscriptionAdapter:
                     "model": self.model,
                     "file": audio_file,
                     "response_format": "verbose_json",
+                    # temperature=0 -> deterministic decoding, fewer hallucinations
+                    "temperature": 0,
                 }
                 if language_hint:
                     kwargs["language"] = language_hint
+
+                # speaches/faster-whisper-specific options to fight repetition
+                # loops on long sessions (Whisper's known failure mode on silence
+                # or background noise). Passed via extra_body so the openai SDK
+                # forwards them as additional multipart fields. The cloud OpenAI
+                # Whisper API silently ignores unknown fields, so this is safe
+                # for both providers.
+                kwargs["extra_body"] = {
+                    "vad_filter": True,
+                    "condition_on_previous_text": False,
+                }
+
                 resp = await self._client.audio.transcriptions.create(**kwargs)
         except (
             APITimeoutError,
