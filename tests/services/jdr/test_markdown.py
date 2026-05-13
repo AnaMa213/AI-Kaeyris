@@ -129,6 +129,82 @@ def test_render_transcription_md_supports_pj_mapping():
     assert "speaker_1" in md
 
 
+def test_render_transcription_md_merges_consecutive_same_speaker_segments():
+    """Whisper splits by sentence; for a single speaker the export must
+    collapse adjacent segments into one paragraph (otherwise the .md is
+    a stream of micro-blocks, unreadable for a 1-h session)."""
+    sess = _fake_session()
+    transcription = SimpleNamespace(
+        segments_json=[
+            {
+                "speaker_label": "speaker_1",
+                "start_seconds": 0.0,
+                "end_seconds": 1.5,
+                "text": "Bonjour à tous.",
+            },
+            {
+                "speaker_label": "speaker_1",
+                "start_seconds": 1.6,
+                "end_seconds": 4.0,
+                "text": "Aujourd'hui on commence le chapitre 4.",
+            },
+            {
+                "speaker_label": "speaker_2",
+                "start_seconds": 4.5,
+                "end_seconds": 6.0,
+                "text": "Génial !",
+            },
+        ],
+        language="fr",
+        provider="local",
+        model_used="faster-whisper",
+    )
+
+    md = render_transcription_md(sess, transcription)
+
+    # The two consecutive speaker_1 segments form ONE paragraph.
+    # We assert by counting the speaker_1 headers (one merged paragraph).
+    speaker_1_blocks = md.count("speaker_1")
+    speaker_2_blocks = md.count("speaker_2")
+    assert speaker_1_blocks == 1, (
+        f"Expected speaker_1 segments to merge, got {speaker_1_blocks} "
+        f"blocks in:\n{md}"
+    )
+    assert speaker_2_blocks == 1
+    # The merged paragraph contains both texts.
+    assert "Bonjour à tous." in md
+    assert "Aujourd'hui on commence le chapitre 4." in md
+
+
+def test_render_transcription_md_keeps_paragraph_break_on_large_gap():
+    """A long silence (gap above the threshold) keeps the segments apart
+    so the reader sees that there was a real pause."""
+    sess = _fake_session()
+    transcription = SimpleNamespace(
+        segments_json=[
+            {
+                "speaker_label": "speaker_1",
+                "start_seconds": 0.0,
+                "end_seconds": 5.0,
+                "text": "First part.",
+            },
+            {
+                "speaker_label": "speaker_1",
+                "start_seconds": 120.0,  # 2 minutes later
+                "end_seconds": 122.0,
+                "text": "After a long pause.",
+            },
+        ],
+        language="fr",
+        provider="local",
+        model_used="faster-whisper",
+    )
+
+    md = render_transcription_md(sess, transcription)
+    # Two distinct speaker_1 blocks expected because the gap is huge.
+    assert md.count("speaker_1") == 2
+
+
 def test_render_transcription_md_handles_empty_segments():
     sess = _fake_session()
     transcription = SimpleNamespace(

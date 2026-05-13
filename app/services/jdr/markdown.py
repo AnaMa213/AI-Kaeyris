@@ -59,24 +59,34 @@ def render_transcription_md(
     session: Any,
     transcription: Any,
     mapping: dict[str, str] | None = None,
+    *,
+    merge_gap_seconds: float = 5.0,
 ) -> str:
     """Render the diarised transcription as Markdown.
 
-    One block per segment, with timestamps and the resolved speaker.
-    When ``mapping`` (``{speaker_label: pj_name}``) is provided (US3),
-    the PJ name precedes the raw label; otherwise the raw label stands
-    alone.
+    Consecutive segments that share the same ``speaker_label`` and that
+    are close in time (< ``merge_gap_seconds`` apart) are merged into a
+    single paragraph. This collapses Whisper's sentence-level splits
+    into speaker-turn paragraphs:
+
+    - With diarisation: one paragraph per speaker turn (US3 use case).
+    - Without diarisation (everything ``unknown``): one paragraph that
+      spans the whole audio, which is what a reader actually wants.
+
+    The merge only applies to the rendered Markdown — the underlying
+    JSON in the database stays fine-grained.
     """
     parts: list[str] = [render_session_header(session)]
     parts.append("## Transcription")
     parts.append("")
 
-    segments = list(transcription.segments_json or [])
-    if not segments:
+    raw_segments = list(transcription.segments_json or [])
+    grouped = _group_consecutive_speaker_segments(raw_segments, merge_gap_seconds)
+    if not grouped:
         parts.append("_(aucun segment)_")
         parts.append("")
     else:
-        for seg in segments:
+        for seg in grouped:
             label = str(seg.get("speaker_label", "unknown"))
             start = float(seg.get("start_seconds", 0.0) or 0.0)
             end = float(seg.get("end_seconds", 0.0) or 0.0)
@@ -168,3 +178,40 @@ def _format_speaker(
     if mapping is not None and raw_label in mapping:
         return f"{mapping[raw_label]} ({raw_label})"
     return raw_label
+
+
+def _group_consecutive_speaker_segments(
+    segments: list[dict[str, Any]], max_gap_seconds: float
+) -> list[dict[str, Any]]:
+    """Merge adjacent segments that share a speaker_label and a small gap.
+
+    Returns a new list — does not mutate the input. A "small gap" is
+    anything strictly less than ``max_gap_seconds`` between the end of
+    one segment and the start of the next; beyond that, a paragraph
+    break is preserved so a long silence remains visible.
+    """
+    if not segments:
+        return []
+
+    out: list[dict[str, Any]] = [dict(segments[0])]
+    for seg in segments[1:]:
+        last = out[-1]
+        same_speaker = (
+            seg.get("speaker_label") == last.get("speaker_label")
+        )
+        try:
+            gap = float(seg.get("start_seconds", 0.0)) - float(
+                last.get("end_seconds", 0.0)
+            )
+        except (TypeError, ValueError):
+            gap = max_gap_seconds  # force a break on malformed input
+        if same_speaker and gap < max_gap_seconds:
+            last["end_seconds"] = seg.get("end_seconds", last.get("end_seconds"))
+            last["text"] = (
+                str(last.get("text", "")).rstrip()
+                + " "
+                + str(seg.get("text", "")).lstrip()
+            ).strip()
+        else:
+            out.append(dict(seg))
+    return out
