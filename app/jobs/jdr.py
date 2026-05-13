@@ -27,13 +27,16 @@ from app.adapters.llm import (
 )
 from app.adapters.transcription import (
     PermanentTranscriptionError,
+    TranscriptionAdapter,
     TranscriptionResult,
+    TranscriptionSegment,
     TransientTranscriptionError,
     get_transcription_adapter,
 )
 from app.core.config import settings
 from app.core.db import get_sessionmaker
 from app.jobs import PermanentJobError, TransientJobError
+from app.services.jdr.audio import AudioChunkingError, chunked_audio
 from app.services.jdr.db.models import (
     AudioSource,
     Session,
@@ -124,9 +127,12 @@ async def _transcribe_session(session_id: UUID) -> None:
 
     adapter = get_transcription_adapter()
     try:
-        result = await adapter.transcribe(
-            audio_path=str(full_path),
+        result = await _transcribe_with_optional_chunking(
+            adapter=adapter,
+            audio_path=full_path,
+            session_id=session_id,
             language_hint=settings.TRANSCRIPTION_LANGUAGE_HINT or None,
+            chunk_duration_seconds=settings.TRANSCRIPTION_CHUNK_DURATION_SECONDS,
         )
     except TransientTranscriptionError as exc:
         # Roll back to AUDIO_UPLOADED so the retry picks it up.
@@ -137,6 +143,9 @@ async def _transcribe_session(session_id: UUID) -> None:
     except PermanentTranscriptionError as exc:
         await _mark_session_failed(sessionmaker, session_id)
         raise PermanentJobError(str(exc)) from exc
+    except AudioChunkingError as exc:
+        await _mark_session_failed(sessionmaker, session_id)
+        raise PermanentJobError(f"Audio chunking failed: {exc}") from exc
 
     # --- Step 3: persist + transition + purge audio (single commit) ---------
 
@@ -235,6 +244,71 @@ async def _generate_narrative(session_id: UUID) -> None:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+async def _transcribe_with_optional_chunking(
+    *,
+    adapter: TranscriptionAdapter,
+    audio_path: Path,
+    session_id: UUID,
+    language_hint: str | None,
+    chunk_duration_seconds: int,
+) -> TranscriptionResult:
+    """Run the transcription against the adapter, possibly chunk-by-chunk.
+
+    When ``chunk_duration_seconds == 0`` (tests, or operator-disabled), this
+    is a thin pass-through to ``adapter.transcribe(audio_path)``.
+
+    Otherwise the audio is split into fixed-length WAV chunks via ffmpeg,
+    each piece is transcribed in isolation, and the segments are stitched
+    back together with their timestamps shifted by the chunk's start
+    offset. Chunking is the only client-side defence against the Whisper
+    repetition-loop failure mode on long sessions: a hallucination on one
+    chunk cannot bleed into the next because each chunk is decoded fresh.
+
+    The temp directory under ``data/.tmp/chunks/<session_id>/`` is removed
+    on exit by ``chunked_audio`` regardless of success.
+    """
+    if chunk_duration_seconds <= 0:
+        return await adapter.transcribe(
+            audio_path=str(audio_path),
+            language_hint=language_hint,
+        )
+
+    work_dir = (
+        Path(settings.KAEYRIS_DATA_DIR) / ".tmp" / "chunks" / str(session_id)
+    )
+    all_segments: list[TranscriptionSegment] = []
+    language = ""
+    model_used = ""
+    provider = ""
+    with chunked_audio(audio_path, chunk_duration_seconds, work_dir) as chunks:
+        for offset, chunk_path in chunks:
+            chunk_result = await adapter.transcribe(
+                audio_path=str(chunk_path),
+                language_hint=language_hint,
+            )
+            for seg in chunk_result.segments:
+                all_segments.append(
+                    TranscriptionSegment(
+                        speaker_label=seg.speaker_label,
+                        start_seconds=seg.start_seconds + offset,
+                        end_seconds=seg.end_seconds + offset,
+                        text=seg.text,
+                    )
+                )
+            # The metadata fields are the same for every chunk in practice;
+            # keep the last non-empty value rather than synthesising.
+            language = chunk_result.language or language
+            model_used = chunk_result.model_used or model_used
+            provider = chunk_result.provider or provider
+
+    return TranscriptionResult(
+        segments=all_segments,
+        language=language,
+        model_used=model_used,
+        provider=provider,
+    )
 
 
 def _format_segments_for_narrative(segments: list[dict]) -> str:

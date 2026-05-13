@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     TRANSCRIPTION_MODEL: str = "whisper-large-v3"
     TRANSCRIPTION_TIMEOUT_SECONDS: float = 1800.0
     TRANSCRIPTION_LANGUAGE_HINT: str = "fr"
+    # Client-side chunk duration in seconds. The worker uses ffmpeg to split
+    # the uploaded audio into pieces of this length before transcribing each
+    # one separately, then stitches the segments back together with offset
+    # timestamps. Caps the blast radius of Whisper's repetition-loop failure
+    # mode (a hallucination can only contaminate one chunk, not the rest of
+    # the session). Set to 0 to disable and call the adapter once with the
+    # whole file (tests use 0 to keep their fake audio bytes working).
+    TRANSCRIPTION_CHUNK_DURATION_SECONDS: int = 30
 
 
 settings = Settings()

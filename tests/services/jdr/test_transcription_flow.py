@@ -87,6 +87,12 @@ async def ctx(
     monkeypatch.setattr(
         "app.jobs.jdr.settings.KAEYRIS_DATA_DIR", str(tmp_path)
     )
+    # These tests use 14-byte fake .m4a files. ffmpeg would reject them.
+    # Disable client-side chunking so the adapter is called once with the
+    # raw path (the adapter itself is a mock that doesn't read the file).
+    monkeypatch.setattr(
+        "app.jobs.jdr.settings.TRANSCRIPTION_CHUNK_DURATION_SECONDS", 0
+    )
 
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
     monkeypatch.setattr("app.jobs.jdr.get_sessionmaker", lambda: sm)
