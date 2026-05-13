@@ -164,22 +164,30 @@ class OpenAICompatibleTranscriptionAdapter:
                     "model": self.model,
                     "file": audio_file,
                     "response_format": "verbose_json",
-                    # temperature=0 -> deterministic decoding, fewer hallucinations
-                    "temperature": 0,
                 }
                 if language_hint:
                     kwargs["language"] = language_hint
-
-                # speaches/faster-whisper-specific options to fight repetition
-                # loops on long sessions (Whisper's known failure mode on silence
-                # or background noise). Passed via extra_body so the openai SDK
-                # forwards them as additional multipart fields. The cloud OpenAI
-                # Whisper API silently ignores unknown fields, so this is safe
-                # for both providers.
-                kwargs["extra_body"] = {
-                    "vad_filter": True,
-                    "condition_on_previous_text": False,
-                }
+                # WARNING about anti-hallucination knobs (vad_filter,
+                # hallucination_silence_threshold, compression_ratio_threshold,
+                # condition_on_previous_text, log_prob_threshold,
+                # no_speech_threshold, vad_parameters):
+                #
+                # We *cannot* configure them from the client. speaches'
+                # /v1/audio/transcriptions FastAPI route only accepts the
+                # OpenAI-spec fields plus {hotwords, stream, without_timestamps,
+                # timestamp_granularities}. Anything else passed via extra_body
+                # is silently dropped before it reaches faster-whisper. They
+                # must be configured on the server (env vars
+                # _UNSTABLE_VAD_FILTER, WHISPER__*) or worked around at the
+                # model level (large-v3-turbo is much less prone to repetition
+                # loops than large-v3 on long French audio).
+                #
+                # Likewise we do NOT pin temperature=0. faster-whisper's only
+                # remaining defence against degenerate output is its temperature
+                # fallback tuple (0.0, 0.2, 0.4, 0.6, 0.8, 1.0): when a window
+                # comes back with too-high compression ratio or too-low log
+                # prob, it re-decodes at the next temperature. Pinning a scalar
+                # disables that fallback.
 
                 resp = await self._client.audio.transcriptions.create(**kwargs)
         except (

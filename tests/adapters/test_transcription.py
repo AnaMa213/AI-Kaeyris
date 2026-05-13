@@ -182,10 +182,18 @@ async def test_permanent_errors_are_remapped(exc):
             await adapter.transcribe(audio_path="x.m4a")
 
 
-async def test_adapter_passes_vad_filter_and_anti_loop_options():
-    """Speaches/faster-whisper hallucinates on silence without VAD.
-    We must always pass vad_filter=True and condition_on_previous_text=False
-    via extra_body to combat the well-known repetition-loop failure mode."""
+async def test_adapter_does_not_pin_temperature():
+    """Pinning temperature=0 disables faster-whisper's temperature fallback
+    tuple (0.0, 0.2, 0.4, 0.6, 0.8, 1.0) — the only mechanism that lets the
+    decoder escape a degenerate-output window. We must not pass it.
+
+    We also do NOT push any of the faster-whisper-specific anti-hallucination
+    parameters here (vad_filter, hallucination_silence_threshold, etc.):
+    speaches' /v1/audio/transcriptions route accepts only OpenAI-spec fields
+    plus a tiny whitelist, so passing them via extra_body would be silently
+    dropped — and we'd be lying to ourselves by claiming to enable them.
+    Configure that on the server side (env vars) or by switching model.
+    """
     adapter = OpenAICompatibleTranscriptionAdapter(
         provider="local",
         model="Systran/faster-whisper-large-v3",
@@ -197,8 +205,6 @@ async def test_adapter_passes_vad_filter_and_anti_loop_options():
 
     async def _capture(**kwargs):
         captured.update(kwargs)
-        # Minimal verbose_json shape so the adapter doesn't crash on the
-        # rest of the pipeline.
         from types import SimpleNamespace
         return SimpleNamespace(language="fr", segments=[])
 
@@ -207,13 +213,8 @@ async def test_adapter_passes_vad_filter_and_anti_loop_options():
     with patch("builtins.open", mock_open(read_data=b"fake-audio")):
         await adapter.transcribe(audio_path="x.m4a", language_hint="fr")
 
-    assert "extra_body" in captured
-    extra = captured["extra_body"]
-    assert isinstance(extra, dict)
-    assert extra["vad_filter"] is True
-    assert extra["condition_on_previous_text"] is False
-    # temperature must be deterministic for transcription
-    assert captured["temperature"] == 0
+    assert "temperature" not in captured
+    assert "extra_body" not in captured
 
 
 async def test_missing_audio_file_is_permanent_error():
