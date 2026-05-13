@@ -42,3 +42,19 @@ def test_enqueue_job_without_transient_errors_disables_retry():
     queue = get_default_queue(_redis())
     job = enqueue_job(queue, add, 1, 2, transient_errors=False)
     assert job.retries_left is None
+
+
+def test_enqueue_job_applies_default_job_timeout():
+    """RQ default (180 s) is too short for transcription; we override
+    enqueue-wide so all jobs share a sensible cap."""
+    from app.jobs import DEFAULT_JOB_TIMEOUT_SECONDS
+
+    queue = get_default_queue(_redis())
+    job = enqueue_job(queue, add, 1, 2)
+    assert job.timeout == DEFAULT_JOB_TIMEOUT_SECONDS
+
+
+def test_enqueue_job_allows_per_call_job_timeout():
+    queue = get_default_queue(_redis())
+    job = enqueue_job(queue, add, 1, 2, job_timeout=60)
+    assert job.timeout == 60
