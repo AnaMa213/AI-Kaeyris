@@ -88,12 +88,18 @@ class SessionRepository(_BaseRepository):
     meaning outside its session)."""
 
     async def create(
-        self, *, title: str, recorded_at: datetime, gm_key_id: UUID
+        self,
+        *,
+        title: str,
+        recorded_at: datetime,
+        gm_key_id: UUID,
+        campaign_context: str | None = None,
     ) -> Session:
         row = Session(
             title=title,
             recorded_at=recorded_at,
             gm_key_id=gm_key_id,
+            campaign_context=campaign_context,
         )
         self._session.add(row)
         await self._session.flush()

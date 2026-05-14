@@ -13,9 +13,12 @@ entry point (``transcribe_session_job``).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select, update
@@ -47,7 +50,10 @@ from app.services.jdr.db.repositories import (
     ArtifactRepository,
     TranscriptionRepository,
 )
-from app.services.jdr.prompts import NARRATIVE_SYSTEM_PROMPT
+from app.services.jdr.prompts import (
+    ELEMENTS_SYSTEM_PROMPT,
+    NARRATIVE_SYSTEM_PROMPT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +78,14 @@ def generate_narrative_job(session_id: UUID) -> None:
     Sync wrapper for RQ. See :func:`_generate_narrative`.
     """
     asyncio.run(_generate_narrative(session_id))
+
+
+def generate_elements_job(session_id: UUID) -> None:
+    """Generate the structured-elements card (US2) for a transcribed session.
+
+    Sync wrapper for RQ. See :func:`_generate_elements`.
+    """
+    asyncio.run(_generate_elements(session_id))
 
 
 # ---------------------------------------------------------------------------
@@ -212,9 +226,12 @@ async def _generate_narrative(session_id: UUID) -> None:
                 "even though state is 'transcribed' — data inconsistency."
             )
         segments = list(transcription.segments_json or [])
+        campaign_context = session_row.campaign_context
 
     # Step 2: build the user prompt from segments
-    user_prompt = _format_segments_for_narrative(segments)
+    user_prompt = _build_user_prompt_with_context(
+        campaign_context, _format_segments_for_narrative(segments)
+    )
 
     # Step 3: call the LLM
     adapter = get_llm_adapter()
@@ -236,6 +253,67 @@ async def _generate_narrative(session_id: UUID) -> None:
             session_id,
             kind="narrative",
             content_json={"text": text},
+            model_used=model_used,
+        )
+        await db.commit()
+
+
+async def _generate_elements(session_id: UUID) -> None:
+    """Build the four-category elements card (US2).
+
+    Mirrors :func:`_generate_narrative` — same pre-conditions (the session
+    must be ``transcribed``), same error remapping, same UPSERT pattern.
+    The only thing that changes is the prompt and that the LLM is asked
+    for a JSON document which we parse and normalise into four lists.
+    """
+    sessionmaker = get_sessionmaker()
+
+    async with sessionmaker() as db:
+        session_row = await db.scalar(
+            select(Session).where(Session.id == session_id)
+        )
+        if session_row is None:
+            raise PermanentJobError(f"Session {session_id} not found.")
+        if session_row.state != SessionState.TRANSCRIBED:
+            raise PermanentJobError(
+                f"Session {session_id} is not transcribed "
+                f"(state={session_row.state.value}); cannot generate elements."
+            )
+        transcription = await db.scalar(
+            select(Transcription).where(Transcription.session_id == session_id)
+        )
+        if transcription is None:
+            raise PermanentJobError(
+                f"Session {session_id} has no transcription row "
+                "even though state is 'transcribed' — data inconsistency."
+            )
+        segments = list(transcription.segments_json or [])
+        campaign_context = session_row.campaign_context
+
+    user_prompt = _build_user_prompt_with_context(
+        campaign_context, _format_segments_for_narrative(segments)
+    )
+
+    adapter = get_llm_adapter()
+    try:
+        raw = await adapter.complete(
+            system=ELEMENTS_SYSTEM_PROMPT,
+            user=user_prompt,
+            max_tokens=settings.LLM_MAX_TOKENS_DEFAULT,
+        )
+    except TransientLLMError as exc:
+        raise TransientJobError(str(exc)) from exc
+    except PermanentLLMError as exc:
+        raise PermanentJobError(str(exc)) from exc
+
+    elements = _parse_elements_response(raw)
+
+    model_used = f"{settings.LLM_PROVIDER}:{settings.LLM_MODEL}"
+    async with sessionmaker() as db:
+        await ArtifactRepository(db).upsert(
+            session_id,
+            kind="elements",
+            content_json=elements,
             model_used=model_used,
         )
         await db.commit()
@@ -311,6 +389,97 @@ async def _transcribe_with_optional_chunking(
     )
 
 
+def _build_user_prompt_with_context(
+    campaign_context: str | None, transcript_block: str
+) -> str:
+    """Prepend the MJ's campaign-bible context to the transcript, if any.
+
+    When the session has a ``campaign_context`` set (Lot 4c), we wrap it
+    in an explicit ``CONTEXTE DE CAMPAGNE`` block so the LLM knows it is
+    background information, not part of the transcript. The transcript
+    follows in its own labelled block. The system prompts already
+    instruct the model to stay faithful to the transcript — the context
+    is meant to anchor recurring PNJ, the campaign tone, and the current
+    story arc, not to license inventions.
+    """
+    if not campaign_context or not campaign_context.strip():
+        return transcript_block
+    return (
+        "CONTEXTE DE CAMPAGNE (informations hors-transcript, à utiliser "
+        "uniquement pour ancrer noms récurrents, ton et fil narratif) :\n"
+        f"{campaign_context.strip()}\n\n"
+        "---\n\n"
+        "TRANSCRIPTION DE LA SESSION :\n"
+        f"{transcript_block}"
+    )
+
+
+_ELEMENT_KEYS = ("npcs", "locations", "items", "clues")
+
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+
+
+def _parse_elements_response(raw: str) -> dict[str, list[dict[str, str]]]:
+    """Normalise the LLM's reply into ``{npcs, locations, items, clues}``.
+
+    Models that don't perfectly follow "JSON only, no preamble" still need
+    to produce a useful artefact — we try, in order:
+
+    1. ``json.loads`` on the raw string.
+    2. Strip a fenced code block (```json … ```) and retry.
+    3. Look for the outermost ``{ … }`` substring and retry.
+
+    If all three fail, we fall back to the empty four-list shape rather
+    than raising — the spec's acceptance scenario US 2.3 explicitly says
+    an empty list is preferable to an absent one (and to a 500).
+    """
+    parsed = _try_parse_json(raw)
+    if parsed is None:
+        fence_match = _FENCED_JSON_RE.search(raw)
+        if fence_match is not None:
+            parsed = _try_parse_json(fence_match.group(1))
+    if parsed is None:
+        brace_start = raw.find("{")
+        brace_end = raw.rfind("}")
+        if brace_start != -1 and brace_end > brace_start:
+            parsed = _try_parse_json(raw[brace_start : brace_end + 1])
+    if parsed is None:
+        logger.warning(
+            "elements.parse_failed",
+            extra={"raw_excerpt": raw[:200]},
+        )
+        parsed = {}
+
+    out: dict[str, list[dict[str, str]]] = {}
+    for key in _ELEMENT_KEYS:
+        entries = parsed.get(key) if isinstance(parsed, dict) else None
+        out[key] = _normalise_element_list(entries)
+    return out
+
+
+def _try_parse_json(payload: str) -> Any:
+    try:
+        return json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _normalise_element_list(entries: object) -> list[dict[str, str]]:
+    """Coerce a raw element list into ``[{"name": str, "description": str}]``."""
+    if not isinstance(entries, list):
+        return []
+    out: list[dict[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "")).strip()
+        if not name:
+            continue
+        description = str(entry.get("description", "")).strip()
+        out.append({"name": name, "description": description})
+    return out
+
+
 def _format_segments_for_narrative(segments: list[dict]) -> str:
     """Flatten the diarised segments into a chronological transcript.
 
@@ -374,8 +543,10 @@ def _segments_to_json(result: TranscriptionResult) -> list[dict]:
 # Re-exported so callers don't need to know about the ORM detail.
 __all__ = [
     "Transcription",
+    "_generate_elements",
     "_generate_narrative",
     "_transcribe_session",
+    "generate_elements_job",
     "generate_narrative_job",
     "transcribe_session_job",
 ]

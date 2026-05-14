@@ -190,6 +190,13 @@ class Session(Base):
         nullable=False,
         default=SessionState.CREATED,
     )
+    # Optional "campaign bible" the MJ can attach to a session. Injected
+    # into the narrative + elements LLM prompts as a global steering
+    # context (PNJ récurrents, fil narratif, ton). Nullable because the
+    # field is opt-in and was added retroactively (Lot 4c).
+    campaign_context: Mapped[str | None] = mapped_column(
+        String(8000), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

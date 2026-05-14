@@ -30,7 +30,7 @@ from app.core.errors import AppError
 from app.core.rate_limit import enforce_rate_limit
 from app.core.redis_client import get_redis
 from app.jobs import enqueue_job, get_default_queue
-from app.jobs.jdr import generate_narrative_job
+from app.jobs.jdr import generate_elements_job, generate_narrative_job
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
 from app.services.jdr import logic
@@ -41,16 +41,20 @@ from app.services.jdr.db.repositories import (
     TranscriptionRepository,
 )
 from app.services.jdr.markdown import (
+    render_elements_md,
     render_narrative_md,
     render_transcription_md,
 )
 from app.services.jdr.schemas import (
+    Element,
+    ElementsArtifactOut,
     JobOut,
     JobQueuedOut,
     NarrativeArtifactOut,
     Page,
     SessionCreate,
     SessionOut,
+    SessionUpdate,
     TranscriptionOut,
     TranscriptionSegmentOut,
 )
@@ -101,7 +105,8 @@ class JobNotFoundError(AppError):
 _FUNC_NAME_TO_KIND: dict[str, JobKind] = {
     "app.jobs.jdr.transcribe_session_job": JobKind.TRANSCRIPTION,
     "app.jobs.jdr.generate_narrative_job": JobKind.NARRATIVE,
-    # US2/US3 will register the remaining kinds when they land.
+    "app.jobs.jdr.generate_elements_job": JobKind.ELEMENTS,
+    # US3 will register POVS when it lands.
 }
 
 # RQ status (string) -> our coarser JobStatus.
@@ -162,12 +167,15 @@ async def create_session(
     The body holds the human title and the date the session actually
     took place (``recorded_at``). State starts at ``created``; the
     audio is uploaded separately via ``POST /sessions/{id}/audio``.
+    The optional ``campaign_context`` is a steering block for the LLM
+    (PNJ récurrents, ton, fil narratif) — see PATCH for updating it.
     """
     row = await logic.create_session(
         db,
         title=payload.title,
         recorded_at=payload.recorded_at,
         gm_key_id=auth.id,
+        campaign_context=payload.campaign_context,
     )
     return SessionOut.model_validate(row)
 
@@ -204,6 +212,42 @@ async def get_session(
             detail=f"Session {session_id} not found."
         )
     return SessionOut.model_validate(row)
+
+
+@router.patch(
+    "/sessions/{session_id}",
+    response_model=SessionOut,
+    summary="Partially update a session (title and/or campaign_context).",
+)
+async def patch_session(
+    session_id: UUID,
+    payload: SessionUpdate,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SessionOut:
+    """Apply a partial update.
+
+    Only the fields present in the body are touched. To clear
+    ``campaign_context``, send ``{"campaign_context": null}`` explicitly —
+    omitting the key leaves the existing value alone. Updating
+    ``campaign_context`` does NOT re-run any previously generated
+    artefact; the new value affects only future generations.
+    """
+    session = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+
+    fields_set = payload.model_fields_set
+    updated = await logic.update_session(
+        db,
+        session=session,
+        title=payload.title if "title" in fields_set else None,
+        campaign_context=payload.campaign_context,
+        set_campaign_context="campaign_context" in fields_set,
+    )
+    return SessionOut.model_validate(updated)
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +419,125 @@ async def get_narrative_md(
         )
 
     md = render_narrative_md(session, artifact)
+    return Response(content=md, media_type="text/markdown; charset=utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Elements artifact (US2 — Lot 4)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/sessions/{session_id}/artifacts/elements",
+    response_model=JobQueuedOut,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Trigger the structured-elements card generation for a session.",
+)
+async def post_elements(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    redis_client: Annotated[Redis, Depends(get_redis)],
+) -> JobQueuedOut:
+    session_row = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session_row.state != SessionState.TRANSCRIBED:
+        raise SessionNotTranscribedError(
+            detail=(
+                f"Session {session_id} is in state {session_row.state.value!r}; "
+                "elements generation requires 'transcribed'."
+            ),
+        )
+
+    queue = get_default_queue(redis_client)
+    job = enqueue_job(
+        queue, generate_elements_job, session_id, transient_errors=True
+    )
+    return JobQueuedOut(
+        id=job.id,
+        kind=JobKind.ELEMENTS,
+        session_id=session_id,
+        status=JobStatus.QUEUED,
+        queued_at=datetime.now(UTC),
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/artifacts/elements",
+    response_model=ElementsArtifactOut,
+    summary="Fetch the structured-elements card of a session.",
+)
+async def get_elements(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ElementsArtifactOut:
+    session_row = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+
+    artifact = await ArtifactRepository(db).get(session_id, "elements")
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"Elements for session {session_id} have not been generated yet. "
+                "POST to this endpoint to enqueue the job."
+            ),
+        )
+
+    content = artifact.content_json or {}
+
+    def _coerce(key: str) -> list[Element]:
+        entries = content.get(key) or []
+        return [
+            Element(
+                name=str(e.get("name", "")).strip(),
+                description=str(e.get("description", "")).strip(),
+            )
+            for e in entries
+            if isinstance(e, dict) and str(e.get("name", "")).strip()
+        ]
+
+    return ElementsArtifactOut(
+        session_id=artifact.session_id,
+        npcs=_coerce("npcs"),
+        locations=_coerce("locations"),
+        items=_coerce("items"),
+        clues=_coerce("clues"),
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/artifacts/elements.md",
+    response_class=Response,
+    summary="Export the structured-elements card as Markdown (text/markdown).",
+)
+async def get_elements_md(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Response:
+    session = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    artifact = await ArtifactRepository(db).get(session_id, "elements")
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"Elements for session {session_id} have not been generated yet."
+            ),
+        )
+
+    md = render_elements_md(session, artifact)
     return Response(content=md, media_type="text/markdown; charset=utf-8")
 
 

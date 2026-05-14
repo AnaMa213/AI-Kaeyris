@@ -153,8 +153,70 @@ def render_narrative_md(session: Any, narrative_artifact: Any) -> str:
 
 
 def render_elements_md(session: Any, elements_artifact: Any) -> str:
-    """Render the structured-elements card with four h2 sections."""
-    raise NotImplementedError("Filled in by US2.")
+    """Render the structured-elements card with four h2 sections.
+
+    Layout (matches the tasks.md §T039 contract):
+
+        # Session : …
+
+        ## PNJ
+        - **<name>** — <description>
+        - …
+
+        ## Lieux
+        - …
+
+        ## Items
+        - …
+
+        ## Indices
+        - …
+
+    Empty lists print ``_(aucun élément)_`` rather than being omitted, so
+    the document always has four h2 sections.
+    """
+    parts: list[str] = [render_session_header(session)]
+
+    content = getattr(elements_artifact, "content_json", None) or {}
+    if not isinstance(content, dict):
+        content = {}
+
+    for label, key in (
+        ("PNJ", "npcs"),
+        ("Lieux", "locations"),
+        ("Items", "items"),
+        ("Indices", "clues"),
+    ):
+        parts.append(f"## {label}")
+        parts.append("")
+        entries = content.get(key) or []
+        if not isinstance(entries, list) or not entries:
+            parts.append("_(aucun élément)_")
+        else:
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("name", "")).strip()
+                description = str(entry.get("description", "")).strip()
+                if not name:
+                    continue
+                if description:
+                    parts.append(f"- **{name}** — {description}")
+                else:
+                    parts.append(f"- **{name}**")
+        parts.append("")
+
+    parts.append("---")
+    parts.append("")
+    model = getattr(elements_artifact, "model_used", "")
+    generated_at = getattr(elements_artifact, "generated_at", None)
+    date_str = (
+        generated_at.strftime("%Y-%m-%d %H:%M (UTC)")
+        if generated_at is not None
+        else "(inconnue)"
+    )
+    parts.append(f"_Fiche produite par `{model}`, le {date_str}._")
+    return "\n".join(parts)
 
 
 def render_pov_md(session: Any, pj: Any, pov_artifact: Any) -> str:

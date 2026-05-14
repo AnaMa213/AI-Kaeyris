@@ -39,6 +39,29 @@ class SessionCreate(BaseModel):
             "ISO-8601 with timezone."
         ),
     )
+    campaign_context: str | None = Field(
+        default=None,
+        max_length=8000,
+        description=(
+            "Optional campaign-bible block prepended to every narrative / "
+            "elements LLM prompt for this session. Use it to anchor the "
+            "model on recurring PNJ, the campaign tone, or the current "
+            "story arc. Can be updated later via PATCH."
+        ),
+    )
+
+
+class SessionUpdate(BaseModel):
+    """Payload accepted by ``PATCH /services/jdr/sessions/{id}``.
+
+    Every field is optional — the route applies only the keys that are
+    present (PATCH semantics). To clear ``campaign_context``, send
+    ``"campaign_context": null`` explicitly (the route distinguishes
+    "unset" from "explicit null" via Pydantic's ``model_fields_set``).
+    """
+
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    campaign_context: str | None = Field(default=None, max_length=8000)
 
 
 class SessionOut(BaseModel):
@@ -51,6 +74,7 @@ class SessionOut(BaseModel):
     recorded_at: datetime
     mode: SessionMode
     state: SessionState
+    campaign_context: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -121,6 +145,40 @@ class NarrativeArtifactOut(BaseModel):
 
     session_id: UUID
     text: str = Field(..., description="French narrative summary produced by the LLM.")
+    model_used: str
+    generated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Elements artefact (US2)
+# ---------------------------------------------------------------------------
+
+
+class Element(BaseModel):
+    """One row of the four-category elements card.
+
+    The LLM may return arbitrary keys; we surface only ``name`` and
+    ``description`` so the public contract is stable across model swaps.
+    """
+
+    name: str = Field(..., description="Short label (proper name or descriptor).")
+    description: str = Field(
+        "", description="One-sentence description (≤ ~25 words)."
+    )
+
+
+class ElementsArtifactOut(BaseModel):
+    """Public projection of an ``Artifact(kind='elements')`` row.
+
+    The four lists are *always* present, even when empty (``[]``). See
+    acceptance scenario US 2.3 in ``spec.md``.
+    """
+
+    session_id: UUID
+    npcs: list[Element] = Field(default_factory=list)
+    locations: list[Element] = Field(default_factory=list)
+    items: list[Element] = Field(default_factory=list)
+    clues: list[Element] = Field(default_factory=list)
     model_used: str
     generated_at: datetime
 

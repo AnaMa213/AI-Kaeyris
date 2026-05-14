@@ -50,6 +50,24 @@ class AudioAlreadyUploadedError(Exception):
     """A session already has an attached audio source."""
 
 
+class AudioPurgeBlockedError(Exception):
+    """The session is in a state where the audio cannot be safely purged.
+
+    Reasons (the route maps both to HTTP 409 with distinct detail
+    messages):
+
+    - ``state == transcribing``: a worker has the file open and is
+      writing to the DB; purging now would race the job.
+    - ``state == transcribed``: the audio was already auto-purged after a
+      successful transcription, the call is a no-op from the caller's
+      point of view.
+    """
+
+
+class NoAudioToPurgeError(Exception):
+    """The session has no audio source on record — nothing to delete."""
+
+
 # ---------------------------------------------------------------------------
 # Sessions (CRUD already exposed at jalon 5 sub-lot 3a)
 # ---------------------------------------------------------------------------
@@ -61,12 +79,40 @@ async def create_session(
     title: str,
     recorded_at: datetime,
     gm_key_id: UUID,
+    campaign_context: str | None = None,
 ) -> Session:
     return await SessionRepository(db).create(
         title=title,
         recorded_at=recorded_at,
         gm_key_id=gm_key_id,
+        campaign_context=campaign_context,
     )
+
+
+async def update_session(
+    db: AsyncSession,
+    *,
+    session: Session,
+    title: str | None = None,
+    campaign_context: str | None = None,
+    set_campaign_context: bool = False,
+) -> Session:
+    """Apply a partial update to a session.
+
+    ``title``: when not ``None``, replaces the current title.
+    ``campaign_context``: kept as a separate ``set_*`` flag because the
+    spec allows clearing the field by sending an explicit ``null`` — and
+    we can't tell "user sent null" from "user didn't send anything" with
+    a single param. The route is responsible for translating the
+    PATCH payload into ``set_campaign_context``.
+    """
+    if title is not None:
+        session.title = title
+    if set_campaign_context:
+        session.campaign_context = campaign_context
+    await db.commit()
+    await db.refresh(session)
+    return session
 
 
 async def list_sessions(
@@ -158,6 +204,74 @@ async def store_audio_source_for_session(
     )
 
     return AudioUploadResult(audio_source=audio, job_id=job.id)
+
+
+# ---------------------------------------------------------------------------
+# Audio purge / reset (Lot 4b)
+# ---------------------------------------------------------------------------
+
+
+async def purge_audio_for_session(
+    db: AsyncSession,
+    *,
+    session: Session,
+) -> None:
+    """Drop the audio file and reset the session to ``created``.
+
+    Allowed states: ``audio_uploaded``, ``transcription_failed``. In both
+    cases the file is still on disk (the auto-purge only fires on
+    transcription success — FR-004) and the MJ wants either to cancel an
+    upload mistake or to re-upload after a failure.
+
+    Refused states:
+
+    - ``transcribing``: a worker has the file; tolerating purge here would
+      race the job. -> AudioPurgeBlockedError.
+    - ``transcribed``: the audio was already auto-purged. Calling DELETE
+      now is misleading — surface it explicitly. -> AudioPurgeBlockedError.
+    - ``created`` and any other state without an audio source row
+      -> NoAudioToPurgeError (404).
+
+    Side effects on the happy path:
+
+    - removes ``<KAEYRIS_DATA_DIR>/<audio.path>`` from disk if it exists
+      (best effort — a stale file on disk is logged as a warning).
+    - UPDATE ``jdr_audio_sources.purged_at`` so the row stays for audit.
+    - UPDATE ``jdr_sessions.state = 'created'`` so a fresh upload is allowed.
+    """
+    if session.state == SessionState.TRANSCRIBING:
+        raise AudioPurgeBlockedError(
+            f"Session {session.id} is currently transcribing; "
+            "purging the audio now would race the worker."
+        )
+    if session.state == SessionState.TRANSCRIBED:
+        raise AudioPurgeBlockedError(
+            f"Session {session.id} is already transcribed and its audio "
+            "was auto-purged at that time — nothing left to delete."
+        )
+
+    repo = SessionRepository(db)
+    audio = await repo.get_audio_source(session.id)
+    if audio is None:
+        raise NoAudioToPurgeError(
+            f"Session {session.id} has no audio source on record."
+        )
+
+    if audio.purged_at is None:
+        full_path = Path(settings.KAEYRIS_DATA_DIR) / audio.path
+        try:
+            full_path.unlink(missing_ok=True)
+        except OSError as exc:
+            # DB is the source of truth; janitor sweep can pick this up later.
+            logger.warning(
+                "Failed to delete audio file %s during purge: %s",
+                full_path,
+                exc,
+            )
+
+    await repo.mark_audio_purged(session.id)
+    await repo.update_state(session.id, SessionState.CREATED)
+    await db.commit()
 
 
 # ---------------------------------------------------------------------------

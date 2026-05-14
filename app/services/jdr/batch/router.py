@@ -8,7 +8,7 @@ the default auth + rate-limit dependencies.
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, UploadFile, status
+from fastapi import APIRouter, Depends, File, Response, UploadFile, status
 from redis import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +19,8 @@ from app.core.redis_client import get_redis
 from app.services.jdr import logic
 from app.services.jdr.logic import (
     AudioAlreadyUploadedError,
+    AudioPurgeBlockedError,
+    NoAudioToPurgeError,
     UnsupportedAudioMimeError,
 )
 from app.services.jdr.schemas import AudioUploadOut
@@ -46,6 +48,27 @@ class AudioAlreadyUploaded(AppError):
     status_code = status.HTTP_409_CONFLICT
     error_type = "audio-already-uploaded"
     title = "Audio already uploaded"
+
+
+class AudioPurgeConflict(AppError):
+    """The session is in a state where the audio cannot be safely purged.
+
+    Triggers: ``state in {transcribing, transcribed}``. Transcribing because
+    the worker has the file open; transcribed because the file was already
+    purged by the auto-cleanup that follows a successful transcription.
+    """
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "audio-purge-conflict"
+    title = "Audio purge conflict"
+
+
+class AudioNotFound(AppError):
+    """No audio source attached to this session — nothing to delete."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "audio-not-found"
+    title = "Audio not found"
 
 
 router = APIRouter()
@@ -103,3 +126,46 @@ async def post_audio(
         uploaded_at=result.audio_source.uploaded_at,
         job_id=result.job_id,
     )
+
+
+@router.delete(
+    "/sessions/{session_id}/audio",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary=(
+        "Purge a session's audio file and reset the session so a new upload "
+        "can be sent."
+    ),
+)
+async def delete_audio(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Response:
+    """Drop the audio file on disk and reset the session to ``created``.
+
+    Use cases (matches data-model.md §3 retry arrow
+    ``transcription_failed → audio_uploaded`` and the analogous
+    cancel-before-transcription path):
+
+    - The MJ uploaded the wrong file and wants to re-upload before the
+      worker picks it up.
+    - Transcription failed and the MJ wants to try again with a different
+      audio (or after the upstream provider has recovered).
+
+    Refused (409) when ``state ∈ {transcribing, transcribed}``: see
+    ``logic.purge_audio_for_session`` for the rationale.
+    """
+    session = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+
+    try:
+        await logic.purge_audio_for_session(db, session=session)
+    except AudioPurgeBlockedError as exc:
+        raise AudioPurgeConflict(detail=str(exc)) from exc
+    except NoAudioToPurgeError as exc:
+        raise AudioNotFound(detail=str(exc)) from exc
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
