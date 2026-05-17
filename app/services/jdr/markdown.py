@@ -220,8 +220,44 @@ def render_elements_md(session: Any, elements_artifact: Any) -> str:
 
 
 def render_pov_md(session: Any, pj: Any, pov_artifact: Any) -> str:
-    """Render a per-PJ POV summary."""
-    raise NotImplementedError("Filled in by US3.")
+    """Render a per-PJ POV summary as Markdown.
+
+    Layout mirrors :func:`render_narrative_md` with a PJ-scoped h2:
+
+        # Session : …
+
+        ## Point de vue : <pj_name>
+
+        <pov text>
+
+        ---
+
+        _POV produit par `<model>`, le YYYY-MM-DD HH:MM (UTC)._
+    """
+    parts: list[str] = [render_session_header(session)]
+    pj_name = getattr(pj, "name", "(PJ inconnu)")
+    parts.append(f"## Point de vue : {pj_name}")
+    parts.append("")
+
+    text = ""
+    content = getattr(pov_artifact, "content_json", None) or {}
+    if isinstance(content, dict):
+        text = str(content.get("text", "")).strip()
+
+    parts.append(text if text else "_(POV vide)_")
+    parts.append("")
+
+    parts.append("---")
+    parts.append("")
+    model = getattr(pov_artifact, "model_used", "")
+    generated_at = getattr(pov_artifact, "generated_at", None)
+    date_str = (
+        generated_at.strftime("%Y-%m-%d %H:%M (UTC)")
+        if generated_at is not None
+        else "(inconnue)"
+    )
+    parts.append(f"_POV produit par `{model}`, le {date_str}._")
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

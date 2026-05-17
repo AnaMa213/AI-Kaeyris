@@ -201,6 +201,25 @@ class NarrativeArtifactOut(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# POV artefact (US3)
+# ---------------------------------------------------------------------------
+
+
+class PovArtifactOut(BaseModel):
+    """Public projection of an ``Artifact(kind='pov:<pj_id>')`` row.
+
+    ``pj_id`` is exposed at the top level for clients that don't want to
+    parse the composite ``kind`` field.
+    """
+
+    session_id: UUID
+    pj_id: UUID
+    text: str = Field(..., description="French POV summary scoped to this PJ.")
+    model_used: str
+    generated_at: datetime
+
+
+# ---------------------------------------------------------------------------
 # Elements artefact (US2)
 # ---------------------------------------------------------------------------
 

@@ -30,7 +30,11 @@ from app.core.errors import AppError
 from app.core.rate_limit import enforce_rate_limit
 from app.core.redis_client import get_redis
 from app.jobs import enqueue_job, get_default_queue
-from app.jobs.jdr import generate_elements_job, generate_narrative_job
+from app.jobs.jdr import (
+    generate_elements_job,
+    generate_narrative_job,
+    generate_povs_job,
+)
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
 from app.services.jdr import logic
@@ -39,11 +43,14 @@ from app.services.jdr.logic import DuplicatePjError
 from app.services.jdr.db.models import JobKind, JobStatus, SessionState
 from app.services.jdr.db.repositories import (
     ArtifactRepository,
+    MappingRepository,
+    PjRepository,
     TranscriptionRepository,
 )
 from app.services.jdr.markdown import (
     render_elements_md,
     render_narrative_md,
+    render_pov_md,
     render_transcription_md,
 )
 from app.services.jdr.schemas import (
@@ -57,6 +64,7 @@ from app.services.jdr.schemas import (
     Page,
     PjCreate,
     PjOut,
+    PovArtifactOut,
     SessionCreate,
     SessionOut,
     SessionUpdate,
@@ -121,13 +129,29 @@ class InvalidMappingError(AppError):
     title = "Invalid mapping"
 
 
+class NoMappingError(AppError):
+    """POV generation requires a configured speaker-PJ mapping first (FR-011)."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "no-mapping"
+    title = "Missing speaker-PJ mapping"
+
+
+class PjNotFoundError(AppError):
+    """Returned when a PJ does not exist or does not belong to the current MJ."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "pj-not-found"
+    title = "PJ not found"
+
+
 # Function name -> JobKind mapping. RQ pickles the callable by its module
 # path; we use the inverse to expose a stable enum in JobOut.
 _FUNC_NAME_TO_KIND: dict[str, JobKind] = {
     "app.jobs.jdr.transcribe_session_job": JobKind.TRANSCRIPTION,
     "app.jobs.jdr.generate_narrative_job": JobKind.NARRATIVE,
     "app.jobs.jdr.generate_elements_job": JobKind.ELEMENTS,
-    # US3 will register POVS when it lands.
+    "app.jobs.jdr.generate_povs_job": JobKind.POVS,
 }
 
 # RQ status (string) -> our coarser JobStatus.
@@ -682,6 +706,134 @@ async def get_elements_md(
 
     md = render_elements_md(session, artifact)
     return Response(content=md, media_type="text/markdown; charset=utf-8")
+
+
+# ---------------------------------------------------------------------------
+# POV artefacts (US3 — sub-lot 5b)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/sessions/{session_id}/artifacts/povs",
+    response_model=JobQueuedOut,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Trigger POV generation — one artefact per mapped PJ.",
+)
+async def post_povs(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    redis_client: Annotated[Redis, Depends(get_redis)],
+) -> JobQueuedOut:
+    """Enqueue a single job that generates one ``pov:<pj_id>`` artefact
+    per row in the session's mapping. Pre-conditions match the other
+    generators (404 if foreign, 409 if not transcribed) plus FR-011:
+    a 409 ``no-mapping`` is raised when the session has no configured
+    speaker-PJ mapping yet — the operator must call
+    ``PUT /mapping`` first.
+    """
+    session_row = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session_row.state != SessionState.TRANSCRIBED:
+        raise SessionNotTranscribedError(
+            detail=(
+                f"Session {session_id} is in state {session_row.state.value!r}; "
+                "POV generation requires 'transcribed'."
+            ),
+        )
+    mappings = await MappingRepository(db).get_for_session(session_id)
+    if not mappings:
+        raise NoMappingError(
+            detail=(
+                f"Session {session_id} has no speaker-PJ mapping configured. "
+                "Call PUT /services/jdr/sessions/{id}/mapping first."
+            ),
+        )
+
+    queue = get_default_queue(redis_client)
+    job = enqueue_job(
+        queue, generate_povs_job, session_id, transient_errors=True
+    )
+    return JobQueuedOut(
+        id=job.id,
+        kind=JobKind.POVS,
+        session_id=session_id,
+        status=JobStatus.QUEUED,
+        queued_at=datetime.now(UTC),
+    )
+
+
+async def _load_owned_pj_or_404(
+    db: AsyncSession, *, pj_id: UUID, gm_key_id: UUID
+):
+    """Return the PJ row or raise ``PjNotFoundError`` (404).
+
+    Both "doesn't exist" and "owned by another MJ" collapse to 404 so a
+    MJ cannot probe the existence of foreign PJ ids.
+    """
+    pj = await PjRepository(db).find_by_id_owned_by(pj_id, gm_key_id)
+    if pj is None:
+        raise PjNotFoundError(detail=f"PJ {pj_id} not found.")
+    return pj
+
+
+@router.get(
+    "/sessions/{session_id}/artifacts/povs/{pj_id_str}",
+    summary="Fetch one PJ's POV — JSON, or Markdown via the .md suffix.",
+)
+async def get_pov(
+    session_id: UUID,
+    pj_id_str: str,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """One route handles both representations because the ``.md`` suffix
+    pattern would otherwise collide with the UUID path param at the
+    Starlette routing layer (``{pj_id}`` matches ``[^/]+`` which greedily
+    swallows the ``.md``).
+
+    - ``GET .../povs/<uuid>``     → JSON (:class:`PovArtifactOut`)
+    - ``GET .../povs/<uuid>.md``  → Markdown (``text/markdown``)
+    """
+    as_md = pj_id_str.endswith(".md")
+    pj_id_raw = pj_id_str[:-3] if as_md else pj_id_str
+    try:
+        pj_id = UUID(pj_id_raw)
+    except ValueError as exc:
+        raise PjNotFoundError(detail=f"PJ {pj_id_raw} not found.") from exc
+
+    session_row = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    pj = await _load_owned_pj_or_404(db, pj_id=pj_id, gm_key_id=auth.id)
+
+    artifact = await ArtifactRepository(db).get(session_id, f"pov:{pj_id}")
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"POV for PJ {pj_id} in session {session_id} has not been "
+                "generated yet. POST to /artifacts/povs to enqueue the job."
+            ),
+        )
+
+    if as_md:
+        md = render_pov_md(session_row, pj, artifact)
+        return Response(content=md, media_type="text/markdown; charset=utf-8")
+
+    content = artifact.content_json or {}
+    text = str(content.get("text", "")) if isinstance(content, dict) else ""
+    return PovArtifactOut(
+        session_id=artifact.session_id,
+        pj_id=pj_id,
+        text=text,
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -46,13 +46,16 @@ from app.services.jdr.db.models import (
     SessionState,
     Transcription,
 )
+from app.services.jdr.db.models import Pj
 from app.services.jdr.db.repositories import (
     ArtifactRepository,
+    MappingRepository,
     TranscriptionRepository,
 )
 from app.services.jdr.prompts import (
     ELEMENTS_SYSTEM_PROMPT,
     NARRATIVE_SYSTEM_PROMPT,
+    POV_SYSTEM_PROMPT,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,6 +89,14 @@ def generate_elements_job(session_id: UUID) -> None:
     Sync wrapper for RQ. See :func:`_generate_elements`.
     """
     asyncio.run(_generate_elements(session_id))
+
+
+def generate_povs_job(session_id: UUID) -> None:
+    """Generate one POV artefact per mapped PJ for a transcribed session.
+
+    Sync wrapper for RQ. See :func:`_generate_povs`.
+    """
+    asyncio.run(_generate_povs(session_id))
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +330,131 @@ async def _generate_elements(session_id: UUID) -> None:
         await db.commit()
 
 
+async def _generate_povs(session_id: UUID) -> None:
+    """Build one POV summary per mapped PJ for a transcribed session.
+
+    Pre-conditions checked here (same idiom as the other generators):
+    session exists, ``state == transcribed``, transcription row present,
+    at least one mapping row. A missing mapping is technically already
+    blocked by the route's 409 check, but we keep the worker honest in
+    case it is invoked via a different code path (CLI, retry).
+
+    UPSERT one ``Artifact(kind='pov:<pj_id>')`` per mapping entry.
+    """
+    sessionmaker = get_sessionmaker()
+
+    # Step 1: load + validate
+    async with sessionmaker() as db:
+        session_row = await db.scalar(
+            select(Session).where(Session.id == session_id)
+        )
+        if session_row is None:
+            raise PermanentJobError(f"Session {session_id} not found.")
+        if session_row.state != SessionState.TRANSCRIBED:
+            raise PermanentJobError(
+                f"Session {session_id} is not transcribed "
+                f"(state={session_row.state.value}); cannot generate POVs."
+            )
+        transcription = await db.scalar(
+            select(Transcription).where(Transcription.session_id == session_id)
+        )
+        if transcription is None:
+            raise PermanentJobError(
+                f"Session {session_id} has no transcription row "
+                "even though state is 'transcribed' — data inconsistency."
+            )
+        mappings = await MappingRepository(db).get_for_session(session_id)
+        if not mappings:
+            raise PermanentJobError(
+                f"Session {session_id} has no speaker-PJ mapping; "
+                "set one via PUT /mapping before generating POVs."
+            )
+        # Load PJ rows so we can put their names in the prompt.
+        pj_ids = [m.pj_id for m in mappings]
+        pj_rows = (
+            await db.execute(select(Pj).where(Pj.id.in_(pj_ids)))
+        ).scalars().all()
+        pj_by_id: dict[UUID, Pj] = {p.id: p for p in pj_rows}
+
+        segments = list(transcription.segments_json or [])
+        campaign_context = session_row.campaign_context
+
+    # Step 2: per-PJ LLM calls, then UPSERT in a single final commit
+    adapter = get_llm_adapter()
+    model_used = f"{settings.LLM_PROVIDER}:{settings.LLM_MODEL}"
+    transcript_block = _format_segments_for_narrative(segments)
+
+    results: list[tuple[UUID, str]] = []
+    for mapping in mappings:
+        pj = pj_by_id.get(mapping.pj_id)
+        if pj is None:
+            # Mapping points at a PJ that disappeared between the load and
+            # now (very rare). Skip rather than fail the whole batch.
+            logger.warning(
+                "pov.skip_unknown_pj",
+                extra={
+                    "session_id": str(session_id),
+                    "pj_id": str(mapping.pj_id),
+                },
+            )
+            continue
+        user_prompt = _build_pov_user_prompt(
+            pj_name=pj.name,
+            speaker_label=mapping.speaker_label,
+            transcript_block=transcript_block,
+            campaign_context=campaign_context,
+        )
+        try:
+            text = await adapter.complete(
+                system=POV_SYSTEM_PROMPT,
+                user=user_prompt,
+                max_tokens=settings.LLM_MAX_TOKENS_DEFAULT,
+            )
+        except TransientLLMError as exc:
+            raise TransientJobError(str(exc)) from exc
+        except PermanentLLMError as exc:
+            raise PermanentJobError(str(exc)) from exc
+        results.append((pj.id, text))
+
+    async with sessionmaker() as db:
+        repo = ArtifactRepository(db)
+        for pj_id, text in results:
+            await repo.upsert(
+                session_id,
+                kind=f"pov:{pj_id}",
+                content_json={"text": text},
+                model_used=model_used,
+            )
+        await db.commit()
+
+
+def _build_pov_user_prompt(
+    *,
+    pj_name: str,
+    speaker_label: str,
+    transcript_block: str,
+    campaign_context: str | None,
+) -> str:
+    """Wrap the transcript with a PJ-scoped header for the POV prompt."""
+    header = (
+        f"POINT DE VUE DE : {pj_name}\n"
+        f"LABEL DE LOCUTEUR ASSOCIÉ : {speaker_label}\n"
+        "Tous les autres labels (speaker_*, unknown) sont d'autres "
+        "joueurs ou le MJ.\n"
+    )
+    base = f"{header}\n---\n\nTRANSCRIPTION DE LA SESSION :\n{transcript_block}"
+    if not campaign_context or not campaign_context.strip():
+        return base
+    return (
+        f"{header}\n"
+        "CONTEXTE DE CAMPAGNE (informations hors-transcript, à utiliser "
+        "uniquement pour ancrer noms récurrents, ton et fil narratif) :\n"
+        f"{campaign_context.strip()}\n\n"
+        "---\n\n"
+        f"TRANSCRIPTION DE LA SESSION :\n{transcript_block}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -545,8 +681,10 @@ __all__ = [
     "Transcription",
     "_generate_elements",
     "_generate_narrative",
+    "_generate_povs",
     "_transcribe_session",
     "generate_elements_job",
     "generate_narrative_job",
+    "generate_povs_job",
     "transcribe_session_job",
 ]
