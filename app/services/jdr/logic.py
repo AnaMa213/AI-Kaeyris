@@ -20,6 +20,7 @@ from pathlib import Path
 from uuid import UUID
 
 from redis import Redis
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile
 
@@ -28,7 +29,9 @@ from app.jobs import enqueue_job, get_default_queue
 from app.jobs.jdr import transcribe_session_job
 from app.services.jdr.db.models import AudioSource, Pj, Session, SessionState
 from app.services.jdr.db.repositories import (
+    ArtifactRepository,
     DuplicatePjNameError,
+    MappingRepository,
     PjRepository,
     SessionRepository,
 )
@@ -60,6 +63,14 @@ class DuplicatePjError(Exception):
     Surface for the route layer — wraps the repository-level
     :class:`DuplicatePjNameError` so the route only knows about
     ``app.services.jdr.logic`` exceptions (separation of layers).
+    """
+
+
+class InvalidMappingError(Exception):
+    """At least one ``pj_id`` in the mapping is unknown or owned by another MJ.
+
+    Surfaced by :func:`set_session_mapping`. The route maps this to
+    HTTP 422 ``invalid-mapping``.
     """
 
 
@@ -246,6 +257,65 @@ async def create_pj(
 
 async def list_pjs(db: AsyncSession, *, gm_key_id: UUID) -> list[Pj]:
     return await PjRepository(db).list_for_gm(gm_key_id)
+
+
+# ---------------------------------------------------------------------------
+# Speaker ↔ PJ mapping (US3 — sub-lot 5a)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MappingResult:
+    """Snapshot of a session's speaker↔PJ mapping after a read or write."""
+
+    mapping: dict[str, UUID]
+    updated_at: datetime | None
+
+
+async def get_session_mapping(
+    db: AsyncSession, *, session_id: UUID
+) -> MappingResult:
+    rows = await MappingRepository(db).get_for_session(session_id)
+    return MappingResult(
+        mapping={r.speaker_label: r.pj_id for r in rows},
+        updated_at=max((r.updated_at for r in rows), default=None),
+    )
+
+
+async def set_session_mapping(
+    db: AsyncSession,
+    *,
+    session: Session,
+    mapping: dict[str, UUID],
+    gm_key_id: UUID,
+) -> MappingResult:
+    """Replace the session's speaker→PJ mapping atomically.
+
+    Validates that every ``pj_id`` in ``mapping`` is owned by
+    ``gm_key_id`` (raises :class:`InvalidMappingError` otherwise).
+    Side-effect: deletes every ``artifacts(kind LIKE 'pov:%')`` row
+    for the session — POVs must be regenerated explicitly after a
+    mapping change (data-model.md §6 invariant, rest-api.md §169).
+    """
+    if mapping:
+        unique_pj_ids = set(mapping.values())
+        stmt = select(Pj.id).where(
+            Pj.id.in_(unique_pj_ids),
+            Pj.owner_gm_key_id == gm_key_id,
+        )
+        found_ids = set((await db.execute(stmt)).scalars().all())
+        missing = unique_pj_ids - found_ids
+        if missing:
+            raise InvalidMappingError(
+                "Unknown or foreign PJ id(s): "
+                + ", ".join(sorted(str(m) for m in missing))
+            )
+
+    await MappingRepository(db).replace_for_session(session.id, mapping)
+    await ArtifactRepository(db).invalidate_pov_artifacts(session.id)
+    await db.commit()
+
+    return await get_session_mapping(db, session_id=session.id)
 
 
 # ---------------------------------------------------------------------------

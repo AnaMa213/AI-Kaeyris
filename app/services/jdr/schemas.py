@@ -157,6 +157,36 @@ class PjOut(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Speaker ↔ PJ mapping (US3)
+# ---------------------------------------------------------------------------
+
+
+class MappingPut(BaseModel):
+    """Body for ``PUT /services/jdr/sessions/{session_id}/mapping``.
+
+    Shape ``{speaker_label: pj_id}`` per ``contracts/rest-api.md``
+    §148-163.
+    """
+
+    mapping: dict[str, UUID] = Field(
+        default_factory=dict,
+        description="speaker_label -> pj_id",
+    )
+
+
+class MappingOut(BaseModel):
+    """Response for both PUT and GET ``/mapping``.
+
+    ``updated_at`` is the most recent ``updated_at`` across the rows,
+    or ``None`` when the session has no mapping yet.
+    """
+
+    session_id: UUID
+    mapping: dict[str, UUID]
+    updated_at: datetime | None
+
+
+# ---------------------------------------------------------------------------
 # Narrative artefact (US1)
 # ---------------------------------------------------------------------------
 

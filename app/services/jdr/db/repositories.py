@@ -21,7 +21,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy.exc import IntegrityError
@@ -31,6 +31,7 @@ from app.services.jdr.db.models import (
     AudioSource,
     Pj,
     Session,
+    SessionPjMapping,
     SessionState,
     Transcription,
 )
@@ -39,7 +40,6 @@ if TYPE_CHECKING:
     from app.services.jdr.db.models import (
         ApiKey,
         Job,
-        SessionPjMapping,
     )
 
 
@@ -254,16 +254,43 @@ class MappingRepository(_BaseRepository):
     async def get_for_session(
         self, session_id: UUID
     ) -> list[SessionPjMapping]:
-        raise NotImplementedError("Filled in by US3.")
+        stmt = (
+            select(SessionPjMapping)
+            .where(SessionPjMapping.session_id == session_id)
+            .order_by(SessionPjMapping.speaker_label)
+        )
+        result = await self._session.scalars(stmt)
+        return list(result.all())
 
     async def replace_for_session(
         self,
         session_id: UUID,
         mapping: dict[str, UUID],
-    ) -> None:
-        """Replace the mapping atomically and invalidate the matching
-        ``pov:<pj_id>`` artefacts (delegated to ``ArtifactRepository``)."""
-        raise NotImplementedError("Filled in by US3.")
+    ) -> list[SessionPjMapping]:
+        """Replace the mapping atomically.
+
+        Invalidating the matching ``pov:<pj_id>`` artefacts is the
+        caller's responsibility (delegated to
+        :meth:`ArtifactRepository.invalidate_pov_artifacts`) so the
+        repository stays focused on a single table.
+        """
+        await self._session.execute(
+            delete(SessionPjMapping).where(
+                SessionPjMapping.session_id == session_id
+            )
+        )
+        rows = [
+            SessionPjMapping(
+                session_id=session_id,
+                speaker_label=label,
+                pj_id=pj_id,
+            )
+            for label, pj_id in mapping.items()
+        ]
+        for row in rows:
+            self._session.add(row)
+        await self._session.flush()
+        return rows
 
 
 class ArtifactRepository(_BaseRepository):
@@ -321,8 +348,17 @@ class ArtifactRepository(_BaseRepository):
 
     async def invalidate_pov_artifacts(self, session_id: UUID) -> int:
         """Delete every ``pov:*`` row for this session; called when the
-        mapping changes (data-model.md §6 invariant)."""
-        raise NotImplementedError("Filled in by US3.")
+        mapping changes (data-model.md §6 invariant).
+
+        Returns the number of deleted rows so the caller can log it.
+        """
+        result = await self._session.execute(
+            delete(Artifact).where(
+                Artifact.session_id == session_id,
+                Artifact.kind.like("pov:%"),
+            )
+        )
+        return result.rowcount
 
 
 class JobRepository(_BaseRepository):

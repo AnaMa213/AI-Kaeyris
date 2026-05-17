@@ -51,6 +51,8 @@ from app.services.jdr.schemas import (
     ElementsArtifactOut,
     JobOut,
     JobQueuedOut,
+    MappingOut,
+    MappingPut,
     NarrativeArtifactOut,
     Page,
     PjCreate,
@@ -109,6 +111,14 @@ class DuplicatePjConflictError(AppError):
     status_code = status.HTTP_409_CONFLICT
     error_type = "duplicate-pj"
     title = "Duplicate PJ name"
+
+
+class InvalidMappingError(AppError):
+    """One or more ``pj_id`` in the mapping body is unknown or owned by another MJ."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "invalid-mapping"
+    title = "Invalid mapping"
 
 
 # Function name -> JobKind mapping. RQ pickles the callable by its module
@@ -302,6 +312,85 @@ async def list_pjs(
     rows = await logic.list_pjs(db, gm_key_id=auth.id)
     items = [PjOut.model_validate(r) for r in rows]
     return Page[PjOut](items=items, total=len(items), page=1, size=len(items) or 1)
+
+
+# ---------------------------------------------------------------------------
+# Speaker ↔ PJ mapping (US3 — sub-lot 5a)
+# ---------------------------------------------------------------------------
+
+
+@router.put(
+    "/sessions/{session_id}/mapping",
+    response_model=MappingOut,
+    summary="Replace the speaker→PJ mapping for a session.",
+)
+async def put_session_mapping(
+    session_id: UUID,
+    payload: MappingPut,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> MappingOut:
+    """Replace the mapping in one atomic write.
+
+    - 404 if the session does not belong to the current MJ.
+    - 409 if the session is not yet in ``state=transcribed``.
+    - 422 if any ``pj_id`` is unknown or owned by another MJ.
+
+    Side-effect: any existing ``pov:*`` artefact for this session is
+    deleted (data-model.md §6 invariant). A subsequent
+    ``POST /artifacts/povs`` is required to regenerate them.
+    """
+    session = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session.state != SessionState.TRANSCRIBED:
+        raise SessionNotTranscribedError(
+            detail=(
+                f"Session {session_id} is in state '{session.state.value}'; "
+                "mapping requires 'transcribed'."
+            )
+        )
+    try:
+        result = await logic.set_session_mapping(
+            db,
+            session=session,
+            mapping=payload.mapping,
+            gm_key_id=auth.id,
+        )
+    except logic.InvalidMappingError as exc:
+        raise InvalidMappingError(detail=str(exc)) from exc
+    return MappingOut(
+        session_id=session.id,
+        mapping=result.mapping,
+        updated_at=result.updated_at,
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/mapping",
+    response_model=MappingOut,
+    summary="Read the current speaker→PJ mapping for a session.",
+)
+async def get_session_mapping(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> MappingOut:
+    """Returns 200 with an empty dict when the session has no mapping
+    yet (resource exists but is not configured)."""
+    session = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    result = await logic.get_session_mapping(db, session_id=session.id)
+    return MappingOut(
+        session_id=session.id,
+        mapping=result.mapping,
+        updated_at=result.updated_at,
+    )
 
 
 # ---------------------------------------------------------------------------
