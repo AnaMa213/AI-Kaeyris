@@ -136,6 +136,27 @@ class TranscriptionOut(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# PJ — Personnages-joueurs (US3)
+# ---------------------------------------------------------------------------
+
+
+class PjCreate(BaseModel):
+    """Payload accepted by ``POST /services/jdr/pjs``."""
+
+    name: str = Field(..., min_length=1, max_length=255)
+
+
+class PjOut(BaseModel):
+    """Public projection of ``jdr_pjs`` rows."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+    created_at: datetime
+
+
+# ---------------------------------------------------------------------------
 # Narrative artefact (US1)
 # ---------------------------------------------------------------------------
 

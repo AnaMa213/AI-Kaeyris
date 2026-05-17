@@ -24,9 +24,12 @@ from uuid import UUID
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy.exc import IntegrityError
+
 from app.services.jdr.db.models import (
     Artifact,
     AudioSource,
+    Pj,
     Session,
     SessionState,
     Transcription,
@@ -36,9 +39,17 @@ if TYPE_CHECKING:
     from app.services.jdr.db.models import (
         ApiKey,
         Job,
-        Pj,
         SessionPjMapping,
     )
+
+
+class DuplicatePjNameError(Exception):
+    """A PJ with this name already exists for this MJ.
+
+    Raised by :meth:`PjRepository.create` when the
+    ``(owner_gm_key_id, name)`` uniqueness constraint trips. The route
+    maps this to HTTP 409.
+    """
 
 
 class _BaseRepository:
@@ -69,15 +80,37 @@ class PjRepository(_BaseRepository):
     """``jdr_pjs`` access. Used by US3 (mapping) and US4 (player listing)."""
 
     async def create(self, *, name: str, owner_gm_key_id: UUID) -> Pj:
-        raise NotImplementedError("Filled in by US3.")
+        row = Pj(name=name, owner_gm_key_id=owner_gm_key_id)
+        self._session.add(row)
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            # The (owner_gm_key_id, name) uniqueness constraint trips.
+            # Roll back the partial flush so the caller's outer commit
+            # doesn't choke on a poisoned session.
+            await self._session.rollback()
+            raise DuplicatePjNameError(
+                f"GM already has a PJ named {name!r}."
+            ) from exc
+        await self._session.refresh(row)
+        return row
 
     async def list_for_gm(self, gm_key_id: UUID) -> list[Pj]:
-        raise NotImplementedError("Filled in by US3.")
+        stmt = (
+            select(Pj)
+            .where(Pj.owner_gm_key_id == gm_key_id)
+            .order_by(Pj.created_at)
+        )
+        result = await self._session.scalars(stmt)
+        return list(result.all())
 
     async def find_by_id_owned_by(
         self, pj_id: UUID, gm_key_id: UUID
     ) -> Pj | None:
-        raise NotImplementedError("Filled in by US3.")
+        stmt = select(Pj).where(
+            Pj.id == pj_id, Pj.owner_gm_key_id == gm_key_id
+        )
+        return await self._session.scalar(stmt)
 
 
 class SessionRepository(_BaseRepository):

@@ -26,8 +26,12 @@ from starlette.datastructures import UploadFile
 from app.core.config import settings
 from app.jobs import enqueue_job, get_default_queue
 from app.jobs.jdr import transcribe_session_job
-from app.services.jdr.db.models import AudioSource, Session, SessionState
-from app.services.jdr.db.repositories import SessionRepository
+from app.services.jdr.db.models import AudioSource, Pj, Session, SessionState
+from app.services.jdr.db.repositories import (
+    DuplicatePjNameError,
+    PjRepository,
+    SessionRepository,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +52,15 @@ class UnsupportedAudioMimeError(Exception):
 
 class AudioAlreadyUploadedError(Exception):
     """A session already has an attached audio source."""
+
+
+class DuplicatePjError(Exception):
+    """A PJ with this name already exists for this MJ.
+
+    Surface for the route layer — wraps the repository-level
+    :class:`DuplicatePjNameError` so the route only knows about
+    ``app.services.jdr.logic`` exceptions (separation of layers).
+    """
 
 
 class AudioPurgeBlockedError(Exception):
@@ -204,6 +217,35 @@ async def store_audio_source_for_session(
     )
 
     return AudioUploadResult(audio_source=audio, job_id=job.id)
+
+
+# ---------------------------------------------------------------------------
+# PJ — Personnages-joueurs (US3 — sub-lot 5a)
+# ---------------------------------------------------------------------------
+
+
+async def create_pj(
+    db: AsyncSession, *, name: str, gm_key_id: UUID
+) -> Pj:
+    """Create a PJ scoped to the current MJ.
+
+    Raises :class:`DuplicatePjError` if the MJ already has a PJ with the
+    same name (uniqueness ``(owner_gm_key_id, name)`` on
+    :class:`Pj`).
+    """
+    try:
+        pj = await PjRepository(db).create(
+            name=name, owner_gm_key_id=gm_key_id
+        )
+    except DuplicatePjNameError as exc:
+        raise DuplicatePjError(str(exc)) from exc
+    await db.commit()
+    await db.refresh(pj)
+    return pj
+
+
+async def list_pjs(db: AsyncSession, *, gm_key_id: UUID) -> list[Pj]:
+    return await PjRepository(db).list_for_gm(gm_key_id)
 
 
 # ---------------------------------------------------------------------------

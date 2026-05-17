@@ -35,6 +35,7 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Job
 from app.services.jdr import logic
 from app.services.jdr.batch.router import router as batch_router
+from app.services.jdr.logic import DuplicatePjError
 from app.services.jdr.db.models import JobKind, JobStatus, SessionState
 from app.services.jdr.db.repositories import (
     ArtifactRepository,
@@ -52,6 +53,8 @@ from app.services.jdr.schemas import (
     JobQueuedOut,
     NarrativeArtifactOut,
     Page,
+    PjCreate,
+    PjOut,
     SessionCreate,
     SessionOut,
     SessionUpdate,
@@ -98,6 +101,14 @@ class JobNotFoundError(AppError):
     status_code = status.HTTP_404_NOT_FOUND
     error_type = "job-not-found"
     title = "Job not found"
+
+
+class DuplicatePjConflictError(AppError):
+    """A PJ with this name already exists for this MJ (uniqueness violated)."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "duplicate-pj"
+    title = "Duplicate PJ name"
 
 
 # Function name -> JobKind mapping. RQ pickles the callable by its module
@@ -248,6 +259,49 @@ async def patch_session(
         set_campaign_context="campaign_context" in fields_set,
     )
     return SessionOut.model_validate(updated)
+
+
+# ---------------------------------------------------------------------------
+# PJ — Personnages-joueurs (US3 — sub-lot 5a)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/pjs",
+    response_model=PjOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a PJ (player-character) owned by the current MJ.",
+)
+async def create_pj(
+    payload: PjCreate,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> PjOut:
+    """A PJ is stable across sessions — it's the narrative anchor that
+    later gets mapped to a diarisation ``speaker_label`` per session
+    (sub-lot 5b) and to a player API key (US4).
+
+    Duplicate name within the same MJ -> 409 ``duplicate-pj``.
+    """
+    try:
+        pj = await logic.create_pj(db, name=payload.name, gm_key_id=auth.id)
+    except DuplicatePjError as exc:
+        raise DuplicatePjConflictError(detail=str(exc)) from exc
+    return PjOut.model_validate(pj)
+
+
+@router.get(
+    "/pjs",
+    response_model=Page[PjOut],
+    summary="List the current MJ's PJs.",
+)
+async def list_pjs(
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Page[PjOut]:
+    rows = await logic.list_pjs(db, gm_key_id=auth.id)
+    items = [PjOut.model_validate(r) for r in rows]
+    return Page[PjOut](items=items, total=len(items), page=1, size=len(items) or 1)
 
 
 # ---------------------------------------------------------------------------
