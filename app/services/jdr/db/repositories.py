@@ -29,11 +29,14 @@ from sqlalchemy.exc import IntegrityError
 from app.services.jdr.db.models import (
     Artifact,
     AudioSource,
+    Chunk,
     Pj,
     Session,
     SessionPjMapping,
+    SessionPlayer,
     SessionState,
     Transcription,
+    TranscriptionMode,
 )
 
 if TYPE_CHECKING:
@@ -127,12 +130,14 @@ class SessionRepository(_BaseRepository):
         recorded_at: datetime,
         gm_key_id: UUID,
         campaign_context: str | None = None,
+        transcription_mode: TranscriptionMode = TranscriptionMode.DIARISED,
     ) -> Session:
         row = Session(
             title=title,
             recorded_at=recorded_at,
             gm_key_id=gm_key_id,
             campaign_context=campaign_context,
+            transcription_mode=transcription_mode,
         )
         self._session.add(row)
         await self._session.flush()
@@ -380,3 +385,101 @@ class JobRepository(_BaseRepository):
 
     async def get(self, job_id: str) -> Job | None:
         raise NotImplementedError("Filled in by US1.")
+
+
+# ---------------------------------------------------------------------------
+# Sous-jalon 5.5 — feature 002-non-diarised-mode
+# ---------------------------------------------------------------------------
+
+
+class ChunkRepository(_BaseRepository):
+    """``jdr_chunks`` access. Used by the transcription job (non_diarised
+    branch) to seed chunks, by `_generate_summary` to populate
+    `summary_text` per chunk, and by the dérivés narrative/elements/povs
+    jobs to read the summaries back."""
+
+    async def bulk_create_for_session(
+        self, session_id: UUID, *, texts: list[str]
+    ) -> list[Chunk]:
+        """Insert one row per text, ordered by index (`ordre = i`).
+
+        Atomic at the flush level — caller controls the outer commit.
+        """
+        rows = [
+            Chunk(session_id=session_id, ordre=i, text=text)
+            for i, text in enumerate(texts)
+        ]
+        for row in rows:
+            self._session.add(row)
+        await self._session.flush()
+        return rows
+
+    async def list_for_session(self, session_id: UUID) -> list[Chunk]:
+        stmt = (
+            select(Chunk)
+            .where(Chunk.session_id == session_id)
+            .order_by(Chunk.ordre)
+        )
+        result = await self._session.scalars(stmt)
+        return list(result.all())
+
+    async def update_summary_text(
+        self, chunk_id: UUID, *, summary_text: str
+    ) -> None:
+        await self._session.execute(
+            update(Chunk)
+            .where(Chunk.id == chunk_id)
+            .values(summary_text=summary_text)
+        )
+
+    async def reset_summary_texts(self, session_id: UUID) -> int:
+        """Set every `summary_text` to NULL for this session.
+
+        Called at the start of `_generate_summary` to invalidate stale
+        per-chunk summaries (FR-011). Returns the number of rows reset.
+        """
+        result = await self._session.execute(
+            update(Chunk)
+            .where(Chunk.session_id == session_id)
+            .values(summary_text=None)
+        )
+        return result.rowcount
+
+
+class SessionPlayerRepository(_BaseRepository):
+    """``jdr_session_players`` access. Used by the `povs` job (non_diarised
+    branch) to know which PJ to produce a POV for."""
+
+    async def list_for_session(self, session_id: UUID) -> list[SessionPlayer]:
+        stmt = (
+            select(SessionPlayer)
+            .where(SessionPlayer.session_id == session_id)
+            .order_by(SessionPlayer.created_at)
+        )
+        result = await self._session.scalars(stmt)
+        return list(result.all())
+
+    async def replace_for_session(
+        self, session_id: UUID, *, pj_ids: list[UUID]
+    ) -> list[SessionPlayer]:
+        """Replace the whole player list atomically (DELETE + INSERT)."""
+        from sqlalchemy import delete
+
+        await self._session.execute(
+            delete(SessionPlayer).where(SessionPlayer.session_id == session_id)
+        )
+        # De-duplicate while preserving order
+        seen: set[UUID] = set()
+        unique_ids: list[UUID] = []
+        for pj_id in pj_ids:
+            if pj_id not in seen:
+                seen.add(pj_id)
+                unique_ids.append(pj_id)
+        rows = [
+            SessionPlayer(session_id=session_id, pj_id=pj_id)
+            for pj_id in unique_ids
+        ]
+        for row in rows:
+            self._session.add(row)
+        await self._session.flush()
+        return rows

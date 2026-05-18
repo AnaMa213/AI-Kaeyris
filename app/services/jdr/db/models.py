@@ -76,6 +76,20 @@ class JobKind(str, enum.Enum):
     NARRATIVE = "narrative"
     ELEMENTS = "elements"
     POVS = "povs"
+    SUMMARY = "summary"
+
+
+class TranscriptionMode(str, enum.Enum):
+    """Per-session transcription posture — see feature 002 data-model.md §2.
+
+    - ``DIARISED`` (default): Jalon 5 pipeline, segments stored in
+      ``jdr_transcriptions`` with speaker labels.
+    - ``NON_DIARISED``: chunked transcription stored in ``jdr_chunks``,
+      no speaker labels, downstream artefacts consume per-chunk summaries.
+    """
+
+    DIARISED = "diarised"
+    NON_DIARISED = "non_diarised"
 
 
 class JobStatus(str, enum.Enum):
@@ -190,6 +204,14 @@ class Session(Base):
         nullable=False,
         default=SessionState.CREATED,
     )
+    # Sous-jalon 5.5 — forks the post-transcription pipeline at write time.
+    # Immutable after creation; see FR-002 of feature 002-non-diarised-mode.
+    transcription_mode: Mapped[TranscriptionMode] = mapped_column(
+        String(16),
+        nullable=False,
+        default=TranscriptionMode.DIARISED,
+        server_default=TranscriptionMode.DIARISED.value,
+    )
     # Optional "campaign bible" the MJ can attach to a session. Injected
     # into the narrative + elements LLM prompts as a global steering
     # context (PNJ récurrents, fil narratif, ton). Nullable because the
@@ -222,6 +244,13 @@ class Session(Base):
     )
     jobs: Mapped[list[Job]] = relationship(
         "Job", back_populates="session", cascade="all, delete-orphan"
+    )
+    # Sous-jalon 5.5 — only populated when transcription_mode = NON_DIARISED.
+    chunks: Mapped[list[Chunk]] = relationship(
+        "Chunk", back_populates="session", cascade="all, delete-orphan"
+    )
+    session_players: Mapped[list[SessionPlayer]] = relationship(
+        "SessionPlayer", back_populates="session", cascade="all, delete-orphan"
     )
 
 
@@ -368,3 +397,67 @@ class Job(Base):
     )
 
     session: Mapped[Session] = relationship("Session", back_populates="jobs")
+
+
+class Chunk(Base):
+    """Chunked transcription row — only populated on `non_diarised` sessions.
+
+    Each row holds a slice of the transcription text (cut at natural
+    boundaries with a max char budget) plus the per-chunk LLM summary
+    (`summary_text`) produced by the map step of the `summary` job.
+    Reset to NULL when the summary is regenerated (FR-011 atomicity).
+    """
+
+    __tablename__ = "jdr_chunks"
+    __table_args__ = (
+        UniqueConstraint("session_id", "ordre", name="uq_jdr_chunks_session_ordre"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("jdr_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    ordre: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL until the `summary` job's map phase runs for this chunk.
+    summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    session: Mapped[Session] = relationship("Session", back_populates="chunks")
+
+
+class SessionPlayer(Base):
+    """List of PJ present at a `non_diarised` session.
+
+    Equivalent of ``SessionPjMapping`` for the non-diarised mode but
+    without speaker_label (no speakers to map to). Used by the `povs`
+    job to know which PJ to produce a POV for (FR-012). PK composite
+    forbids duplicate enrolment.
+    """
+
+    __tablename__ = "jdr_session_players"
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("jdr_sessions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    pj_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("jdr_pjs.id", ondelete="RESTRICT"),
+        primary_key=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    session: Mapped[Session] = relationship(
+        "Session", back_populates="session_players"
+    )
+    pj: Mapped[Pj] = relationship("Pj", foreign_keys=[pj_id])
