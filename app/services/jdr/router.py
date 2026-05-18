@@ -42,6 +42,7 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Job
 from app.services.jdr import logic
 from app.services.jdr.batch.router import router as batch_router
+from app.services.jdr.live.router import router as live_router
 from app.services.jdr.logic import DuplicatePjError, InvalidPlayerError
 from app.services.jdr.db.models import (
     JobKind,
@@ -227,6 +228,7 @@ router = APIRouter(
 
 # Sub-routers — each adds its own routes; auth/rate-limit are inherited.
 router.include_router(batch_router)
+router.include_router(live_router)
 
 
 # ---------------------------------------------------------------------------
