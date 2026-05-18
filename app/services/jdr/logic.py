@@ -33,14 +33,17 @@ from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
     AudioSource,
+    Chunk,
     Pj,
     Role,
     Session,
     SessionPjMapping,
     SessionState,
+    TranscriptionMode,
 )
 from app.services.jdr.db.repositories import (
     ArtifactRepository,
+    ChunkRepository,
     DuplicatePjNameError,
     MappingRepository,
     PjRepository,
@@ -123,13 +126,26 @@ async def create_session(
     recorded_at: datetime,
     gm_key_id: UUID,
     campaign_context: str | None = None,
+    transcription_mode: TranscriptionMode = TranscriptionMode.DIARISED,
 ) -> Session:
     return await SessionRepository(db).create(
         title=title,
         recorded_at=recorded_at,
         gm_key_id=gm_key_id,
         campaign_context=campaign_context,
+        transcription_mode=transcription_mode,
     )
+
+
+async def list_session_chunks(
+    db: AsyncSession, *, session: Session
+) -> list[Chunk]:
+    """Liste les chunks d'une session non_diarised, ordonnés par ``ordre``.
+
+    Le caller a déjà validé l'ownership et le mode (sinon le list est
+    sémantiquement bizarre — une session diarised n'aura jamais de chunks).
+    """
+    return await ChunkRepository(db).list_for_session(session.id)
 
 
 async def update_session(

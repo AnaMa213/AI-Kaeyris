@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from redis import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,6 +49,7 @@ from app.services.jdr.db.models import (
     JobStatus,
     Session as SessionModel,
     SessionState,
+    TranscriptionMode,
 )
 from app.services.jdr.db.repositories import (
     ArtifactRepository,
@@ -63,6 +64,8 @@ from app.services.jdr.markdown import (
     render_transcription_md,
 )
 from app.services.jdr.schemas import (
+    ChunkListOut,
+    ChunkOut,
     Element,
     ElementsArtifactOut,
     JobOut,
@@ -184,6 +187,29 @@ class PlayerForbiddenError(AppError):
     title = "Forbidden — your PJ is not mapped on this session"
 
 
+# --- Feature 002 (non_diarised mode) -----------------------------------------
+
+
+class WrongModeError(AppError):
+    """The endpoint is incompatible with the session's transcription_mode.
+
+    Examples: /chunks on a diarised session, /transcription on a
+    non_diarised session, /mapping on non_diarised, /players on diarised.
+    """
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "wrong-mode"
+    title = "Wrong transcription mode"
+
+
+class ImmutableFieldError(AppError):
+    """A PATCH body tried to modify a field that is immutable after creation."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "immutable-field"
+    title = "Immutable field"
+
+
 # Function name -> JobKind mapping. RQ pickles the callable by its module
 # path; we use the inverse to expose a stable enum in JobOut.
 _FUNC_NAME_TO_KIND: dict[str, JobKind] = {
@@ -261,6 +287,11 @@ async def create_session(
         recorded_at=payload.recorded_at,
         gm_key_id=auth.id,
         campaign_context=payload.campaign_context,
+        transcription_mode=(
+            payload.transcription_mode
+            if payload.transcription_mode is not None
+            else TranscriptionMode.DIARISED
+        ),
     )
     return SessionOut.model_validate(row)
 
@@ -306,6 +337,7 @@ async def get_session(
 )
 async def patch_session(
     session_id: UUID,
+    request: Request,
     payload: SessionUpdate,
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -317,7 +349,19 @@ async def patch_session(
     omitting the key leaves the existing value alone. Updating
     ``campaign_context`` does NOT re-run any previously generated
     artefact; the new value affects only future generations.
+
+    ``transcription_mode`` is immutable after creation (FR-002 of
+    feature 002): any PATCH body referencing it is rejected with 422.
     """
+    # Inspect the raw body to detect immutable fields. SessionUpdate does
+    # not declare `transcription_mode`, so Pydantic ignores it silently;
+    # we need the raw JSON to detect the violation.
+    raw_body = await request.json()
+    if isinstance(raw_body, dict) and "transcription_mode" in raw_body:
+        raise ImmutableFieldError(
+            detail="transcription_mode is immutable after session creation.",
+        )
+
     session = await logic.get_session(
         db, session_id=session_id, gm_key_id=auth.id
     )
@@ -333,6 +377,54 @@ async def patch_session(
         set_campaign_context="campaign_context" in fields_set,
     )
     return SessionOut.model_validate(updated)
+
+
+# ---------------------------------------------------------------------------
+# Chunks (feature 002 — non_diarised mode)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/sessions/{session_id}/chunks",
+    response_model=ChunkListOut,
+    summary="Chunked transcription of a non_diarised session (ordered).",
+)
+async def get_session_chunks(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ChunkListOut:
+    """Return the chunks (text, ordre) of a non_diarised session.
+
+    Reserved for non_diarised sessions — diarised sessions use the
+    `GET /transcription` endpoint instead (409 wrong-mode otherwise).
+    Returns 404 transcription-not-ready if no chunks have been produced
+    yet for the session.
+    """
+    session = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session.transcription_mode is not TranscriptionMode.NON_DIARISED:
+        raise WrongModeError(
+            detail=(
+                f"Session {session_id} is in mode 'diarised'. "
+                "Use GET /transcription for this session."
+            ),
+        )
+    chunks = await logic.list_session_chunks(db, session=session)
+    if not chunks:
+        raise TranscriptionNotReadyError(
+            detail=(
+                f"Transcription chunks for session {session_id} are not "
+                "available yet."
+            ),
+        )
+    return ChunkListOut(
+        session_id=session.id,
+        items=[ChunkOut.model_validate(c) for c in chunks],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +569,13 @@ async def get_transcription(
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session.transcription_mode is TranscriptionMode.NON_DIARISED:
+        raise WrongModeError(
+            detail=(
+                f"Session {session_id} is in mode 'non_diarised'. "
+                "Use GET /chunks for this session."
+            ),
+        )
 
     transcription = await TranscriptionRepository(db).get_for_session(session_id)
     if transcription is None:
@@ -514,6 +613,13 @@ async def get_transcription_md(
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session.transcription_mode is TranscriptionMode.NON_DIARISED:
+        raise WrongModeError(
+            detail=(
+                f"Session {session_id} is in mode 'non_diarised'. "
+                "Use GET /chunks for this session."
+            ),
+        )
     transcription = await TranscriptionRepository(db).get_for_session(session_id)
     if transcription is None:
         raise TranscriptionNotReadyError(

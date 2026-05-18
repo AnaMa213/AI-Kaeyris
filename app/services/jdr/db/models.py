@@ -206,8 +206,15 @@ class Session(Base):
     )
     # Sous-jalon 5.5 — forks the post-transcription pipeline at write time.
     # Immutable after creation; see FR-002 of feature 002-non-diarised-mode.
+    # Enum() (not String) to get correct serialization via `.value` on
+    # Python 3.12+ where `str(StrMixinEnum.X)` returns the repr.
     transcription_mode: Mapped[TranscriptionMode] = mapped_column(
-        String(16),
+        Enum(
+            TranscriptionMode,
+            name="jdr_transcription_mode",
+            native_enum=False,
+            length=16,
+        ),
         nullable=False,
         default=TranscriptionMode.DIARISED,
         server_default=TranscriptionMode.DIARISED.value,

@@ -42,16 +42,19 @@ from app.jobs import PermanentJobError, TransientJobError
 from app.services.jdr.audio import AudioChunkingError, chunked_audio
 from app.services.jdr.db.models import (
     AudioSource,
+    Pj,
     Session,
     SessionState,
     Transcription,
+    TranscriptionMode,
 )
-from app.services.jdr.db.models import Pj
 from app.services.jdr.db.repositories import (
     ArtifactRepository,
+    ChunkRepository,
     MappingRepository,
     TranscriptionRepository,
 )
+from app.services.jdr.text_chunker import chunk_text
 from app.services.jdr.prompts import (
     ELEMENTS_SYSTEM_PROMPT,
     NARRATIVE_SYSTEM_PROMPT,
@@ -138,6 +141,7 @@ async def _transcribe_session(session_id: UUID) -> None:
             )
 
         audio_path_relative = audio.path
+        transcription_mode = session_row.transcription_mode
         session_row.state = SessionState.TRANSCRIBING
         await db.commit()
 
@@ -173,27 +177,50 @@ async def _transcribe_session(session_id: UUID) -> None:
         raise PermanentJobError(f"Audio chunking failed: {exc}") from exc
 
     # --- Step 3: persist + transition + purge audio (single commit) ---------
+    # Forks on session.transcription_mode (feature 002-non-diarised-mode).
 
-    segments_json = _segments_to_json(result)
-    async with sessionmaker() as db:
-        await TranscriptionRepository(db).upsert(
-            session_id,
-            segments=segments_json,
-            language=result.language,
-            model_used=result.model_used,
-            provider=result.provider,
-        )
-        await db.execute(
-            update(Session)
-            .where(Session.id == session_id)
-            .values(state=SessionState.TRANSCRIBED)
-        )
-        await db.execute(
-            update(AudioSource)
-            .where(AudioSource.session_id == session_id)
-            .values(purged_at=datetime.now(UTC))
-        )
-        await db.commit()
+    if transcription_mode is TranscriptionMode.NON_DIARISED:
+        # Concatène le texte de tous les segments dans l'ordre du provider,
+        # puis chunke par caractères (frontières naturelles).
+        full_text = " ".join(s.text.strip() for s in result.segments if s.text.strip())
+        chunks = chunk_text(full_text, max_chars=settings.KAEYRIS_CHUNK_MAX_CHARS)
+        async with sessionmaker() as db:
+            await ChunkRepository(db).bulk_create_for_session(
+                session_id, texts=chunks
+            )
+            await db.execute(
+                update(Session)
+                .where(Session.id == session_id)
+                .values(state=SessionState.TRANSCRIBED)
+            )
+            await db.execute(
+                update(AudioSource)
+                .where(AudioSource.session_id == session_id)
+                .values(purged_at=datetime.now(UTC))
+            )
+            await db.commit()
+    else:
+        # Mode diarised — comportement Jalon 5 inchangé (FR-014 non-régression).
+        segments_json = _segments_to_json(result)
+        async with sessionmaker() as db:
+            await TranscriptionRepository(db).upsert(
+                session_id,
+                segments=segments_json,
+                language=result.language,
+                model_used=result.model_used,
+                provider=result.provider,
+            )
+            await db.execute(
+                update(Session)
+                .where(Session.id == session_id)
+                .values(state=SessionState.TRANSCRIBED)
+            )
+            await db.execute(
+                update(AudioSource)
+                .where(AudioSource.session_id == session_id)
+                .values(purged_at=datetime.now(UTC))
+            )
+            await db.commit()
 
     # --- Step 4: best-effort file deletion (DB is the source of truth) ------
 
