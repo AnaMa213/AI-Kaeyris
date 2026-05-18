@@ -220,6 +220,70 @@ class PovArtifactOut(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Player enrolment (US4)
+# ---------------------------------------------------------------------------
+
+
+class PlayerCreate(BaseModel):
+    """Body for ``POST /services/jdr/players``."""
+
+    name: str = Field(..., min_length=1, max_length=255)
+    pj_id: UUID
+
+
+class PlayerOut(BaseModel):
+    """Response of ``POST /services/jdr/players``.
+
+    ``token`` is the *plaintext* Bearer token; it is returned **once** at
+    creation and never again. The server only stores the Argon2 hash.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+    pj_id: UUID
+    token: str = Field(
+        ...,
+        description=(
+            "Plaintext Bearer token. Shown only on this 201 response. "
+            "Store it now — the server only keeps an Argon2 hash."
+        ),
+    )
+    created_at: datetime
+
+
+class PjMini(BaseModel):
+    """Compact PJ projection used inside ``MeOut``."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+
+
+class MeOut(BaseModel):
+    """Response of ``GET /services/jdr/me``."""
+
+    name: str
+    pj: PjMini
+
+
+class PlayerSessionItem(BaseModel):
+    """One row of ``GET /services/jdr/me/sessions``."""
+
+    session_id: UUID
+    title: str
+    recorded_at: datetime
+
+
+class PlayerSessionListOut(BaseModel):
+    """Envelope for ``GET /services/jdr/me/sessions``."""
+
+    items: list[PlayerSessionItem]
+
+
+# ---------------------------------------------------------------------------
 # Elements artefact (US2)
 # ---------------------------------------------------------------------------
 

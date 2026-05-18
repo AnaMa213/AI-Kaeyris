@@ -17,13 +17,16 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Response, status
 from redis import Redis
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import (
     AuthenticatedKey,
+    ForbiddenError,
     UnauthorizedError,
     require_api_key,
     require_gm,
+    require_player,
 )
 from app.core.db import get_db_session
 from app.core.errors import AppError
@@ -39,8 +42,13 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Job
 from app.services.jdr import logic
 from app.services.jdr.batch.router import router as batch_router
-from app.services.jdr.logic import DuplicatePjError
-from app.services.jdr.db.models import JobKind, JobStatus, SessionState
+from app.services.jdr.logic import DuplicatePjError, InvalidPlayerError
+from app.services.jdr.db.models import (
+    JobKind,
+    JobStatus,
+    Session as SessionModel,
+    SessionState,
+)
 from app.services.jdr.db.repositories import (
     ArtifactRepository,
     MappingRepository,
@@ -60,10 +68,16 @@ from app.services.jdr.schemas import (
     JobQueuedOut,
     MappingOut,
     MappingPut,
+    MeOut,
     NarrativeArtifactOut,
     Page,
     PjCreate,
+    PjMini,
     PjOut,
+    PlayerCreate,
+    PlayerOut,
+    PlayerSessionItem,
+    PlayerSessionListOut,
     PovArtifactOut,
     SessionCreate,
     SessionOut,
@@ -143,6 +157,30 @@ class PjNotFoundError(AppError):
     status_code = status.HTTP_404_NOT_FOUND
     error_type = "pj-not-found"
     title = "PJ not found"
+
+
+class InvalidPlayerEnrolmentError(AppError):
+    """The PJ referenced in a player enrolment is unknown or owned by another MJ."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "invalid-player"
+    title = "Invalid player enrolment"
+
+
+class PlayerNotFoundError(AppError):
+    """Returned when a player key does not exist or is not owned by the current MJ."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "player-not-found"
+    title = "Player not found"
+
+
+class PlayerForbiddenError(AppError):
+    """The player's PJ is not mapped on this session — FR-014 hard wall."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "player-forbidden"
+    title = "Forbidden — your PJ is not mapped on this session"
 
 
 # Function name -> JobKind mapping. RQ pickles the callable by its module
@@ -834,6 +872,242 @@ async def get_pov(
         model_used=artifact.model_used,
         generated_at=artifact.generated_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# Player enrolment + revocation (US4 — require_gm)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/players",
+    response_model=PlayerOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Enroll a player and return the plaintext Bearer token (once).",
+)
+async def post_player(
+    payload: PlayerCreate,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> PlayerOut:
+    """Create a player key bound to one of the GM's PJs.
+
+    The plaintext token is returned exactly once — store it now, the
+    server only keeps the Argon2 hash.
+    """
+    try:
+        result = await logic.enroll_player(
+            db, name=payload.name, pj_id=payload.pj_id, gm_key_id=auth.id
+        )
+    except InvalidPlayerError as exc:
+        raise InvalidPlayerEnrolmentError(detail=str(exc)) from exc
+    return PlayerOut(
+        id=result.api_key.id,
+        name=result.api_key.name,
+        pj_id=result.api_key.pj_id,
+        token=result.plaintext_token,
+        created_at=result.api_key.created_at,
+    )
+
+
+@router.delete(
+    "/players/{player_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Revoke a player key (immediate effect on the next request).",
+)
+async def delete_player(
+    player_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Response:
+    revoked = await logic.revoke_player(
+        db, player_id=player_id, gm_key_id=auth.id
+    )
+    if not revoked:
+        raise PlayerNotFoundError(detail=f"Player {player_id} not found.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# Player read endpoints (/me/* — require_player + FR-014 isolation)
+# ---------------------------------------------------------------------------
+
+
+async def _ensure_player_can_read_session(
+    db: AsyncSession, *, session_id: UUID, player_pj_id: UUID | None
+) -> None:
+    """Block access unless the player's PJ is mapped on this session.
+
+    A misconfigured player key (``pj_id is None``) is also blocked here
+    even though auth should already reject it — defence in depth (FR-014).
+    """
+    if player_pj_id is None:
+        raise PlayerForbiddenError(
+            detail="Player key has no PJ bound — refuse by default."
+        )
+    mapped = await logic.is_pj_mapped_on_session(
+        db, session_id=session_id, pj_id=player_pj_id
+    )
+    if not mapped:
+        raise PlayerForbiddenError(
+            detail=(
+                f"Your PJ is not mapped on session {session_id}. "
+                "Ask your MJ to update the mapping."
+            ),
+        )
+
+
+@router.get(
+    "/me",
+    response_model=MeOut,
+    summary="Profile of the current player (name + their PJ).",
+)
+async def get_me(
+    auth: Annotated[AuthenticatedKey, Depends(require_player)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> MeOut:
+    if auth.pj_id is None:
+        # Defence in depth — auth should already have rejected this.
+        raise ForbiddenError(detail="Player key has no PJ bound.")
+    pj = await logic.get_player_pj(db, pj_id=auth.pj_id)
+    if pj is None:
+        raise PjNotFoundError(detail=f"PJ {auth.pj_id} not found.")
+    return MeOut(name=auth.name, pj=PjMini.model_validate(pj))
+
+
+@router.get(
+    "/me/sessions",
+    response_model=PlayerSessionListOut,
+    summary="List the sessions where the current player's PJ is mapped.",
+)
+async def get_my_sessions(
+    auth: Annotated[AuthenticatedKey, Depends(require_player)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> PlayerSessionListOut:
+    if auth.pj_id is None:
+        raise ForbiddenError(detail="Player key has no PJ bound.")
+    sessions = await logic.list_player_sessions(db, player_pj_id=auth.pj_id)
+    items = [
+        PlayerSessionItem(
+            session_id=s.id, title=s.title, recorded_at=s.recorded_at
+        )
+        for s in sessions
+    ]
+    return PlayerSessionListOut(items=items)
+
+
+@router.get(
+    "/me/sessions/{session_id}/narrative",
+    response_model=NarrativeArtifactOut,
+    summary="Read the global narrative summary of a session (player view).",
+)
+async def get_my_narrative(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_player)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> NarrativeArtifactOut:
+    await _ensure_player_can_read_session(
+        db, session_id=session_id, player_pj_id=auth.pj_id
+    )
+    artifact = await ArtifactRepository(db).get(session_id, "narrative")
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=f"Narrative for session {session_id} has not been generated yet."
+        )
+    content = artifact.content_json or {}
+    text = str(content.get("text", "")) if isinstance(content, dict) else ""
+    return NarrativeArtifactOut(
+        session_id=artifact.session_id,
+        text=text,
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+    )
+
+
+@router.get(
+    "/me/sessions/{session_id}/narrative.md",
+    response_class=Response,
+    summary="Export the global narrative summary as Markdown (player view).",
+)
+async def get_my_narrative_md(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_player)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Response:
+    await _ensure_player_can_read_session(
+        db, session_id=session_id, player_pj_id=auth.pj_id
+    )
+    session = await db.scalar(
+        select(SessionModel).where(SessionModel.id == session_id)
+    )
+    artifact = await ArtifactRepository(db).get(session_id, "narrative")
+    if artifact is None or session is None:
+        raise ArtifactNotReadyError(
+            detail=f"Narrative for session {session_id} has not been generated yet."
+        )
+    md = render_narrative_md(session, artifact)
+    return Response(content=md, media_type="text/markdown; charset=utf-8")
+
+
+@router.get(
+    "/me/sessions/{session_id}/pov",
+    response_model=PovArtifactOut,
+    summary="Read the current player's POV summary for a session.",
+)
+async def get_my_pov(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_player)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> PovArtifactOut:
+    await _ensure_player_can_read_session(
+        db, session_id=session_id, player_pj_id=auth.pj_id
+    )
+    artifact = await ArtifactRepository(db).get(session_id, f"pov:{auth.pj_id}")
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"POV for your PJ in session {session_id} has not been "
+                "generated yet."
+            )
+        )
+    content = artifact.content_json or {}
+    text = str(content.get("text", "")) if isinstance(content, dict) else ""
+    return PovArtifactOut(
+        session_id=artifact.session_id,
+        pj_id=auth.pj_id,
+        text=text,
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+    )
+
+
+@router.get(
+    "/me/sessions/{session_id}/pov.md",
+    response_class=Response,
+    summary="Export the current player's POV as Markdown.",
+)
+async def get_my_pov_md(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_player)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Response:
+    await _ensure_player_can_read_session(
+        db, session_id=session_id, player_pj_id=auth.pj_id
+    )
+    session = await db.scalar(
+        select(SessionModel).where(SessionModel.id == session_id)
+    )
+    pj = await logic.get_player_pj(db, pj_id=auth.pj_id)
+    artifact = await ArtifactRepository(db).get(session_id, f"pov:{auth.pj_id}")
+    if artifact is None or session is None or pj is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"POV for your PJ in session {session_id} has not been "
+                "generated yet."
+            )
+        )
+    md = render_pov_md(session, pj, artifact)
+    return Response(content=md, media_type="text/markdown; charset=utf-8")
 
 
 # ---------------------------------------------------------------------------

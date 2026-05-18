@@ -13,12 +13,14 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
+from argon2 import PasswordHasher
 from redis import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,7 +29,16 @@ from starlette.datastructures import UploadFile
 from app.core.config import settings
 from app.jobs import enqueue_job, get_default_queue
 from app.jobs.jdr import transcribe_session_job
-from app.services.jdr.db.models import AudioSource, Pj, Session, SessionState
+from app.services.jdr.db.models import (
+    ApiKey,
+    ApiKeyStatus,
+    AudioSource,
+    Pj,
+    Role,
+    Session,
+    SessionPjMapping,
+    SessionState,
+)
 from app.services.jdr.db.repositories import (
     ArtifactRepository,
     DuplicatePjNameError,
@@ -71,6 +82,14 @@ class InvalidMappingError(Exception):
 
     Surfaced by :func:`set_session_mapping`. The route maps this to
     HTTP 422 ``invalid-mapping``.
+    """
+
+
+class InvalidPlayerError(Exception):
+    """The PJ referenced in a player enrolment does not belong to the current MJ.
+
+    Surfaced by :func:`enroll_player`. The route maps this to HTTP 422
+    ``invalid-player``.
     """
 
 
@@ -253,6 +272,119 @@ async def create_pj(
     await db.commit()
     await db.refresh(pj)
     return pj
+
+
+# ---------------------------------------------------------------------------
+# Player keys (US4 — sub-lot 6)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EnrollPlayerResult:
+    """Carries the freshly inserted row plus the *plaintext* token.
+
+    The token is exposed only here, then discarded — the DB stores its
+    Argon2 hash. Callers must surface it once to the operator and never
+    keep it.
+    """
+
+    api_key: ApiKey
+    plaintext_token: str
+
+
+async def enroll_player(
+    db: AsyncSession, *, name: str, pj_id: UUID, gm_key_id: UUID
+) -> EnrollPlayerResult:
+    """Create a player API key bound to one of the GM's PJs.
+
+    Validates that ``pj_id`` belongs to ``gm_key_id`` (FR-014) — raises
+    :class:`InvalidPlayerError` otherwise. Generates a fresh URL-safe
+    random token (≥ 32 bytes of entropy), hashes it with Argon2, and
+    inserts a ``role='player'`` row.
+    """
+    pj = await PjRepository(db).find_by_id_owned_by(pj_id, gm_key_id)
+    if pj is None:
+        raise InvalidPlayerError(
+            f"PJ {pj_id} is unknown or owned by another MJ."
+        )
+
+    plaintext = secrets.token_urlsafe(32)
+    api_key = ApiKey(
+        name=name,
+        hash=PasswordHasher().hash(plaintext),
+        role=Role.PLAYER,
+        status=ApiKeyStatus.ACTIVE,
+        pj_id=pj_id,
+    )
+    db.add(api_key)
+    await db.commit()
+    await db.refresh(api_key)
+    return EnrollPlayerResult(api_key=api_key, plaintext_token=plaintext)
+
+
+async def revoke_player(
+    db: AsyncSession, *, player_id: UUID, gm_key_id: UUID
+) -> bool:
+    """Revoke a player key.
+
+    Returns ``True`` if the row was flipped to ``revoked`` (and the GM
+    owned the bound PJ); ``False`` if the row doesn't exist or doesn't
+    belong to this GM (route maps both to 404 to avoid probing).
+    """
+    stmt = (
+        select(ApiKey)
+        .join(Pj, Pj.id == ApiKey.pj_id)
+        .where(
+            ApiKey.id == player_id,
+            ApiKey.role == Role.PLAYER,
+            Pj.owner_gm_key_id == gm_key_id,
+        )
+    )
+    row = await db.scalar(stmt)
+    if row is None:
+        return False
+    row.status = ApiKeyStatus.REVOKED
+    row.revoked_at = datetime.now(UTC)
+    await db.commit()
+    return True
+
+
+async def list_player_sessions(
+    db: AsyncSession, *, player_pj_id: UUID
+) -> list[Session]:
+    """Return the sessions where the player's PJ is mapped (FR-014).
+
+    Anything not in this list is invisible to the player.
+    """
+    stmt = (
+        select(Session)
+        .join(SessionPjMapping, SessionPjMapping.session_id == Session.id)
+        .where(SessionPjMapping.pj_id == player_pj_id)
+        .order_by(Session.created_at)
+        .distinct()
+    )
+    rows = await db.scalars(stmt)
+    return list(rows.all())
+
+
+async def is_pj_mapped_on_session(
+    db: AsyncSession, *, session_id: UUID, pj_id: UUID
+) -> bool:
+    """True iff the (session_id, *, pj_id) row exists in the mapping."""
+    stmt = (
+        select(SessionPjMapping.session_id)
+        .where(
+            SessionPjMapping.session_id == session_id,
+            SessionPjMapping.pj_id == pj_id,
+        )
+        .limit(1)
+    )
+    return (await db.scalar(stmt)) is not None
+
+
+async def get_player_pj(db: AsyncSession, *, pj_id: UUID) -> Pj | None:
+    """Load the PJ row referenced by a player key (for GET /me)."""
+    return await db.scalar(select(Pj).where(Pj.id == pj_id))
 
 
 async def list_pjs(db: AsyncSession, *, gm_key_id: UUID) -> list[Pj]:
