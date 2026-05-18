@@ -176,3 +176,44 @@
 - **`MockLLMAdapter` ne simule pas la latence** ni les erreurs : si on veut tester un timeout, on patche directement l'adapter dans le test.
 - **Pas d'audit log des appels LLM** côté DB ou métriques agrégées : log structuré seulement, agrégation au Jalon 6.
 - **Spec Kit non installé** : introduction documentaire dans `Jalon4.md`. À essayer en pratique au Jalon 5 si une feature complexe le justifie.
+
+---
+
+## 2026-05-18 — Jalon 5 : `kaeyris-jdr`, premier service métier complet
+
+### Ce qui a été fait
+
+- **Spec Kit utilisé en pratique** : `/speckit.specify` → `/speckit.clarify` (5 questions actées, voir ADR 0006) → `/speckit.plan` → `/speckit.tasks` → `/speckit.implement` par sous-lots. Les artefacts `specs/001-kaeyris-jdr/{spec,research,data-model,contracts,quickstart,tasks}.md` ont servi de référence pendant toute l'exécution.
+- **ADR 0006** rédigé en début de jalon, consolide 5 décisions structurantes (ORM SQLAlchemy 2.x async, transcription via `TranscriptionAdapter` agnostique, auth roles GM/player DB-backed avec bootstrap depuis env var, mode live stub documenté, structure interne du service en 3 couches).
+- **Persistance** : SQLAlchemy 2.x async + Alembic + aiosqlite (SQLite en dev, asyncpg/PostgreSQL repoussé Jalon 8). 8 tables `jdr_*` (`api_keys`, `pjs`, `sessions`, `audio_sources`, `transcriptions`, `session_pj_mappings`, `artifacts`, `jobs`). Migration `0001_initial.py` aller-retour fonctionnel.
+- **Adapter de transcription** : `OpenAICompatibleTranscriptionAdapter` paramétré couvre cloud (OpenAI/Groq/DeepInfra) et local (futur hôte RTX 4090 + faster-whisper + pyannote sur le LAN). `MockTranscriptionAdapter` pour les tests.
+- **Auth roles** : extension de `app/core/auth.py` — la table `jdr_api_keys` devient source de vérité, l'env var `API_KEYS` (Jalon 2) ne sert plus qu'au bootstrap au premier démarrage. `Role.GM`/`Role.PLAYER`, `require_gm`/`require_player` exposés comme dépendances FastAPI.
+- **US1 (MVP)** : upload M4A → job `transcribe_session_job` (chunking ffmpeg client-side pour limiter le blast radius des hallucinations Whisper) → purge automatique du fichier source post-transcription → `_generate_narrative` (résumé en prose française fidèle au transcript).
+- **US2** : fiche structurée `{npcs, locations, items, clues}` produite via un prompt strict JSON, parsing tolérant aux variations (fence ```json``` ou substring `{…}`), fallback en quatre listes vides plutôt que 500.
+- **US3** : CRUD PJ, mapping `speaker_label → pj_id` par session avec invalidation cascade des artefacts `pov:*` quand le mapping change, génération d'un POV par PJ mappé (un appel LLM par PJ avec un user prompt préfixé d'un en-tête de scoping).
+- **US4** : enrôlement de joueurs (`POST /players` génère un token URL-safe ≥ 32 octets, retourné en clair une seule fois ; hash Argon2 stocké), endpoints `/me/*` strictement scopés au PJ courant (FR-014 testé : impossible de fuiter le POV d'un autre joueur).
+- **US5** : stub live publié — `POST /live/sessions` répond 501 Problem Details, `WS /live/stream` ferme code 1011 à la connexion. Le schéma futur des messages (`audio.chunk`, `session.end`, `transcript.partial`) est documenté en commentaires dans `app/services/jdr/live/router.py` pour alimenter l'OpenAPI.
+- **Rendu Markdown** des artefacts (`render_transcription_md`, `render_narrative_md`, `render_elements_md`, `render_pov_md`) pour publier les résumés dans un format directement utilisable côté joueur.
+- **Tests** : 248 tests verts (suite complète), TDD strict sur chaque US (tests rouges avant implémentation), test critique `test_player_access.py` qui acte FR-014.
+- **8 commits incrémentaux** (Conventional Commits, format `feat(jdr): … (US3 sub-lot 5a)` etc.).
+
+### Ce que j'ai appris
+
+- **Spec-driven development sous Spec Kit, expérience pratique** : la friction perçue au démarrage (5 doc Markdown à digérer avant d'écrire une ligne) se rentabilise dès qu'on doit faire une décision non triviale en cours d'impl — par exemple, "le `pov:*` doit-il être invalidé sur changement de mapping ?" → la réponse est dans `data-model.md §6` sans avoir à re-réfléchir. Le tasks.md découpé par US permet aussi des commits atomiques bien plus propres.
+- **`use_alter=True` sur les FK pour casser les cycles** : `api_keys.pj_id → pjs.id` et `pjs.owner_gm_key_id → api_keys.id` forment un cycle qui empêche Alembic de générer le `CREATE TABLE` dans le bon ordre. SQLAlchemy règle ça en émettant un `ALTER TABLE … ADD CONSTRAINT` après la création des deux tables. Source : https://docs.sqlalchemy.org/en/20/core/constraints.html#sqlalchemy.schema.ForeignKey.params.use_alter
+- **Path param `{pj_id}.md` ne marche pas avec FastAPI** : Starlette match `{name}` avec `[^/]+`, donc `<uuid>.md` est avalé en entier dans le path param, puis la conversion `UUID` échoue → 422. Solution adoptée : un seul handler `GET /povs/{pj_id_str}` qui dispatch selon le suffixe `.md`. Trade-off documenté en commentaire de la route.
+- **Layered exceptions strictes** : chaque couche ne connaît que ses propres exceptions, jamais celles de la couche en aval. Exemple `DuplicatePjNameError` (repo) → `DuplicatePjError` (logic) → `DuplicatePjConflictError` (route, 409). Verbose mais limpide à la lecture ; aucun `IntegrityError` ne fuite jusqu'au router.
+- **Audio chunking client-side pour cap blast-radius Whisper** : sur sessions longues (~2h), Whisper peut entrer en "repetition loop" et répéter la même phrase sur plusieurs minutes. En découpant en chunks de 30 s avant l'appel API, un loop ne peut contaminer qu'un seul chunk au lieu de toute la session. Mis en place dans `app/services/jdr/audio.py` via ffmpeg, configurable via `TRANSCRIPTION_CHUNK_DURATION_SECONDS`.
+- **`secrets.token_urlsafe(32)` pour les tokens joueurs** : standard Python pour générer un secret URL-safe d'au moins 256 bits d'entropie. Le serveur n'en garde que le hash Argon2 ; le plaintext n'est exposé qu'une seule fois dans la réponse `201` de `POST /players`.
+- **Pattern "session par requête" via dépendance FastAPI** : `get_db_session` yield une `AsyncSession`, commit en sortie / rollback sur exception. Pattern canonique, overridable en tests via `app.dependency_overrides[get_db_session] = make_db_session_dep` pour brancher SQLite en mémoire.
+- **Convention `kind = "narrative" | "elements" | "pov:<pj_id>"`** dans `jdr_artifacts` avec PK composite `(session_id, kind)` : permet une UPSERT propre (`INSERT … ON CONFLICT … DO UPDATE`) sans gérer un `updated_at` séparé, et le `kind LIKE 'pov:%'` côté `invalidate_pov_artifacts` fait une suppression cascade très lisible.
+- **Stub avec contrat OpenAPI** : déclarer un endpoint qui retourne toujours 501 mais avec un Pydantic body complet (`LiveSessionInit`) fait en sorte que `/openapi.json` documente la surface future. Discoverabilité du contrat sans payer le coût de l'implémentation — pattern réutilisable.
+- **Bootstrap idempotent depuis env var** : le hook `on_startup` lit `API_KEYS` mais ne l'importe que si la table est vide. Un redémarrage avec `API_KEYS` toujours présent n'a aucun effet (log info). Évite les doubles imports en prod, sans casser le path d'onboarding Jalon 2.
+
+### Limitations acceptées
+
+- **Diarisation absente avec le provider cloud par défaut** : OpenAI Whisper API ne sépare pas les locuteurs → tous les segments arrivent avec `speaker_label="unknown"` → les résumés POV restent pauvres. Bascule prévue vers l'hôte GPU LAN (faster-whisper + pyannote) — la procédure côté GPU host est documentée dans [`docs/services/jdr.md`](./services/jdr.md) §5, mais le wrapper lui-même est hors scope (repo séparé à venir).
+- **Single-shot summarisation** : pour des sessions de 2h+, le prompt user (transcription complète) peut dépasser ~30-45k tokens, à risque de "lost in the middle" avec la plupart des modèles. Pas de stratégie map-reduce pour l'instant — à mettre en place au Jalon 6+ quand une première session réelle montrera la limite.
+- **Validation E2E avec une vraie clé DeepInfra non automatisée** : la suite pytest tourne sans appel LLM réel (mock `_StubLLM`). La validation `quickstart.md` doit être exécutée manuellement avant de fermer formellement le Jalon 5 (cf. T076 dans tasks.md).
+- **Pas de PostgreSQL en dev** : SQLite + `aiosqlite` couvre tous les tests. Le passage à `asyncpg`/PostgreSQL est verrouillé pour le Jalon 8 (déploiement Pi) — `DATABASE_URL` change, le code reste identique.
+- **Mode live = stub uniquement** : aucun chunk audio ingéré en streaming au Jalon 5. Implémentation prévue Jalon 6+ avec un bot Discord en amont.

@@ -24,6 +24,11 @@
 | **Redis + RQ** | queue async simple (vs Celery : trop d'abstractions pour ce scale) |
 | **structlog** | logs JSON structurés, contexte propagé (12-Factor §XI) |
 | **Caddy** (futur) | HTTPS automatique, conf simple (vs nginx : verbeux pour ce besoin) |
+| **SQLAlchemy 2.x** (Jalon 5) | ORM standard Python, type-safe en v2.x, async natif via `AsyncSession` |
+| **Alembic** | migrations standard de l'écosystème SQLAlchemy, fichiers Python versionnés |
+| **aiosqlite** | driver SQLite async pour le dev ; PostgreSQL+asyncpg en cible Jalon 8 |
+| **argon2-cffi** | hash mots de passe / tokens conforme OWASP (vs bcrypt/pbkdf2 : Argon2 gagnant PHC 2015) |
+| **faster-whisper + pyannote** (futur GPU host) | transcription + diarisation locale sur RTX 4090 LAN, alternative au cloud OpenAI |
 
 ---
 
@@ -66,6 +71,22 @@ pytest -v                           # verbeux (1 ligne par test)
 pytest tests/test_health.py         # un fichier précis
 pytest -k "health"                  # tests dont le nom matche
 pytest --cov=app                    # couverture (nécessite pytest-cov)
+```
+
+### Persistance + migrations (Jalon 5+)
+```bash
+alembic upgrade head                # applique toutes les migrations
+alembic downgrade -1                # rollback la dernière (test aller-retour)
+alembic revision -m "add foo"       # nouvelle migration vide
+alembic revision --autogenerate -m "add foo"   # diff vs ORM (à relire avant commit)
+alembic current                     # version DB courante
+alembic history                     # historique des migrations
+```
+
+### Jobs RQ (worker)
+```bash
+rq worker default --url redis://localhost:6379/0   # worker en avant-plan
+rq info --url redis://localhost:6379/0             # état des queues + jobs
 ```
 
 ### Docker (intégration)

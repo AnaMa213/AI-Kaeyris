@@ -9,7 +9,8 @@ Plateforme AI personnelle, monolithe modulaire en FastAPI, conçue pour héberge
 - [`CLAUDE.md`](./CLAUDE.md) — constitution du projet (principes, stack verrouillée, roadmap des jalons)
 - [`docs/playbook.md`](./docs/playbook.md) — méthodo générale pour mener un projet logiciel pro (toutes phases)
 - [`docs/memo.md`](./docs/memo.md) — aide-mémoire technique (commandes + raisons)
-- [`docs/Jalon1.md`](./docs/Jalon1.md) … [`docs/Jalon4.md`](./docs/Jalon4.md) — walkthroughs pédagogiques par jalon
+- [`docs/Jalon1.md`](./docs/Jalon1.md) … [`docs/Jalon5.md`](./docs/Jalon5.md) — walkthroughs pédagogiques par jalon
+- [`docs/services/jdr.md`](./docs/services/jdr.md) — premier service métier (Jalon 5) : architecture, opérations, hôte GPU LAN
 - [`docs/adr/`](./docs/adr/) — Architecture Decision Records (décisions structurantes)
 - [`docs/journal.md`](./docs/journal.md) — journal d'apprentissage par jalon
 
@@ -115,6 +116,29 @@ rq worker default --url $env:REDIS_URL       # terminal 2
 Un nouveau job se crée dans `app/jobs/<topic>.py` puis s'enqueue via `enqueue_job(queue, func, *args)`. Détails dans [`docs/memo.md`](./docs/memo.md).
 
 **Rate limiting** : 60 req/min par API key (configurable via `RATE_LIMIT_PER_MINUTE`). Activer sur un router avec `dependencies=[Depends(enforce_rate_limit)]`.
+
+## Service `kaeyris-jdr` (Jalon 5)
+
+Assistant de session de jeu de rôle — premier service métier. Détails complets dans [`docs/services/jdr.md`](./docs/services/jdr.md), spec dans [`specs/001-kaeyris-jdr/`](./specs/001-kaeyris-jdr/), décisions dans [ADR 0006](./docs/adr/0006-jdr-service.md).
+
+```bash
+# Préparer la DB puis lancer
+alembic upgrade head
+uvicorn app.main:app --reload
+rq worker default --url redis://localhost:6379/0
+```
+
+Scénario E2E (résumé — la procédure complète est dans [`specs/001-kaeyris-jdr/quickstart.md`](./specs/001-kaeyris-jdr/quickstart.md)) :
+
+1. MJ : `POST /services/jdr/sessions` puis `POST /sessions/{id}/audio` (M4A) → job de transcription.
+2. MJ : `POST /pjs`, `PUT /sessions/{id}/mapping` pour relier `speaker_X` à chaque PJ.
+3. MJ : `POST /sessions/{id}/artifacts/{narrative|elements|povs}` puis polling `GET /jobs/{id}`.
+4. MJ : `POST /players` pour enrôler un joueur (token plaintext renvoyé **une seule fois**).
+5. Joueur : `GET /me`, `GET /me/sessions`, `GET /me/sessions/{id}/{narrative|pov}[.md]` — strictement scoppé à son PJ (FR-014).
+
+Variables d'environnement spécifiques (voir [`.env.example`](./.env.example) pour le détail) : `DATABASE_URL`, `KAEYRIS_DATA_DIR`, `TRANSCRIPTION_PROVIDER` (`cloud` par défaut, `local` pour l'hôte GPU LAN), `TRANSCRIPTION_BASE_URL`, `TRANSCRIPTION_API_KEY`, `TRANSCRIPTION_MODEL`, `TRANSCRIPTION_LANGUAGE_HINT`, `TRANSCRIPTION_CHUNK_DURATION_SECONDS`.
+
+> **Mode live** : `POST /services/jdr/live/sessions` et `WS /services/jdr/live/stream` sont publiés dans l'OpenAPI mais retournent respectivement `501` et ferment immédiatement le WebSocket avec le code `1011` — l'implémentation arrive au Jalon 6+ (FR-015/016).
 
 ## Créer un nouveau service
 
