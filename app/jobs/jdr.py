@@ -59,6 +59,8 @@ from app.services.jdr.prompts import (
     ELEMENTS_SYSTEM_PROMPT,
     NARRATIVE_SYSTEM_PROMPT,
     POV_SYSTEM_PROMPT,
+    SUMMARY_MAP_SYSTEM_PROMPT,
+    SUMMARY_REDUCE_SYSTEM_PROMPT,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,6 +102,14 @@ def generate_povs_job(session_id: UUID) -> None:
     Sync wrapper for RQ. See :func:`_generate_povs`.
     """
     asyncio.run(_generate_povs(session_id))
+
+
+def generate_summary_job(session_id: UUID) -> None:
+    """Generate the global session summary via map-reduce (feature 002).
+
+    Sync wrapper for RQ. See :func:`_generate_summary`.
+    """
+    asyncio.run(_generate_summary(session_id))
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +493,129 @@ def _build_pov_user_prompt(
 
 
 # ---------------------------------------------------------------------------
+# Feature 002 — global summary map-reduce
+# ---------------------------------------------------------------------------
+
+
+_SUMMARY_CHUNK_SEPARATOR = "\n\n---\n\n"
+
+
+async def _generate_summary(session_id: UUID) -> None:
+    """Map-reduce session summary for `non_diarised` sessions (FR-006/007).
+
+    Step 0: load + validate (mode, state, ≥1 chunk).
+    Step 1 (reset transaction): NULL every chunks.summary_text + DELETE
+        artifacts(kind IN ('narrative', 'elements') OR kind LIKE 'pov:%').
+        Committed before any LLM call so that DB locks don't span the
+        long LLM phase (research.md §2). The old `summary` artifact
+        survives this step — it's only overwritten at the end.
+    Step 2 (map): one LLM call per chunk, in `ordre` ASC, persisted
+        inline via ChunkRepository.update_summary_text. One commit per
+        chunk to keep transactions short.
+    Step 3 (reduce): if > 1 chunk, consolidate the partial summaries
+        via one more LLM call. Otherwise the single partial summary is
+        used as-is.
+    Step 4: UPSERT artifacts(kind='summary'). Single commit.
+    """
+    sessionmaker = get_sessionmaker()
+
+    # --- Step 0 : load + validate ------------------------------------------
+    async with sessionmaker() as db:
+        session_row = await db.scalar(
+            select(Session).where(Session.id == session_id)
+        )
+        if session_row is None:
+            raise PermanentJobError(f"Session {session_id} not found.")
+        if session_row.transcription_mode is not TranscriptionMode.NON_DIARISED:
+            raise PermanentJobError(
+                f"Session {session_id} is not in non_diarised mode; "
+                "summary job is reserved for non_diarised sessions."
+            )
+        if session_row.state != SessionState.TRANSCRIBED:
+            raise PermanentJobError(
+                f"Session {session_id} is not transcribed "
+                f"(state={session_row.state.value}); cannot generate summary."
+            )
+        chunks = await ChunkRepository(db).list_for_session(session_id)
+        if not chunks:
+            raise PermanentJobError(
+                f"Session {session_id} has no chunks; cannot generate summary."
+            )
+        # Capture light projection (id, ordre, text) so we don't hold ORM
+        # objects across DB sessions.
+        chunk_data = [(c.id, c.ordre, c.text) for c in chunks]
+
+    # --- Step 1 : reset transaction (cascade FR-011) ------------------------
+    from sqlalchemy import delete as sa_delete
+
+    from app.services.jdr.db.models import Artifact as ArtifactModel
+
+    async with sessionmaker() as db:
+        await ChunkRepository(db).reset_summary_texts(session_id)
+        await db.execute(
+            sa_delete(ArtifactModel).where(
+                ArtifactModel.session_id == session_id,
+                ArtifactModel.kind.in_(("narrative", "elements")),
+            )
+        )
+        await db.execute(
+            sa_delete(ArtifactModel).where(
+                ArtifactModel.session_id == session_id,
+                ArtifactModel.kind.like("pov:%"),
+            )
+        )
+        await db.commit()
+
+    # --- Step 2 : map -------------------------------------------------------
+    adapter = get_llm_adapter()
+    partial_summaries: list[str] = []
+    for chunk_id, _ordre, text in chunk_data:
+        try:
+            partial = await adapter.complete(
+                system=SUMMARY_MAP_SYSTEM_PROMPT,
+                user=text,
+                max_tokens=settings.LLM_MAX_TOKENS_DEFAULT,
+            )
+        except TransientLLMError as exc:
+            raise TransientJobError(str(exc)) from exc
+        except PermanentLLMError as exc:
+            raise PermanentJobError(str(exc)) from exc
+        partial_summaries.append(partial)
+        async with sessionmaker() as db:
+            await ChunkRepository(db).update_summary_text(
+                chunk_id, summary_text=partial
+            )
+            await db.commit()
+
+    # --- Step 3 : reduce ----------------------------------------------------
+    if len(partial_summaries) == 1:
+        final_text = partial_summaries[0]
+    else:
+        reduce_user_prompt = _SUMMARY_CHUNK_SEPARATOR.join(partial_summaries)
+        try:
+            final_text = await adapter.complete(
+                system=SUMMARY_REDUCE_SYSTEM_PROMPT,
+                user=reduce_user_prompt,
+                max_tokens=settings.LLM_MAX_TOKENS_DEFAULT,
+            )
+        except TransientLLMError as exc:
+            raise TransientJobError(str(exc)) from exc
+        except PermanentLLMError as exc:
+            raise PermanentJobError(str(exc)) from exc
+
+    # --- Step 4 : UPSERT summary artifact -----------------------------------
+    model_used = f"{settings.LLM_PROVIDER}:{settings.LLM_MODEL}"
+    async with sessionmaker() as db:
+        await ArtifactRepository(db).upsert(
+            session_id,
+            kind="summary",
+            content_json={"text": final_text},
+            model_used=model_used,
+        )
+        await db.commit()
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -709,9 +842,11 @@ __all__ = [
     "_generate_elements",
     "_generate_narrative",
     "_generate_povs",
+    "_generate_summary",
     "_transcribe_session",
     "generate_elements_job",
     "generate_narrative_job",
     "generate_povs_job",
+    "generate_summary_job",
     "transcribe_session_job",
 ]

@@ -37,6 +37,7 @@ from app.jobs.jdr import (
     generate_elements_job,
     generate_narrative_job,
     generate_povs_job,
+    generate_summary_job,
 )
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
@@ -61,6 +62,7 @@ from app.services.jdr.markdown import (
     render_elements_md,
     render_narrative_md,
     render_pov_md,
+    render_summary_md,
     render_transcription_md,
 )
 from app.services.jdr.schemas import (
@@ -86,6 +88,7 @@ from app.services.jdr.schemas import (
     SessionCreate,
     SessionOut,
     SessionUpdate,
+    SummaryArtifactOut,
     TranscriptionOut,
     TranscriptionSegmentOut,
 )
@@ -210,6 +213,14 @@ class ImmutableFieldError(AppError):
     title = "Immutable field"
 
 
+class NoChunksError(AppError):
+    """Non_diarised session has no chunks — summary generation impossible."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "no-chunks"
+    title = "No chunks available"
+
+
 # Function name -> JobKind mapping. RQ pickles the callable by its module
 # path; we use the inverse to expose a stable enum in JobOut.
 _FUNC_NAME_TO_KIND: dict[str, JobKind] = {
@@ -217,6 +228,7 @@ _FUNC_NAME_TO_KIND: dict[str, JobKind] = {
     "app.jobs.jdr.generate_narrative_job": JobKind.NARRATIVE,
     "app.jobs.jdr.generate_elements_job": JobKind.ELEMENTS,
     "app.jobs.jdr.generate_povs_job": JobKind.POVS,
+    "app.jobs.jdr.generate_summary_job": JobKind.SUMMARY,
 }
 
 # RQ status (string) -> our coarser JobStatus.
@@ -851,6 +863,150 @@ async def get_elements_md(
         )
 
     md = render_elements_md(session, artifact)
+    return Response(content=md, media_type="text/markdown; charset=utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Summary artefact (feature 002 — non_diarised map-reduce)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/sessions/{session_id}/artifacts/summary",
+    response_model=JobQueuedOut,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Trigger the global session summary (map-reduce LLM).",
+)
+async def post_summary(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    redis_client: Annotated[Redis, Depends(get_redis)],
+) -> JobQueuedOut:
+    """Enqueue the map-reduce summary job for a non_diarised session.
+
+    Pre-conditions:
+    - session must belong to the MJ (404 otherwise)
+    - session must be in non_diarised mode (409 wrong-mode)
+    - session must be in state=transcribed (409 session-not-transcribed)
+    - session must have at least 1 chunk (409 no-chunks)
+
+    Side effect documented under FR-011: each new summary job resets
+    chunks.summary_text and cascade-deletes existing narrative /
+    elements / pov:* artefacts for the session. The atomicity is
+    enforced by ``_generate_summary`` (see research.md §2).
+    """
+    session_row = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session_row.transcription_mode is not TranscriptionMode.NON_DIARISED:
+        raise WrongModeError(
+            detail=(
+                f"Session {session_id} is in mode 'diarised'. "
+                "Map-reduce summary is reserved for non_diarised sessions."
+            ),
+        )
+    if session_row.state != SessionState.TRANSCRIBED:
+        raise SessionNotTranscribedError(
+            detail=(
+                f"Session {session_id} is in state {session_row.state.value!r}; "
+                "summary generation requires 'transcribed'."
+            ),
+        )
+    chunks = await logic.list_session_chunks(db, session=session_row)
+    if not chunks:
+        raise NoChunksError(
+            detail=(
+                f"Session {session_id} has no chunks; transcription job "
+                "may not have produced output yet."
+            ),
+        )
+
+    queue = get_default_queue(redis_client)
+    job = enqueue_job(
+        queue, generate_summary_job, session_id, transient_errors=True
+    )
+    return JobQueuedOut(
+        id=job.id,
+        kind=JobKind.SUMMARY,
+        session_id=session_id,
+        status=JobStatus.QUEUED,
+        queued_at=datetime.now(UTC),
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/artifacts/summary",
+    response_model=SummaryArtifactOut,
+    summary="Fetch the global session summary (JSON).",
+)
+async def get_summary(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SummaryArtifactOut:
+    session_row = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session_row.transcription_mode is not TranscriptionMode.NON_DIARISED:
+        raise WrongModeError(
+            detail=(
+                f"Session {session_id} is in mode 'diarised'. "
+                "Summary artefact is reserved for non_diarised sessions."
+            ),
+        )
+    artifact = await ArtifactRepository(db).get(session_id, "summary")
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"Summary for session {session_id} has not been generated yet. "
+                "POST to this endpoint to enqueue the job."
+            ),
+        )
+    content = artifact.content_json or {}
+    text = str(content.get("text", "")) if isinstance(content, dict) else ""
+    return SummaryArtifactOut(
+        session_id=artifact.session_id,
+        text=text,
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/artifacts/summary.md",
+    response_class=Response,
+    summary="Export the global session summary as Markdown (text/markdown).",
+)
+async def get_summary_md(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Response:
+    session_row = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session_row.transcription_mode is not TranscriptionMode.NON_DIARISED:
+        raise WrongModeError(
+            detail=(
+                f"Session {session_id} is in mode 'diarised'. "
+                "Summary artefact is reserved for non_diarised sessions."
+            ),
+        )
+    artifact = await ArtifactRepository(db).get(session_id, "summary")
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"Summary for session {session_id} has not been generated yet."
+            ),
+        )
+    md = render_summary_md(session_row, artifact)
     return Response(content=md, media_type="text/markdown; charset=utf-8")
 
 
