@@ -5,7 +5,6 @@ covers all OpenAI-compatible providers (DeepInfra, Ollama, vLLM, Groq,
 Together AI, OpenAI direct) by parameterising base_url + api_key + model.
 """
 
-import logging
 import time
 from functools import lru_cache
 from typing import Protocol
@@ -26,8 +25,9 @@ from openai import (
 )
 
 from app.core.config import settings
+from app.core.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -158,13 +158,11 @@ class OpenAICompatibleLLMAdapter:
         usage = getattr(resp, "usage", None)
         logger.info(
             "llm.complete",
-            extra={
-                "provider": self.provider,
-                "model": self.model,
-                "prompt_tokens": getattr(usage, "prompt_tokens", None),
-                "completion_tokens": getattr(usage, "completion_tokens", None),
-                "duration_ms": duration_ms,
-            },
+            provider=self.provider,
+            model=self.model,
+            prompt_tokens=getattr(usage, "prompt_tokens", None),
+            completion_tokens=getattr(usage, "completion_tokens", None),
+            duration_ms=duration_ms,
         )
 
         return resp.choices[0].message.content or ""

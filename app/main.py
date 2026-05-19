@@ -1,6 +1,5 @@
 """FastAPI application entry point."""
 
-import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -9,10 +8,16 @@ from app.core.auth import bootstrap_api_keys_from_env
 from app.core.config import settings
 from app.core.db import get_sessionmaker
 from app.core.errors import register_exception_handlers
+from app.core.logging import configure_logging, get_logger
+from app.core.request_context import RequestContextMiddleware
 from app.core.security_headers import SecurityHeadersMiddleware
 from app.services.jdr.router import router as jdr_router
 
-logger = logging.getLogger(__name__)
+# Configure structured logging as early as possible — before any logger is
+# actually used. Reads LOG_FORMAT / LOG_LEVEL env vars (cf. core/logging.py).
+configure_logging()
+
+logger = get_logger(__name__)
 
 
 async def _run_startup_tasks() -> None:
@@ -28,12 +33,11 @@ async def _run_startup_tasks() -> None:
         async with sessionmaker() as session:
             inserted = await bootstrap_api_keys_from_env(session)
             if inserted:
-                logger.info("Startup: bootstrapped %d API key(s) from env var.", inserted)
+                logger.info("startup.api_keys_bootstrapped", inserted=inserted)
     except Exception as exc:  # noqa: BLE001 — log and continue
         logger.error(
-            "Startup: bootstrap_api_keys_from_env failed (%s). "
-            "API will start without imported keys.",
-            exc,
+            "startup.api_keys_bootstrap_failed",
+            error=str(exc),
             exc_info=exc,
         )
 
@@ -53,6 +57,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.add_middleware(SecurityHeadersMiddleware)
+# RequestContextMiddleware is added AFTER SecurityHeadersMiddleware so it
+# runs FIRST in the request flow (Starlette stacks middlewares in reverse).
+# The request_id contextvar must be bound before any application code runs.
+app.add_middleware(RequestContextMiddleware)
 register_exception_handlers(app)
 app.include_router(jdr_router)
 

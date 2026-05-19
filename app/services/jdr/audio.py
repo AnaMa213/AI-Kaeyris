@@ -14,14 +14,15 @@ cleanup the caller is responsible for.
 
 from __future__ import annotations
 
-import logging
 import shutil
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class AudioChunkingError(RuntimeError):
@@ -91,11 +92,9 @@ def chunked_audio(
     ]
     logger.info(
         "audio.chunked",
-        extra={
-            "source": str(source),
-            "chunk_count": len(indexed),
-            "chunk_duration_seconds": chunk_duration_seconds,
-        },
+        source=str(source),
+        chunk_count=len(indexed),
+        chunk_duration_seconds=chunk_duration_seconds,
     )
     try:
         yield indexed

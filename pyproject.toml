@@ -15,6 +15,7 @@ dependencies = [
     "alembic",
     "aiosqlite",
     "python-multipart",
+    "structlog>=24.0",
 ]
 
 [project.optional-dependencies]

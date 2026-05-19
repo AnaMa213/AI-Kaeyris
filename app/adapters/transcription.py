@@ -14,7 +14,6 @@ Chunking of files > 25 MB (the cloud limit) is handled at job level
 (``app/jobs/jdr.py``), not in this adapter.
 """
 
-import logging
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -36,8 +35,9 @@ from openai import (
 )
 
 from app.core.config import settings
+from app.core.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -237,13 +237,11 @@ class OpenAICompatibleTranscriptionAdapter:
         )
         logger.info(
             "transcription.complete",
-            extra={
-                "provider": self.provider,
-                "model": self.model,
-                "audio_path": audio_path,
-                "segments_count": len(segments),
-                "duration_ms": duration_ms,
-            },
+            provider=self.provider,
+            model=self.model,
+            audio_path=audio_path,
+            segments_count=len(segments),
+            duration_ms=duration_ms,
         )
         return result
 
