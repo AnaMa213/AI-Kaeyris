@@ -3,12 +3,15 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app.core.auth import bootstrap_api_keys_from_env
 from app.core.config import settings
 from app.core.db import get_sessionmaker
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
+from app.core.metrics_middleware import MetricsMiddleware
 from app.core.request_context import RequestContextMiddleware
 from app.core.security_headers import SecurityHeadersMiddleware
 from app.services.jdr.router import router as jdr_router
@@ -57,9 +60,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.add_middleware(SecurityHeadersMiddleware)
-# RequestContextMiddleware is added AFTER SecurityHeadersMiddleware so it
-# runs FIRST in the request flow (Starlette stacks middlewares in reverse).
-# The request_id contextvar must be bound before any application code runs.
+# Middleware stacking note: Starlette executes middlewares in REVERSE order
+# of registration, so the last added is the first to run. We want
+# RequestContextMiddleware to run first (so request_id is bound for every
+# downstream log), followed by MetricsMiddleware (to measure the full
+# pipeline including auth/rate-limit etc.).
+app.add_middleware(MetricsMiddleware)
 app.add_middleware(RequestContextMiddleware)
 register_exception_handlers(app)
 app.include_router(jdr_router)
@@ -68,3 +74,19 @@ app.include_router(jdr_router)
 @app.get("/health", tags=["health"], summary="Vérifie que l'API est en vie.")
 def health() -> dict[str, str]:
     return {"status": "ok", "version": settings.APP_VERSION}
+
+
+@app.get(
+    "/metrics",
+    tags=["observability"],
+    summary="Prometheus text exposition (Jalon 6).",
+    include_in_schema=False,
+)
+def metrics() -> Response:
+    """Expose Prometheus metrics in the default text-based format.
+
+    Excluded from the OpenAPI schema (``include_in_schema=False``)
+    because clients don't consume it — it's scraped by Prometheus /
+    a sidecar.
+    """
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)

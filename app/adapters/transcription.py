@@ -36,6 +36,10 @@ from openai import (
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.metrics import (
+    TRANSCRIPTION_CALLS_TOTAL,
+    TRANSCRIPTION_DURATION_SECONDS,
+)
 
 logger = get_logger(__name__)
 
@@ -155,79 +159,95 @@ class OpenAICompatibleTranscriptionAdapter:
         language_hint: str | None = None,
     ) -> TranscriptionResult:
         start = time.time()
+        outcome = "success"
         try:
-            with open(audio_path, "rb") as audio_file:
-                # response_format="verbose_json" gives us the segments + duration.
-                # The local LAN endpoint enriches each segment with a "speaker"
-                # field; the cloud OpenAI Whisper API does not.
-                kwargs: dict[str, Any] = {
-                    "model": self.model,
-                    "file": audio_file,
-                    "response_format": "verbose_json",
-                }
-                if language_hint:
-                    kwargs["language"] = language_hint
-                # WARNING about anti-hallucination knobs (vad_filter,
-                # hallucination_silence_threshold, compression_ratio_threshold,
-                # condition_on_previous_text, log_prob_threshold,
-                # no_speech_threshold, vad_parameters):
-                #
-                # We *cannot* configure them from the client. speaches'
-                # /v1/audio/transcriptions FastAPI route only accepts the
-                # OpenAI-spec fields plus {hotwords, stream, without_timestamps,
-                # timestamp_granularities}. Anything else passed via extra_body
-                # is silently dropped before it reaches faster-whisper. They
-                # must be configured on the server (env vars
-                # _UNSTABLE_VAD_FILTER, WHISPER__*) or worked around at the
-                # model level (large-v3-turbo is much less prone to repetition
-                # loops than large-v3 on long French audio).
-                #
-                # Likewise we do NOT pin temperature=0. faster-whisper's only
-                # remaining defence against degenerate output is its temperature
-                # fallback tuple (0.0, 0.2, 0.4, 0.6, 0.8, 1.0): when a window
-                # comes back with too-high compression ratio or too-low log
-                # prob, it re-decodes at the next temperature. Pinning a scalar
-                # disables that fallback.
+            try:
+                with open(audio_path, "rb") as audio_file:
+                    # response_format="verbose_json" gives us the segments + duration.
+                    # The local LAN endpoint enriches each segment with a "speaker"
+                    # field; the cloud OpenAI Whisper API does not.
+                    kwargs: dict[str, Any] = {
+                        "model": self.model,
+                        "file": audio_file,
+                        "response_format": "verbose_json",
+                    }
+                    if language_hint:
+                        kwargs["language"] = language_hint
+                    # WARNING about anti-hallucination knobs (vad_filter,
+                    # hallucination_silence_threshold, compression_ratio_threshold,
+                    # condition_on_previous_text, log_prob_threshold,
+                    # no_speech_threshold, vad_parameters):
+                    #
+                    # We *cannot* configure them from the client. speaches'
+                    # /v1/audio/transcriptions FastAPI route only accepts the
+                    # OpenAI-spec fields plus {hotwords, stream, without_timestamps,
+                    # timestamp_granularities}. Anything else passed via extra_body
+                    # is silently dropped before it reaches faster-whisper. They
+                    # must be configured on the server (env vars
+                    # _UNSTABLE_VAD_FILTER, WHISPER__*) or worked around at the
+                    # model level (large-v3-turbo is much less prone to repetition
+                    # loops than large-v3 on long French audio).
+                    #
+                    # Likewise we do NOT pin temperature=0. faster-whisper's only
+                    # remaining defence against degenerate output is its temperature
+                    # fallback tuple (0.0, 0.2, 0.4, 0.6, 0.8, 1.0): when a window
+                    # comes back with too-high compression ratio or too-low log
+                    # prob, it re-decodes at the next temperature. Pinning a scalar
+                    # disables that fallback.
 
-                resp = await self._client.audio.transcriptions.create(**kwargs)
-        except (
-            APITimeoutError,
-            APIConnectionError,
-            RateLimitError,
-            InternalServerError,
-        ) as exc:
-            raise TransientTranscriptionError(
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
-        except (
-            AuthenticationError,
-            PermissionDeniedError,
-            BadRequestError,
-            NotFoundError,
-            UnprocessableEntityError,
-        ) as exc:
-            raise PermanentTranscriptionError(
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
-        except APIStatusError as exc:
-            if 500 <= exc.status_code < 600:
+                    resp = await self._client.audio.transcriptions.create(**kwargs)
+            except (
+                APITimeoutError,
+                APIConnectionError,
+                RateLimitError,
+                InternalServerError,
+            ) as exc:
+                outcome = "transient"
                 raise TransientTranscriptionError(
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            except (
+                AuthenticationError,
+                PermissionDeniedError,
+                BadRequestError,
+                NotFoundError,
+                UnprocessableEntityError,
+            ) as exc:
+                outcome = "permanent"
+                raise PermanentTranscriptionError(
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            except APIStatusError as exc:
+                if 500 <= exc.status_code < 600:
+                    outcome = "transient"
+                    raise TransientTranscriptionError(
+                        f"HTTP {exc.status_code}: {exc}"
+                    ) from exc
+                outcome = "permanent"
+                raise PermanentTranscriptionError(
                     f"HTTP {exc.status_code}: {exc}"
                 ) from exc
-            raise PermanentTranscriptionError(
-                f"HTTP {exc.status_code}: {exc}"
-            ) from exc
-        except APIError as exc:
-            raise PermanentTranscriptionError(
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
-        except OSError as exc:
-            # Audio file not found / unreadable — definitive failure.
-            raise PermanentTranscriptionError(
-                f"Cannot read audio file {audio_path!r}: {exc}"
-            ) from exc
+            except APIError as exc:
+                outcome = "permanent"
+                raise PermanentTranscriptionError(
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            except OSError as exc:
+                # Audio file not found / unreadable — definitive failure.
+                outcome = "permanent"
+                raise PermanentTranscriptionError(
+                    f"Cannot read audio file {audio_path!r}: {exc}"
+                ) from exc
+        finally:
+            duration = time.time() - start
+            TRANSCRIPTION_DURATION_SECONDS.labels(
+                provider=self.provider
+            ).observe(duration)
+            TRANSCRIPTION_CALLS_TOTAL.labels(
+                provider=self.provider, outcome=outcome
+            ).inc()
 
-        duration_ms = int((time.time() - start) * 1000)
+        duration_ms = int(duration * 1000)
         segments = _extract_segments(resp)
         result = TranscriptionResult(
             segments=segments,

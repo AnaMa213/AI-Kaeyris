@@ -26,6 +26,11 @@ from openai import (
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.metrics import (
+    LLM_CALL_DURATION_SECONDS,
+    LLM_CALLS_TOTAL,
+    LLM_TOKENS_TOTAL,
+)
 
 logger = get_logger(__name__)
 
@@ -120,48 +125,74 @@ class OpenAICompatibleLLMAdapter:
         max_tokens: int,
     ) -> str:
         start = time.time()
+        outcome = "success"
         try:
-            resp = await self._client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                max_tokens=max_tokens,
-            )
-        except (
-            APITimeoutError,
-            APIConnectionError,
-            RateLimitError,
-            InternalServerError,
-        ) as exc:
-            raise TransientLLMError(f"{type(exc).__name__}: {exc}") from exc
-        except (
-            AuthenticationError,
-            PermissionDeniedError,
-            BadRequestError,
-            NotFoundError,
-            UnprocessableEntityError,
-        ) as exc:
-            raise PermanentLLMError(f"{type(exc).__name__}: {exc}") from exc
-        except APIStatusError as exc:
-            # Other HTTP error not specifically typed by the SDK.
-            if 500 <= exc.status_code < 600:
-                raise TransientLLMError(f"HTTP {exc.status_code}: {exc}") from exc
-            raise PermanentLLMError(f"HTTP {exc.status_code}: {exc}") from exc
-        except APIError as exc:
-            # Catch-all from the SDK base — treat as permanent to avoid
-            # masking programming errors with hopeful retries.
-            raise PermanentLLMError(f"{type(exc).__name__}: {exc}") from exc
+            try:
+                resp = await self._client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    max_tokens=max_tokens,
+                )
+            except (
+                APITimeoutError,
+                APIConnectionError,
+                RateLimitError,
+                InternalServerError,
+            ) as exc:
+                outcome = "transient"
+                raise TransientLLMError(f"{type(exc).__name__}: {exc}") from exc
+            except (
+                AuthenticationError,
+                PermissionDeniedError,
+                BadRequestError,
+                NotFoundError,
+                UnprocessableEntityError,
+            ) as exc:
+                outcome = "permanent"
+                raise PermanentLLMError(f"{type(exc).__name__}: {exc}") from exc
+            except APIStatusError as exc:
+                # Other HTTP error not specifically typed by the SDK.
+                if 500 <= exc.status_code < 600:
+                    outcome = "transient"
+                    raise TransientLLMError(f"HTTP {exc.status_code}: {exc}") from exc
+                outcome = "permanent"
+                raise PermanentLLMError(f"HTTP {exc.status_code}: {exc}") from exc
+            except APIError as exc:
+                # Catch-all from the SDK base — treat as permanent to avoid
+                # masking programming errors with hopeful retries.
+                outcome = "permanent"
+                raise PermanentLLMError(f"{type(exc).__name__}: {exc}") from exc
+        finally:
+            duration = time.time() - start
+            LLM_CALL_DURATION_SECONDS.labels(
+                provider=self.provider, model=self.model
+            ).observe(duration)
+            LLM_CALLS_TOTAL.labels(
+                provider=self.provider, model=self.model, outcome=outcome
+            ).inc()
 
-        duration_ms = int((time.time() - start) * 1000)
+        duration_ms = int(duration * 1000)
         usage = getattr(resp, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", None)
+        completion_tokens = getattr(usage, "completion_tokens", None)
+        if prompt_tokens:
+            LLM_TOKENS_TOTAL.labels(
+                provider=self.provider, model=self.model, direction="prompt"
+            ).inc(prompt_tokens)
+        if completion_tokens:
+            LLM_TOKENS_TOTAL.labels(
+                provider=self.provider, model=self.model, direction="completion"
+            ).inc(completion_tokens)
+
         logger.info(
             "llm.complete",
             provider=self.provider,
             model=self.model,
-            prompt_tokens=getattr(usage, "prompt_tokens", None),
-            completion_tokens=getattr(usage, "completion_tokens", None),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
             duration_ms=duration_ms,
         )
 
