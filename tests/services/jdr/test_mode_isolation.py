@@ -152,3 +152,113 @@ async def test_get_transcription_still_works_on_diarised(
     body = response.json()
     assert len(body["segments"]) == 1
     _ = gm
+
+
+# ---------------------------------------------------------------------------
+# /mapping refusé sur non_diarised (US3)
+# ---------------------------------------------------------------------------
+
+
+async def test_put_mapping_409_on_non_diarised(
+    db_session, make_db_session_dep
+):
+    """`/mapping` est exclusif au mode diarised — sur non_diarised il faut
+    utiliser `/players`."""
+    plain = "gm-iso-mapping"
+    _, session = await _seed_gm_with_session(
+        db_session, plain, mode=TranscriptionMode.NON_DIARISED
+    )
+
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            f"/services/jdr/sessions/{session.id}/mapping",
+            json={"mapping": {}},
+            headers={"Authorization": f"Bearer {plain}"},
+        )
+    assert response.status_code == 409
+    assert response.json()["type"].endswith("/wrong-mode")
+
+
+async def test_get_mapping_409_on_non_diarised(
+    db_session, make_db_session_dep
+):
+    plain = "gm-iso-mapping-get"
+    _, session = await _seed_gm_with_session(
+        db_session, plain, mode=TranscriptionMode.NON_DIARISED
+    )
+
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/services/jdr/sessions/{session.id}/mapping",
+            headers={"Authorization": f"Bearer {plain}"},
+        )
+    assert response.status_code == 409
+    assert response.json()["type"].endswith("/wrong-mode")
+
+
+# ---------------------------------------------------------------------------
+# narrative/elements/povs refusent 409 no-summary sans summary (US3 FR-010)
+# ---------------------------------------------------------------------------
+
+
+async def test_post_narrative_409_no_summary_on_non_diarised(
+    db_session, make_db_session_dep
+):
+    """Sur une session non_diarised sans summary, POST narrative → 409
+    no-summary qui pointe vers POST /artifacts/summary."""
+    plain = "gm-iso-no-summary"
+    _, session = await _seed_gm_with_session(
+        db_session, plain, mode=TranscriptionMode.NON_DIARISED
+    )
+
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/services/jdr/sessions/{session.id}/artifacts/narrative",
+            headers={"Authorization": f"Bearer {plain}"},
+        )
+    assert response.status_code == 409
+    assert response.json()["type"].endswith("/no-summary")
+
+
+async def test_post_elements_409_no_summary_on_non_diarised(
+    db_session, make_db_session_dep
+):
+    plain = "gm-iso-no-summary-elements"
+    _, session = await _seed_gm_with_session(
+        db_session, plain, mode=TranscriptionMode.NON_DIARISED
+    )
+
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/services/jdr/sessions/{session.id}/artifacts/elements",
+            headers={"Authorization": f"Bearer {plain}"},
+        )
+    assert response.status_code == 409
+    assert response.json()["type"].endswith("/no-summary")
+
+
+async def test_post_povs_409_no_summary_on_non_diarised(
+    db_session, make_db_session_dep
+):
+    plain = "gm-iso-no-summary-povs"
+    _, session = await _seed_gm_with_session(
+        db_session, plain, mode=TranscriptionMode.NON_DIARISED
+    )
+
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/services/jdr/sessions/{session.id}/artifacts/povs",
+            headers={"Authorization": f"Bearer {plain}"},
+        )
+    assert response.status_code == 409
+    assert response.json()["type"].endswith("/no-summary")

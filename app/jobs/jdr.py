@@ -52,6 +52,7 @@ from app.services.jdr.db.repositories import (
     ArtifactRepository,
     ChunkRepository,
     MappingRepository,
+    SessionPlayerRepository,
     TranscriptionRepository,
 )
 from app.services.jdr.text_chunker import chunk_text
@@ -245,15 +246,24 @@ async def _transcribe_session(session_id: UUID) -> None:
         )
 
 
-async def _generate_narrative(session_id: UUID) -> None:
-    """Build a French narrative summary of a transcribed session.
+async def _load_session_source_document(
+    session_id: UUID,
+    *,
+    artefact_label: str,
+) -> tuple[str, str | None]:
+    """Return ``(source_text, campaign_context)`` for an artefact job.
 
-    Refuses to run if the session is not yet ``transcribed`` (PermanentJobError).
-    Maps adapter errors to job errors so the RQ retry policy still applies.
+    Forks on ``session.transcription_mode`` (feature 002):
+    - **diarised**: returns the formatted segments (Jalon 5 behaviour).
+    - **non_diarised**: returns the chunks' ``summary_text`` joined by
+      ``_SUMMARY_CHUNK_SEPARATOR``. Raises ``PermanentJobError`` if any
+      chunk's ``summary_text`` is NULL (FR-010 — caller must run summary
+      job first; the route catches this state and returns 409 no-summary).
+
+    Raises ``PermanentJobError`` for the same reasons regardless of mode
+    (session missing, wrong state, data inconsistency).
     """
     sessionmaker = get_sessionmaker()
-
-    # Step 1: load + validate
     async with sessionmaker() as db:
         session_row = await db.scalar(
             select(Session).where(Session.id == session_id)
@@ -263,8 +273,30 @@ async def _generate_narrative(session_id: UUID) -> None:
         if session_row.state != SessionState.TRANSCRIBED:
             raise PermanentJobError(
                 f"Session {session_id} is not transcribed "
-                f"(state={session_row.state.value}); cannot generate narrative."
+                f"(state={session_row.state.value}); "
+                f"cannot generate {artefact_label}."
             )
+        campaign_context = session_row.campaign_context
+
+        if session_row.transcription_mode is TranscriptionMode.NON_DIARISED:
+            chunks = await ChunkRepository(db).list_for_session(session_id)
+            if not chunks:
+                raise PermanentJobError(
+                    f"Session {session_id} has no chunks; cannot generate "
+                    f"{artefact_label}."
+                )
+            missing = [c.ordre for c in chunks if not c.summary_text]
+            if missing:
+                raise PermanentJobError(
+                    f"Session {session_id} has chunks without summary_text "
+                    f"(ordre={missing}); run POST /artifacts/summary first."
+                )
+            source_text = _SUMMARY_CHUNK_SEPARATOR.join(
+                c.summary_text or "" for c in chunks
+            )
+            return source_text, campaign_context
+
+        # diarised — Jalon 5 path
         transcription = await db.scalar(
             select(Transcription).where(Transcription.session_id == session_id)
         )
@@ -274,11 +306,26 @@ async def _generate_narrative(session_id: UUID) -> None:
                 "even though state is 'transcribed' — data inconsistency."
             )
         segments = list(transcription.segments_json or [])
-        campaign_context = session_row.campaign_context
+        return _format_segments_for_narrative(segments), campaign_context
 
-    # Step 2: build the user prompt from segments
+
+async def _generate_narrative(session_id: UUID) -> None:
+    """Build a French narrative summary of a transcribed session.
+
+    Refuses to run if the session is not yet ``transcribed`` (PermanentJobError).
+    Maps adapter errors to job errors so the RQ retry policy still applies.
+
+    Mode-aware (feature 002): in `non_diarised` mode, consumes
+    chunks.summary_text via :func:`_load_session_source_document`.
+    """
+    source_text, campaign_context = await _load_session_source_document(
+        session_id, artefact_label="narrative"
+    )
+    sessionmaker = get_sessionmaker()
+
+    # Step 2: build the user prompt from source document
     user_prompt = _build_user_prompt_with_context(
-        campaign_context, _format_segments_for_narrative(segments)
+        campaign_context, source_text
     )
 
     # Step 3: call the LLM
@@ -313,33 +360,17 @@ async def _generate_elements(session_id: UUID) -> None:
     must be ``transcribed``), same error remapping, same UPSERT pattern.
     The only thing that changes is the prompt and that the LLM is asked
     for a JSON document which we parse and normalise into four lists.
+
+    Mode-aware (feature 002): in `non_diarised` mode, consumes
+    chunks.summary_text via :func:`_load_session_source_document`.
     """
+    source_text, campaign_context = await _load_session_source_document(
+        session_id, artefact_label="elements"
+    )
     sessionmaker = get_sessionmaker()
 
-    async with sessionmaker() as db:
-        session_row = await db.scalar(
-            select(Session).where(Session.id == session_id)
-        )
-        if session_row is None:
-            raise PermanentJobError(f"Session {session_id} not found.")
-        if session_row.state != SessionState.TRANSCRIBED:
-            raise PermanentJobError(
-                f"Session {session_id} is not transcribed "
-                f"(state={session_row.state.value}); cannot generate elements."
-            )
-        transcription = await db.scalar(
-            select(Transcription).where(Transcription.session_id == session_id)
-        )
-        if transcription is None:
-            raise PermanentJobError(
-                f"Session {session_id} has no transcription row "
-                "even though state is 'transcribed' — data inconsistency."
-            )
-        segments = list(transcription.segments_json or [])
-        campaign_context = session_row.campaign_context
-
     user_prompt = _build_user_prompt_with_context(
-        campaign_context, _format_segments_for_narrative(segments)
+        campaign_context, source_text
     )
 
     adapter = get_llm_adapter()
@@ -368,19 +399,20 @@ async def _generate_elements(session_id: UUID) -> None:
 
 
 async def _generate_povs(session_id: UUID) -> None:
-    """Build one POV summary per mapped PJ for a transcribed session.
+    """Build one POV summary per declared PJ for a transcribed session.
 
-    Pre-conditions checked here (same idiom as the other generators):
-    session exists, ``state == transcribed``, transcription row present,
-    at least one mapping row. A missing mapping is technically already
-    blocked by the route's 409 check, but we keep the worker honest in
-    case it is invoked via a different code path (CLI, retry).
+    Mode-aware (feature 002):
+    - **diarised** : reads `SessionPjMapping` rows and uses each
+      `speaker_label → pj_id` to scope the POV. Behaviour Jalon 5.
+    - **non_diarised** : reads `SessionPlayer` rows (list of pj_ids,
+      no speaker_label) and asks the LLM to infer who acts from the
+      context. Source document is `chunks.summary_text` joined.
 
-    UPSERT one ``Artifact(kind='pov:<pj_id>')`` per mapping entry.
+    Both modes UPSERT one ``Artifact(kind='pov:<pj_id>')`` per declared PJ.
     """
     sessionmaker = get_sessionmaker()
 
-    # Step 1: load + validate
+    # Step 1: load + validate, fork on mode
     async with sessionmaker() as db:
         session_row = await db.scalar(
             select(Session).where(Session.id == session_id)
@@ -392,53 +424,64 @@ async def _generate_povs(session_id: UUID) -> None:
                 f"Session {session_id} is not transcribed "
                 f"(state={session_row.state.value}); cannot generate POVs."
             )
-        transcription = await db.scalar(
-            select(Transcription).where(Transcription.session_id == session_id)
+        is_non_diarised = (
+            session_row.transcription_mode is TranscriptionMode.NON_DIARISED
         )
-        if transcription is None:
-            raise PermanentJobError(
-                f"Session {session_id} has no transcription row "
-                "even though state is 'transcribed' — data inconsistency."
+        campaign_context = session_row.campaign_context
+
+        # Build the list of (pj_id, speaker_label_or_None) pairs.
+        pj_pairs: list[tuple[UUID, str | None]] = []
+        if is_non_diarised:
+            players = await SessionPlayerRepository(db).list_for_session(
+                session_id
             )
-        mappings = await MappingRepository(db).get_for_session(session_id)
-        if not mappings:
-            raise PermanentJobError(
-                f"Session {session_id} has no speaker-PJ mapping; "
-                "set one via PUT /mapping before generating POVs."
-            )
+            if not players:
+                raise PermanentJobError(
+                    f"Session {session_id} has no PJ declared via "
+                    "POST /players; set one before generating POVs."
+                )
+            pj_pairs = [(p.pj_id, None) for p in players]
+        else:
+            mappings = await MappingRepository(db).get_for_session(session_id)
+            if not mappings:
+                raise PermanentJobError(
+                    f"Session {session_id} has no speaker-PJ mapping; "
+                    "set one via PUT /mapping before generating POVs."
+                )
+            pj_pairs = [(m.pj_id, m.speaker_label) for m in mappings]
+
         # Load PJ rows so we can put their names in the prompt.
-        pj_ids = [m.pj_id for m in mappings]
+        all_pj_ids = [pid for pid, _ in pj_pairs]
         pj_rows = (
-            await db.execute(select(Pj).where(Pj.id.in_(pj_ids)))
+            await db.execute(select(Pj).where(Pj.id.in_(all_pj_ids)))
         ).scalars().all()
         pj_by_id: dict[UUID, Pj] = {p.id: p for p in pj_rows}
 
-        segments = list(transcription.segments_json or [])
-        campaign_context = session_row.campaign_context
+    # Step 2: build the source document (modes-aware via helper)
+    source_text, _ = await _load_session_source_document(
+        session_id, artefact_label="povs"
+    )
 
-    # Step 2: per-PJ LLM calls, then UPSERT in a single final commit
+    # Step 3: per-PJ LLM calls
     adapter = get_llm_adapter()
     model_used = f"{settings.LLM_PROVIDER}:{settings.LLM_MODEL}"
-    transcript_block = _format_segments_for_narrative(segments)
 
     results: list[tuple[UUID, str]] = []
-    for mapping in mappings:
-        pj = pj_by_id.get(mapping.pj_id)
+    for pj_id, speaker_label in pj_pairs:
+        pj = pj_by_id.get(pj_id)
         if pj is None:
-            # Mapping points at a PJ that disappeared between the load and
-            # now (very rare). Skip rather than fail the whole batch.
             logger.warning(
                 "pov.skip_unknown_pj",
                 extra={
                     "session_id": str(session_id),
-                    "pj_id": str(mapping.pj_id),
+                    "pj_id": str(pj_id),
                 },
             )
             continue
         user_prompt = _build_pov_user_prompt(
             pj_name=pj.name,
-            speaker_label=mapping.speaker_label,
-            transcript_block=transcript_block,
+            speaker_label=speaker_label or "(non-diarised : aucun label)",
+            transcript_block=source_text,
             campaign_context=campaign_context,
         )
         try:

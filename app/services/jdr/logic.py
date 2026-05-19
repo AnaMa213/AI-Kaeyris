@@ -47,6 +47,7 @@ from app.services.jdr.db.repositories import (
     DuplicatePjNameError,
     MappingRepository,
     PjRepository,
+    SessionPlayerRepository,
     SessionRepository,
 )
 
@@ -93,6 +94,14 @@ class InvalidPlayerError(Exception):
 
     Surfaced by :func:`enroll_player`. The route maps this to HTTP 422
     ``invalid-player``.
+    """
+
+
+class InvalidPlayerListError(Exception):
+    """At least one pj_id in a `POST /players` body is unknown or foreign.
+
+    Surfaced by :func:`set_session_players` (feature 002 — FR-012).
+    The route maps this to HTTP 422 ``invalid-player-list``.
     """
 
 
@@ -146,6 +155,52 @@ async def list_session_chunks(
     sémantiquement bizarre — une session diarised n'aura jamais de chunks).
     """
     return await ChunkRepository(db).list_for_session(session.id)
+
+
+# ---------------------------------------------------------------------------
+# Session players (feature 002 — non_diarised, FR-012)
+# ---------------------------------------------------------------------------
+
+
+async def set_session_players(
+    db: AsyncSession,
+    *,
+    session: Session,
+    pj_ids: list[UUID],
+    gm_key_id: UUID,
+) -> list[UUID]:
+    """Remplace la liste des PJ présents pour une session non_diarised.
+
+    Valide que chaque ``pj_id`` appartient au MJ courant (sinon
+    :class:`InvalidPlayerListError`). Renvoie la liste finale persistée
+    (dédupliquée, ordre d'apparition préservé).
+    """
+    if pj_ids:
+        unique_ids = set(pj_ids)
+        # Vérifie ownership en batch
+        stmt = select(Pj.id).where(
+            Pj.id.in_(unique_ids), Pj.owner_gm_key_id == gm_key_id
+        )
+        found = set((await db.execute(stmt)).scalars().all())
+        missing = unique_ids - found
+        if missing:
+            raise InvalidPlayerListError(
+                f"Unknown or foreign PJ id(s): {sorted(str(m) for m in missing)}"
+            )
+
+    rows = await SessionPlayerRepository(db).replace_for_session(
+        session.id, pj_ids=pj_ids
+    )
+    await db.commit()
+    return [r.pj_id for r in rows]
+
+
+async def list_session_players(
+    db: AsyncSession, *, session: Session
+) -> list[UUID]:
+    """Renvoie les ``pj_id`` des PJ présents à la session, ordre de création."""
+    rows = await SessionPlayerRepository(db).list_for_session(session.id)
+    return [r.pj_id for r in rows]
 
 
 async def update_session(
