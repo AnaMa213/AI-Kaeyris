@@ -18,7 +18,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.services.jdr.db.models import JobKind, JobStatus, SessionMode, SessionState
+from app.services.jdr.db.models import (
+    JobKind,
+    JobStatus,
+    SessionMode,
+    SessionState,
+    TranscriptionMode,
+)
 
 T = TypeVar("T")
 
@@ -37,6 +43,15 @@ class SessionCreate(BaseModel):
         description=(
             "When the session actually took place (not the upload time). "
             "ISO-8601 with timezone."
+        ),
+    )
+    transcription_mode: TranscriptionMode | None = Field(
+        default=None,
+        description=(
+            "Optional. 'diarised' (default, Jalon 5 behaviour) or "
+            "'non_diarised' (chunked transcription + map-reduce LLM "
+            "summary). Immutable after creation. Default applied "
+            "server-side if omitted."
         ),
     )
     campaign_context: str | None = Field(
@@ -74,6 +89,7 @@ class SessionOut(BaseModel):
     recorded_at: datetime
     mode: SessionMode
     state: SessionState
+    transcription_mode: TranscriptionMode
     campaign_context: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -360,3 +376,55 @@ class Page(BaseModel, Generic[T]):
     total: int = Field(..., ge=0)
     page: int = Field(1, ge=1)
     size: int = Field(50, ge=1, le=500)
+
+
+# ---------------------------------------------------------------------------
+# Sous-jalon 5.5 — feature 002-non-diarised-mode
+# ---------------------------------------------------------------------------
+
+
+class ChunkOut(BaseModel):
+    """One row of `jdr_chunks` as exposed by `GET /sessions/{id}/chunks`.
+
+    `summary_text` is intentionally NOT exposed — it is internal to the
+    LLM pipeline (research.md §5).
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    chunk_id: UUID = Field(..., validation_alias="id")
+    ordre: int
+    text: str
+
+
+class ChunkListOut(BaseModel):
+    """Response of `GET /services/jdr/sessions/{session_id}/chunks`."""
+
+    session_id: UUID
+    items: list[ChunkOut]
+
+
+class SummaryArtifactOut(BaseModel):
+    """Public projection of an ``Artifact(kind='summary')`` row."""
+
+    session_id: UUID
+    text: str = Field(..., description="Global session summary in French.")
+    model_used: str
+    generated_at: datetime
+
+
+class SessionPlayersIn(BaseModel):
+    """Body of `POST /services/jdr/sessions/{session_id}/players`.
+
+    Replaces the player list integrally (PUT-like semantics).
+    """
+
+    pj_ids: list[UUID] = Field(..., min_length=1, max_length=50)
+
+
+class SessionPlayersOut(BaseModel):
+    """Response of `POST` and `GET /sessions/{session_id}/players`."""
+
+    session_id: UUID
+    pj_ids: list[UUID]
+    updated_at: datetime | None

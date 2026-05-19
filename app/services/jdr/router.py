@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from redis import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,18 +37,24 @@ from app.jobs.jdr import (
     generate_elements_job,
     generate_narrative_job,
     generate_povs_job,
+    generate_summary_job,
 )
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
 from app.services.jdr import logic
 from app.services.jdr.batch.router import router as batch_router
 from app.services.jdr.live.router import router as live_router
-from app.services.jdr.logic import DuplicatePjError, InvalidPlayerError
+from app.services.jdr.logic import (
+    DuplicatePjError,
+    InvalidPlayerError,
+    InvalidPlayerListError as LogicInvalidPlayerListError,
+)
 from app.services.jdr.db.models import (
     JobKind,
     JobStatus,
     Session as SessionModel,
     SessionState,
+    TranscriptionMode,
 )
 from app.services.jdr.db.repositories import (
     ArtifactRepository,
@@ -60,9 +66,12 @@ from app.services.jdr.markdown import (
     render_elements_md,
     render_narrative_md,
     render_pov_md,
+    render_summary_md,
     render_transcription_md,
 )
 from app.services.jdr.schemas import (
+    ChunkListOut,
+    ChunkOut,
     Element,
     ElementsArtifactOut,
     JobOut,
@@ -82,7 +91,10 @@ from app.services.jdr.schemas import (
     PovArtifactOut,
     SessionCreate,
     SessionOut,
+    SessionPlayersIn,
+    SessionPlayersOut,
     SessionUpdate,
+    SummaryArtifactOut,
     TranscriptionOut,
     TranscriptionSegmentOut,
 )
@@ -184,6 +196,54 @@ class PlayerForbiddenError(AppError):
     title = "Forbidden — your PJ is not mapped on this session"
 
 
+# --- Feature 002 (non_diarised mode) -----------------------------------------
+
+
+class WrongModeError(AppError):
+    """The endpoint is incompatible with the session's transcription_mode.
+
+    Examples: /chunks on a diarised session, /transcription on a
+    non_diarised session, /mapping on non_diarised, /players on diarised.
+    """
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "wrong-mode"
+    title = "Wrong transcription mode"
+
+
+class ImmutableFieldError(AppError):
+    """A PATCH body tried to modify a field that is immutable after creation."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "immutable-field"
+    title = "Immutable field"
+
+
+class NoChunksError(AppError):
+    """Non_diarised session has no chunks — summary generation impossible."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "no-chunks"
+    title = "No chunks available"
+
+
+class NoSummaryError(AppError):
+    """Non_diarised session has no global summary yet — derived artefacts
+    can't run. Hint: call POST /artifacts/summary first (FR-010)."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "no-summary"
+    title = "No session summary generated"
+
+
+class InvalidPlayerListError(AppError):
+    """One or more pj_id in the players body is unknown or owned by another MJ."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "invalid-player-list"
+    title = "Invalid player list"
+
+
 # Function name -> JobKind mapping. RQ pickles the callable by its module
 # path; we use the inverse to expose a stable enum in JobOut.
 _FUNC_NAME_TO_KIND: dict[str, JobKind] = {
@@ -191,6 +251,7 @@ _FUNC_NAME_TO_KIND: dict[str, JobKind] = {
     "app.jobs.jdr.generate_narrative_job": JobKind.NARRATIVE,
     "app.jobs.jdr.generate_elements_job": JobKind.ELEMENTS,
     "app.jobs.jdr.generate_povs_job": JobKind.POVS,
+    "app.jobs.jdr.generate_summary_job": JobKind.SUMMARY,
 }
 
 # RQ status (string) -> our coarser JobStatus.
@@ -261,6 +322,11 @@ async def create_session(
         recorded_at=payload.recorded_at,
         gm_key_id=auth.id,
         campaign_context=payload.campaign_context,
+        transcription_mode=(
+            payload.transcription_mode
+            if payload.transcription_mode is not None
+            else TranscriptionMode.DIARISED
+        ),
     )
     return SessionOut.model_validate(row)
 
@@ -306,6 +372,7 @@ async def get_session(
 )
 async def patch_session(
     session_id: UUID,
+    request: Request,
     payload: SessionUpdate,
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -317,7 +384,19 @@ async def patch_session(
     omitting the key leaves the existing value alone. Updating
     ``campaign_context`` does NOT re-run any previously generated
     artefact; the new value affects only future generations.
+
+    ``transcription_mode`` is immutable after creation (FR-002 of
+    feature 002): any PATCH body referencing it is rejected with 422.
     """
+    # Inspect the raw body to detect immutable fields. SessionUpdate does
+    # not declare `transcription_mode`, so Pydantic ignores it silently;
+    # we need the raw JSON to detect the violation.
+    raw_body = await request.json()
+    if isinstance(raw_body, dict) and "transcription_mode" in raw_body:
+        raise ImmutableFieldError(
+            detail="transcription_mode is immutable after session creation.",
+        )
+
     session = await logic.get_session(
         db, session_id=session_id, gm_key_id=auth.id
     )
@@ -333,6 +412,54 @@ async def patch_session(
         set_campaign_context="campaign_context" in fields_set,
     )
     return SessionOut.model_validate(updated)
+
+
+# ---------------------------------------------------------------------------
+# Chunks (feature 002 — non_diarised mode)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/sessions/{session_id}/chunks",
+    response_model=ChunkListOut,
+    summary="Chunked transcription of a non_diarised session (ordered).",
+)
+async def get_session_chunks(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ChunkListOut:
+    """Return the chunks (text, ordre) of a non_diarised session.
+
+    Reserved for non_diarised sessions — diarised sessions use the
+    `GET /transcription` endpoint instead (409 wrong-mode otherwise).
+    Returns 404 transcription-not-ready if no chunks have been produced
+    yet for the session.
+    """
+    session = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session.transcription_mode is not TranscriptionMode.NON_DIARISED:
+        raise WrongModeError(
+            detail=(
+                f"Session {session_id} is in mode 'diarised'. "
+                "Use GET /transcription for this session."
+            ),
+        )
+    chunks = await logic.list_session_chunks(db, session=session)
+    if not chunks:
+        raise TranscriptionNotReadyError(
+            detail=(
+                f"Transcription chunks for session {session_id} are not "
+                "available yet."
+            ),
+        )
+    return ChunkListOut(
+        session_id=session.id,
+        items=[ChunkOut.model_validate(c) for c in chunks],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +524,7 @@ async def put_session_mapping(
     """Replace the mapping in one atomic write.
 
     - 404 if the session does not belong to the current MJ.
+    - 409 wrong-mode if the session is non_diarised (use /players instead).
     - 409 if the session is not yet in ``state=transcribed``.
     - 422 if any ``pj_id`` is unknown or owned by another MJ.
 
@@ -409,6 +537,13 @@ async def put_session_mapping(
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session.transcription_mode is TranscriptionMode.NON_DIARISED:
+        raise WrongModeError(
+            detail=(
+                f"Session {session_id} is in mode 'non_diarised'. "
+                "Use POST /players to declare PJs for this session."
+            ),
+        )
     if session.state != SessionState.TRANSCRIBED:
         raise SessionNotTranscribedError(
             detail=(
@@ -443,17 +578,110 @@ async def get_session_mapping(
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> MappingOut:
     """Returns 200 with an empty dict when the session has no mapping
-    yet (resource exists but is not configured)."""
+    yet (resource exists but is not configured).
+
+    409 wrong-mode if the session is non_diarised (use GET /players).
+    """
     session = await logic.get_session(
         db, session_id=session_id, gm_key_id=auth.id
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session.transcription_mode is TranscriptionMode.NON_DIARISED:
+        raise WrongModeError(
+            detail=(
+                f"Session {session_id} is in mode 'non_diarised'. "
+                "Use GET /players to read the players list."
+            ),
+        )
     result = await logic.get_session_mapping(db, session_id=session.id)
     return MappingOut(
         session_id=session.id,
         mapping=result.mapping,
         updated_at=result.updated_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Session players (feature 002 — non_diarised analog of /mapping)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/sessions/{session_id}/players",
+    response_model=SessionPlayersOut,
+    summary="Replace the list of PJ present at a non_diarised session.",
+)
+async def post_session_players(
+    session_id: UUID,
+    payload: SessionPlayersIn,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SessionPlayersOut:
+    """Declare the PJ present at a non_diarised session (FR-012).
+
+    PUT-like semantics — the provided list replaces the previous one
+    integrally. Each ``pj_id`` must belong to the current MJ (422
+    ``invalid-player-list`` otherwise). Reserved for non_diarised
+    sessions (409 ``wrong-mode`` on diarised).
+    """
+    session = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session.transcription_mode is not TranscriptionMode.NON_DIARISED:
+        raise WrongModeError(
+            detail=(
+                f"Session {session_id} is in mode 'diarised'. "
+                "Use PUT /mapping for this session."
+            ),
+        )
+
+    try:
+        pj_ids = await logic.set_session_players(
+            db,
+            session=session,
+            pj_ids=payload.pj_ids,
+            gm_key_id=auth.id,
+        )
+    except LogicInvalidPlayerListError as exc:
+        raise InvalidPlayerListError(detail=str(exc)) from exc
+
+    return SessionPlayersOut(
+        session_id=session.id,
+        pj_ids=pj_ids,
+        updated_at=datetime.now(UTC),
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/players",
+    response_model=SessionPlayersOut,
+    summary="Read the current PJ list of a non_diarised session.",
+)
+async def get_session_players(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SessionPlayersOut:
+    session = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session.transcription_mode is not TranscriptionMode.NON_DIARISED:
+        raise WrongModeError(
+            detail=(
+                f"Session {session_id} is in mode 'diarised'. "
+                "Use GET /mapping for this session."
+            ),
+        )
+    pj_ids = await logic.list_session_players(db, session=session)
+    return SessionPlayersOut(
+        session_id=session.id,
+        pj_ids=pj_ids,
+        updated_at=None,
     )
 
 
@@ -477,6 +705,13 @@ async def get_transcription(
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session.transcription_mode is TranscriptionMode.NON_DIARISED:
+        raise WrongModeError(
+            detail=(
+                f"Session {session_id} is in mode 'non_diarised'. "
+                "Use GET /chunks for this session."
+            ),
+        )
 
     transcription = await TranscriptionRepository(db).get_for_session(session_id)
     if transcription is None:
@@ -514,6 +749,13 @@ async def get_transcription_md(
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session.transcription_mode is TranscriptionMode.NON_DIARISED:
+        raise WrongModeError(
+            detail=(
+                f"Session {session_id} is in mode 'non_diarised'. "
+                "Use GET /chunks for this session."
+            ),
+        )
     transcription = await TranscriptionRepository(db).get_for_session(session_id)
     if transcription is None:
         raise TranscriptionNotReadyError(
@@ -555,6 +797,15 @@ async def post_narrative(
                 "narrative generation requires 'transcribed'."
             ),
         )
+    if session_row.transcription_mode is TranscriptionMode.NON_DIARISED:
+        summary_row = await ArtifactRepository(db).get(session_id, "summary")
+        if summary_row is None:
+            raise NoSummaryError(
+                detail=(
+                    f"Session {session_id} has no global summary yet. "
+                    "POST /artifacts/summary first (FR-010)."
+                ),
+            )
 
     queue = get_default_queue(redis_client)
     job = enqueue_job(
@@ -658,6 +909,15 @@ async def post_elements(
                 "elements generation requires 'transcribed'."
             ),
         )
+    if session_row.transcription_mode is TranscriptionMode.NON_DIARISED:
+        summary_row = await ArtifactRepository(db).get(session_id, "summary")
+        if summary_row is None:
+            raise NoSummaryError(
+                detail=(
+                    f"Session {session_id} has no global summary yet. "
+                    "POST /artifacts/summary first (FR-010)."
+                ),
+            )
 
     queue = get_default_queue(redis_client)
     job = enqueue_job(
@@ -749,6 +1009,150 @@ async def get_elements_md(
 
 
 # ---------------------------------------------------------------------------
+# Summary artefact (feature 002 — non_diarised map-reduce)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/sessions/{session_id}/artifacts/summary",
+    response_model=JobQueuedOut,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Trigger the global session summary (map-reduce LLM).",
+)
+async def post_summary(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    redis_client: Annotated[Redis, Depends(get_redis)],
+) -> JobQueuedOut:
+    """Enqueue the map-reduce summary job for a non_diarised session.
+
+    Pre-conditions:
+    - session must belong to the MJ (404 otherwise)
+    - session must be in non_diarised mode (409 wrong-mode)
+    - session must be in state=transcribed (409 session-not-transcribed)
+    - session must have at least 1 chunk (409 no-chunks)
+
+    Side effect documented under FR-011: each new summary job resets
+    chunks.summary_text and cascade-deletes existing narrative /
+    elements / pov:* artefacts for the session. The atomicity is
+    enforced by ``_generate_summary`` (see research.md §2).
+    """
+    session_row = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session_row.transcription_mode is not TranscriptionMode.NON_DIARISED:
+        raise WrongModeError(
+            detail=(
+                f"Session {session_id} is in mode 'diarised'. "
+                "Map-reduce summary is reserved for non_diarised sessions."
+            ),
+        )
+    if session_row.state != SessionState.TRANSCRIBED:
+        raise SessionNotTranscribedError(
+            detail=(
+                f"Session {session_id} is in state {session_row.state.value!r}; "
+                "summary generation requires 'transcribed'."
+            ),
+        )
+    chunks = await logic.list_session_chunks(db, session=session_row)
+    if not chunks:
+        raise NoChunksError(
+            detail=(
+                f"Session {session_id} has no chunks; transcription job "
+                "may not have produced output yet."
+            ),
+        )
+
+    queue = get_default_queue(redis_client)
+    job = enqueue_job(
+        queue, generate_summary_job, session_id, transient_errors=True
+    )
+    return JobQueuedOut(
+        id=job.id,
+        kind=JobKind.SUMMARY,
+        session_id=session_id,
+        status=JobStatus.QUEUED,
+        queued_at=datetime.now(UTC),
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/artifacts/summary",
+    response_model=SummaryArtifactOut,
+    summary="Fetch the global session summary (JSON).",
+)
+async def get_summary(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SummaryArtifactOut:
+    session_row = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session_row.transcription_mode is not TranscriptionMode.NON_DIARISED:
+        raise WrongModeError(
+            detail=(
+                f"Session {session_id} is in mode 'diarised'. "
+                "Summary artefact is reserved for non_diarised sessions."
+            ),
+        )
+    artifact = await ArtifactRepository(db).get(session_id, "summary")
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"Summary for session {session_id} has not been generated yet. "
+                "POST to this endpoint to enqueue the job."
+            ),
+        )
+    content = artifact.content_json or {}
+    text = str(content.get("text", "")) if isinstance(content, dict) else ""
+    return SummaryArtifactOut(
+        session_id=artifact.session_id,
+        text=text,
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/artifacts/summary.md",
+    response_class=Response,
+    summary="Export the global session summary as Markdown (text/markdown).",
+)
+async def get_summary_md(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Response:
+    session_row = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id
+    )
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session_row.transcription_mode is not TranscriptionMode.NON_DIARISED:
+        raise WrongModeError(
+            detail=(
+                f"Session {session_id} is in mode 'diarised'. "
+                "Summary artefact is reserved for non_diarised sessions."
+            ),
+        )
+    artifact = await ArtifactRepository(db).get(session_id, "summary")
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"Summary for session {session_id} has not been generated yet."
+            ),
+        )
+    md = render_summary_md(session_row, artifact)
+    return Response(content=md, media_type="text/markdown; charset=utf-8")
+
+
+# ---------------------------------------------------------------------------
 # POV artefacts (US3 — sub-lot 5b)
 # ---------------------------------------------------------------------------
 
@@ -784,14 +1188,34 @@ async def post_povs(
                 "POV generation requires 'transcribed'."
             ),
         )
-    mappings = await MappingRepository(db).get_for_session(session_id)
-    if not mappings:
-        raise NoMappingError(
-            detail=(
-                f"Session {session_id} has no speaker-PJ mapping configured. "
-                "Call PUT /services/jdr/sessions/{id}/mapping first."
-            ),
-        )
+    if session_row.transcription_mode is TranscriptionMode.NON_DIARISED:
+        # Non-diarised : exiger un summary global + un /players non-vide.
+        summary_row = await ArtifactRepository(db).get(session_id, "summary")
+        if summary_row is None:
+            raise NoSummaryError(
+                detail=(
+                    f"Session {session_id} has no global summary yet. "
+                    "POST /artifacts/summary first (FR-010)."
+                ),
+            )
+        players = await logic.list_session_players(db, session=session_row)
+        if not players:
+            raise NoMappingError(
+                detail=(
+                    f"Session {session_id} has no PJ declared via POST /players. "
+                    "Declare at least one PJ before generating POVs."
+                ),
+            )
+    else:
+        # Diarised : Jalon 5 path inchangé.
+        mappings = await MappingRepository(db).get_for_session(session_id)
+        if not mappings:
+            raise NoMappingError(
+                detail=(
+                    f"Session {session_id} has no speaker-PJ mapping configured. "
+                    "Call PUT /services/jdr/sessions/{id}/mapping first."
+                ),
+            )
 
     queue = get_default_queue(redis_client)
     job = enqueue_job(

@@ -89,6 +89,65 @@ TRANSCRIPTION_BASE_URL=http://gpu-host.lan:8001/v1
 ```
 Redémarrer le worker. Aucun fichier de `app/services/jdr/` n'a besoin de changer (SC-009).
 
+## 4bis. Mode `non_diarised` (sub-jalon 5.5)
+
+Pipeline alternatif opt-in, posé via `transcription_mode: "non_diarised"` à la création de session (immuable ensuite). Conçu pour les cas où le provider de transcription ne diarise pas — typiquement le cloud Whisper par défaut.
+
+### Pipeline forké
+
+```
+[POST /sessions transcription_mode=non_diarised]
+  ↓
+[POST /sessions/{id}/audio] -> transcrit puis chunké
+  ↓
+[jdr_chunks: rows (ordre, text, summary_text=NULL)]
+  ↓
+[POST /sessions/{id}/players] -> liste de pj_ids (équivalent /mapping sans speaker)
+  ↓
+[POST /artifacts/summary] -> map-reduce LLM :
+    1) map: 1 LLM call par chunk -> chunks.summary_text peuplé
+    2) reduce: 1 LLM call sur les résumés partiels -> Artifact(kind=summary)
+    (cascade: NULL'ifie summary_text + DELETE narrative/elements/pov:*
+     dans une transaction unique AVANT les LLM calls — FR-011)
+  ↓
+[POST /artifacts/{narrative|elements|povs}] -> consomment chunks.summary_text
+    (refusé 409 no-summary si summary pas généré au préalable — FR-010)
+```
+
+Le mode `diarised` (défaut) reste strictement inchangé Jalon 5 (`/mapping`, `/transcription`, `/artifacts/*` historiques).
+
+### Endpoints additifs (mode non_diarised uniquement)
+
+| Méthode | Path | Description |
+|---|---|---|
+| `GET` | `/sessions/{id}/chunks` | Liste des chunks ordonnés (`chunk_id`, `ordre`, `text`). `summary_text` non exposé (interne pipeline LLM). |
+| `POST`/`GET` | `/sessions/{id}/players` | Déclaration des PJ présents (équivalent `/mapping` sans `speaker_label`). |
+| `POST`/`GET`/`GET.md` | `/sessions/{id}/artifacts/summary` | Résumé global map-reduce. |
+
+### Cross-mode isolation (raccourci)
+
+| Endpoint | mode diarised | mode non_diarised |
+|---|---|---|
+| `GET /transcription[.md]` | 200 | **409 wrong-mode** → utiliser `/chunks` |
+| `PUT/GET /mapping` | 200 | **409 wrong-mode** → utiliser `/players` |
+| `GET /chunks` | **409 wrong-mode** → utiliser `/transcription` | 200 |
+| `POST/GET /players` | **409 wrong-mode** → utiliser `/mapping` | 200 |
+| `POST/GET /artifacts/summary[.md]` | **409 wrong-mode** (hors scope sub-jalon) | 200 |
+| `POST /artifacts/{narrative,elements,povs}` | 200 (Jalon 5) | 200 si `summary` existe, sinon **409 no-summary** |
+
+### Configuration
+
+- `KAEYRIS_CHUNK_MAX_CHARS` (env var, default `30000`) : taille max d'un chunk de transcription. Affecte le découpage post-transcription en mode non_diarised. À affiner par benchmarks empiriques.
+- Prompts système nouveaux : `SUMMARY_MAP_SYSTEM_PROMPT`, `SUMMARY_REDUCE_SYSTEM_PROMPT`. Les prompts existants `NARRATIVE_/ELEMENTS_/POV_SYSTEM_PROMPT` sont réutilisés tels quels (le user prompt est adapté côté job pour passer les résumés chunked au lieu des segments).
+
+### Limites assumées
+
+- **POV qualitativement limités** : sans speaker labels, le LLM doit "deviner" qui agit depuis le contexte narratif. À ré-évaluer post-Jalon 9 (diarisation locale).
+- **`/me/*` joueur reste réservé aux sessions `diarised`** au sub-jalon courant. Un joueur dont le MJ a opté pour non_diarised verra `409 wrong-mode` (à reconsidérer si la première vraie session révèle un besoin).
+- **Mode immuable** : un MJ qui s'est trompé doit recréer une nouvelle session.
+
+Voir [ADR 0007](../adr/0007-non-diarised-mode.md) pour le détail des décisions et alternatives rejetées.
+
 ## 5. Hôte GPU LAN (transcription locale)
 
 Topologie cible (mémoire `infrastructure_topology.md`) :

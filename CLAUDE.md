@@ -265,7 +265,7 @@ Deux fichiers dans `docs/`, complémentaires et tenus à jour par Claude :
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-[`specs/001-kaeyris-jdr/plan.md`](specs/001-kaeyris-jdr/plan.md).
+[`specs/002-non-diarised-mode/plan.md`](specs/002-non-diarised-mode/plan.md).
 Companion artifacts in the same directory: `spec.md`, `research.md`,
 `data-model.md`, `contracts/`, `quickstart.md`.
 <!-- SPECKIT END -->

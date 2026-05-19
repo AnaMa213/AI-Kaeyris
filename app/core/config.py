@@ -56,5 +56,16 @@ class Settings(BaseSettings):
     # whole file (tests use 0 to keep their fake audio bytes working).
     TRANSCRIPTION_CHUNK_DURATION_SECONDS: int = 30
 
+    # Sous-jalon 5.5 — mode `non_diarised`. Taille maximale d'un chunk de
+    # transcription stocké dans jdr_chunks (en caractères). ~30 000 chars
+    # ≈ 7 500-10 000 tokens FR, confortable pour un contexte 32k tokens avec
+    # marge prompt + sortie. À affiner par benchmarks empiriques.
+    KAEYRIS_CHUNK_MAX_CHARS: int = 30000
+
 
 settings = Settings()
+if settings.KAEYRIS_CHUNK_MAX_CHARS <= 0:
+    raise RuntimeError(
+        "KAEYRIS_CHUNK_MAX_CHARS must be strictly positive "
+        f"(got {settings.KAEYRIS_CHUNK_MAX_CHARS!r})."
+    )

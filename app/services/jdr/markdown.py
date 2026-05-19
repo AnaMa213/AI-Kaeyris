@@ -219,6 +219,46 @@ def render_elements_md(session: Any, elements_artifact: Any) -> str:
     return "\n".join(parts)
 
 
+def render_summary_md(session: Any, summary_artifact: Any) -> str:
+    """Render the global session summary (feature 002) as Markdown.
+
+    Layout mirrors :func:`render_narrative_md`:
+
+        # Session : …
+
+        ## Résumé global de la session
+
+        <text>
+
+        ---
+
+        _Résumé produit par `<model>`, le YYYY-MM-DD HH:MM (UTC)._
+    """
+    parts: list[str] = [render_session_header(session)]
+    parts.append("## Résumé global de la session")
+    parts.append("")
+
+    text = ""
+    content = getattr(summary_artifact, "content_json", None) or {}
+    if isinstance(content, dict):
+        text = str(content.get("text", "")).strip()
+
+    parts.append(text if text else "_(résumé vide)_")
+    parts.append("")
+
+    parts.append("---")
+    parts.append("")
+    model = getattr(summary_artifact, "model_used", "")
+    generated_at = getattr(summary_artifact, "generated_at", None)
+    date_str = (
+        generated_at.strftime("%Y-%m-%d %H:%M (UTC)")
+        if generated_at is not None
+        else "(inconnue)"
+    )
+    parts.append(f"_Résumé produit par `{model}`, le {date_str}._")
+    return "\n".join(parts)
+
+
 def render_pov_md(session: Any, pj: Any, pov_artifact: Any) -> str:
     """Render a per-PJ POV summary as Markdown.
 
