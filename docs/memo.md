@@ -83,6 +83,20 @@ alembic current                     # version DB courante
 alembic history                     # historique des migrations
 ```
 
+### Mode `non_diarised` (sub-jalon 5.5) — variables et endpoints clés
+
+| Var env | Default | Rôle |
+|---|---|---|
+| `KAEYRIS_CHUNK_MAX_CHARS` | `30000` | Taille max (caractères) d'un chunk de transcription pour les sessions `non_diarised` |
+
+| Endpoint nouveau | Action |
+|---|---|
+| `POST /sessions` (champ `transcription_mode`) | `"diarised"` (défaut) ou `"non_diarised"` |
+| `GET  /sessions/{id}/chunks` | Liste les chunks ordonnés (mode non_diarised) |
+| `POST/GET /sessions/{id}/players` | Liste des PJ présents (équivalent /mapping sans speaker, non_diarised) |
+| `POST /sessions/{id}/artifacts/summary` | Déclenche le map-reduce LLM (non_diarised) |
+| `GET  /sessions/{id}/artifacts/summary[.md]` | Lit le résumé global (non_diarised) |
+
 ### Jobs RQ (worker)
 ```bash
 rq worker default --url redis://localhost:6379/0   # worker en avant-plan

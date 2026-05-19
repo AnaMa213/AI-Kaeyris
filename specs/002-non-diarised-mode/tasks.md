@@ -150,16 +150,16 @@ Convention monolithe modulaire AI-Kaeyris (cf. `plan.md §Project Structure` et 
 
 **Purpose** : améliorations transverses, documentation, Definition of Done sous-jalon 5.5.
 
-- [ ] T051 [P] Rédiger `D:\Projets\dev\AI-Kaeyris\docs\adr\0007-non-diarised-mode.md` : décisions structurantes (mode `non_diarised` comme posture additive sur le pipeline Jalon 5, persistance inline `chunks.summary_text`, séquence atomique de la cascade FR-011, choix de réutiliser les system prompts existants). Format identique aux ADR 0001-0006.
-- [ ] T052 [P] Mettre à jour `D:\Projets\dev\AI-Kaeyris\README.md` : section "Mode `non_diarised` (sous-jalon 5.5)" qui pointe vers `quickstart.md` 002, mentionne les nouvelles routes (chunks, players, summary) et la variable `KAEYRIS_CHUNK_MAX_CHARS`.
-- [ ] T053 [P] Mettre à jour `D:\Projets\dev\AI-Kaeyris\docs\services\jdr.md` : ajouter une section "Mode non_diarised" avec le pipeline forké (transcription → chunks → summary map-reduce → artefacts dérivés), exemple curl `POST /sessions { transcription_mode: "non_diarised" }`, le tableau des erreurs cross-mode.
-- [ ] T054 [P] Mettre à jour `D:\Projets\dev\AI-Kaeyris\docs\memo.md` : ajouter la ligne pour l'env var `KAEYRIS_CHUNK_MAX_CHARS` (default 30000) dans la section variables, et `alembic upgrade head` (couvre la migration 0002).
-- [ ] T055 [P] Ajouter une entrée dans `D:\Projets\dev\AI-Kaeyris\docs\journal.md` pour le sous-jalon 5.5 : ce qui a été appris (pattern map-reduce LLM, atomicité de la cascade reset+delete via 2 transactions, choix du chunking par caractères + frontières naturelles, réutilisation des system prompts).
-- [ ] T056 [P] Mettre à jour `D:\Projets\dev\AI-Kaeyris\specs\002-non-diarised-mode\checklists\requirements.md` pour refléter l'état post-implémentation : statuts confirmés, bullet final "Spec livrée, validation manuelle quickstart.md en attente".
-- [ ] T057 [P] Exécuter `ruff check D:\Projets\dev\AI-Kaeyris` et corriger les warnings introduits par les nouveaux fichiers.
-- [ ] T058 Exécuter `pytest D:\Projets\dev\AI-Kaeyris` et viser 100% vert. La suite Jalon 5 (248 tests) doit rester verte sans modification (FR-014).
-- [ ] T059 Validation manuelle : suivre `quickstart.md §1` à `§10` de bout en bout avec une vraie clé DeepInfra et un M4A réel. Vérifier que `/docs` (OpenAPI) liste les nouveaux endpoints (`/chunks`, `/players`, `/artifacts/summary[.md]`) et que `transcription_mode` apparaît dans le schéma `SessionCreate` / `SessionOut`.
-- [ ] T060 Commit final sous format Conventional Commits : `feat(jdr): non_diarised mode with map-reduce summary pipeline (sub-jalon 5.5)`. Ne pas amender les commits intermédiaires des US.
+- [X] T051 [P] Rédiger `D:\Projets\dev\AI-Kaeyris\docs\adr\0007-non-diarised-mode.md` : décisions structurantes (mode `non_diarised` comme posture additive sur le pipeline Jalon 5, persistance inline `chunks.summary_text`, séquence atomique de la cascade FR-011, choix de réutiliser les system prompts existants). Format identique aux ADR 0001-0006.
+- [X] T052 [P] Mettre à jour `D:\Projets\dev\AI-Kaeyris\README.md` : section "Mode `non_diarised` (sous-jalon 5.5)" qui pointe vers `quickstart.md` 002, mentionne les nouvelles routes (chunks, players, summary) et la variable `KAEYRIS_CHUNK_MAX_CHARS`.
+- [X] T053 [P] Mettre à jour `D:\Projets\dev\AI-Kaeyris\docs\services\jdr.md` : ajouter une section "Mode non_diarised" avec le pipeline forké (transcription → chunks → summary map-reduce → artefacts dérivés), exemple curl `POST /sessions { transcription_mode: "non_diarised" }`, le tableau des erreurs cross-mode.
+- [X] T054 [P] Mettre à jour `D:\Projets\dev\AI-Kaeyris\docs\memo.md` : ajouter la ligne pour l'env var `KAEYRIS_CHUNK_MAX_CHARS` (default 30000) dans la section variables, et `alembic upgrade head` (couvre la migration 0002).
+- [X] T055 [P] Ajouter une entrée dans `D:\Projets\dev\AI-Kaeyris\docs\journal.md` pour le sous-jalon 5.5 : ce qui a été appris (pattern map-reduce LLM, atomicité de la cascade reset+delete via 2 transactions, choix du chunking par caractères + frontières naturelles, réutilisation des system prompts).
+- [X] T056 [P] Mettre à jour `D:\Projets\dev\AI-Kaeyris\specs\002-non-diarised-mode\checklists\requirements.md` pour refléter l'état post-implémentation : statuts confirmés, bullet final "Spec livrée, validation manuelle quickstart.md en attente".
+- [X] T057 [P] Exécuter `ruff check D:\Projets\dev\AI-Kaeyris` et corriger les warnings introduits par les nouveaux fichiers.
+- [X] T058 Exécuter `pytest D:\Projets\dev\AI-Kaeyris` et viser 100% vert. La suite Jalon 5 (248 tests) doit rester verte sans modification (FR-014).
+- [ ] T059 **DEFERRED** — validation manuelle E2E avec une vraie clé DeepInfra et un M4A réel. À exécuter avant clôture formelle du sub-jalon (équivalent T076 du Jalon 5). Validation manuelle : suivre `quickstart.md §1` à `§10` de bout en bout avec une vraie clé DeepInfra et un M4A réel. Vérifier que `/docs` (OpenAPI) liste les nouveaux endpoints (`/chunks`, `/players`, `/artifacts/summary[.md]`) et que `transcription_mode` apparaît dans le schéma `SessionCreate` / `SessionOut`.
+- [X] T060 Commit final sous format Conventional Commits : `feat(jdr): non_diarised mode with map-reduce summary pipeline (sub-jalon 5.5)`. Ne pas amender les commits intermédiaires des US.
 
 ---
 

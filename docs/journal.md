@@ -217,3 +217,39 @@
 - **Validation E2E avec une vraie clé DeepInfra non automatisée** : la suite pytest tourne sans appel LLM réel (mock `_StubLLM`). La validation `quickstart.md` doit être exécutée manuellement avant de fermer formellement le Jalon 5 (cf. T076 dans tasks.md).
 - **Pas de PostgreSQL en dev** : SQLite + `aiosqlite` couvre tous les tests. Le passage à `asyncpg`/PostgreSQL est verrouillé pour le Jalon 8 (déploiement Pi) — `DATABASE_URL` change, le code reste identique.
 - **Mode live = stub uniquement** : aucun chunk audio ingéré en streaming au Jalon 5. Implémentation prévue Jalon 6+ avec un bot Discord en amont.
+
+---
+
+## 2026-05-18 — Sub-jalon 5.5 : mode `non_diarised` (feature 002)
+
+### Ce qui a été fait
+
+- **Spec Kit complet réutilisé** pour la deuxième fois : `/speckit-specify` → `/speckit-clarify` (3 réponses A/A/A actées) → `/speckit-plan` (genère research, data-model, contracts, quickstart) → `/speckit-tasks` (60 tâches numérotées par US) → `/speckit-implement` (workflow strict utilisé pour la première fois). Pivot de scope en cours de session : un premier `/speckit-specify` partait sur une "session_summary" générique, jeté après clarification du besoin réel ; le second tour a livré le scope final correct.
+- **ADR 0007** rédigé : 4 décisions structurantes (tag posé à la création + immuable, persistance `chunks.summary_text` inline, prompts système réutilisés, atomicité de la cascade avec LLM hors transaction). Plus 3 décisions de surface tranchées via clarify.
+- **Migration Alembic 0003** : `ALTER jdr_sessions ADD transcription_mode` + `CREATE TABLE jdr_chunks` + `CREATE TABLE jdr_session_players`. Aller-retour testé OK. `server_default='diarised'` garantit la rétro-compat des sessions Jalon 5.
+- **ORM étendu** : enum `TranscriptionMode`, classes `Chunk` et `SessionPlayer`. Repositories `ChunkRepository`, `SessionPlayerRepository`. `JobKind.SUMMARY` ajouté.
+- **Pipeline forké en interne sans modifier le contrat HTTP** : `_transcribe_session`, `_generate_narrative`, `_generate_elements`, `_generate_povs` détectent `session.transcription_mode` et adaptent leur stockage/lecture. Helper commun `_load_session_source_document` qui retourne le bon document selon le mode.
+- **Map-reduce `_generate_summary`** : reset cascade dans une transaction courte commitée AVANT les LLM calls (FR-011), puis map par chunk (commit par chunk), puis reduce final (skippé si 1 seul chunk). Mapping erreurs LLM → JobError cohérent ADR 0004.
+- **Nouveaux endpoints** : `POST/GET /chunks`, `POST/GET /players`, `POST/GET/.md /artifacts/summary`. Extensions transparentes de `POST /sessions` (champ `transcription_mode`) et `PATCH /sessions/{id}` (rejet de `transcription_mode`).
+- **Cross-mode isolation** stricte : 7 codes erreur nouveaux (`wrong-mode`, `no-summary`, `no-chunks`, `invalid-player-list`, `invalid-transcription-mode`, `immutable-field`, plus `pj-not-found` de US4).
+- **6 commits incrémentaux** sur la branche `002-non-diarised-mode` : scaffolding (Phase 1+2), US1, US2, US3, et le polish final.
+- **Tests** : 301 tests verts au total (248 Jalon 5 préservés sans modification + 53 nouveaux : 10 chunker, 17 US1, 13 US2, 13 US3). Pas une seule régression côté Jalon 5 (FR-014 garanti par construction).
+
+### Ce que j'ai appris
+
+- **Spec Kit en mode strict `/speckit-implement` vs implémentation libre** : sur ce projet (rodé, tests-first installé, solo), la différence est faible — le `tasks.md` détaillé est déjà la checklist exécutable. La valeur de `/speckit-implement` est sur la traçabilité (`[X]` cochés au fur et à mesure) et la discipline phase-par-phase forcée. Sur une équipe ou un projet moins discipliné, ce serait plus rentable.
+- **Python 3.12 + StrMixinEnum + SQLAlchemy `String` = piège silencieux** : `str(MyEnum.X)` retourne `"MyEnum.X"` (repr) au lieu de `"x"` (value) depuis 3.11, contrairement à 3.10. Conséquence : `mapped_column(String(16))` sur un enum mixin stocke `"TranscriptionMode.NON_DIARISED"` au lieu de `"non_diarised"`. Toutes les lectures `WHERE col == "non_diarised"` ratent. Solution : `Enum(MyEnum, native_enum=False, length=16)` qui passe par `.value` correctement. Aligné avec le pattern Jalon 5 (Role, SessionState, etc.). Caught in 11 failing tests then ~5 min to debug — leçon mémorable. Source : https://docs.python.org/3/library/enum.html#enum.StrEnum
+- **Map-reduce LLM transactionnel : courte transaction de reset puis LLM hors transaction** : si on englobe les LLM calls dans une transaction DB unique (jusqu'à 5 min pour 60k chars), on bloque les autres workers + risque de timeout côté Postgres. Pattern propre : reset+delete dans une transaction courte commitée AVANT les LLM calls. Si le map fail, l'ancien `summary` global survit mais les `chunks.summary_text` et les artefacts dérivés ont déjà été nettoyés — état dégradé mais cohérent, MJ peut relancer.
+- **Persistance inline `summary_text` sur `Chunk` plutôt qu'artefacts séparés** : décision actée en clarify. Évite l'explosion du nombre de rows dans `jdr_artifacts` (qui contiendrait 1 row par chunk × N sessions au lieu d'1 row globale). Reset cascade = simple `UPDATE WHERE session_id = ...`, atomique à coût constant.
+- **Réutiliser les system prompts existants entre modes** : décision moins évidente qu'il n'y paraît — on a été tenté de créer `NARRATIVE_SYSTEM_PROMPT_NON_DIARISED`. Mais le system prompt définit la *nature* (récit, fiche, POV), pas la *forme* de l'input. Dupliquer = risque de divergence non intentionnelle au fil des révisions. Le user prompt (côté job) embarque les variations spécifiques au mode.
+- **`request.json()` pour détecter une clé dans un PATCH avec Pydantic strict** : `SessionUpdate` n'a pas `transcription_mode` comme champ, donc Pydantic ignore silencieusement la clé (`extra="ignore"`). Pour la détecter et raise 422, on lit le body brut via `request: Request` injecté en argument. FastAPI cache le body donc le double-parse est gratuit. Pattern utilisable pour tout champ immuable post-création.
+- **`server_default` Alembic pour les migrations rétroactives non-nullable** : `ALTER TABLE jdr_sessions ADD COLUMN transcription_mode VARCHAR(16) NOT NULL` aurait fail sur les rows Jalon 5 existantes (pas de valeur à insérer). `server_default='diarised'` fait que SQLite/Postgres remplit automatiquement. Migration zéro-clic, aucun script de backfill nécessaire.
+- **Spec Kit pivot en cours de session** : tenter `/speckit-specify` puis se rendre compte que le scope est mal cadré arrive — pas grave. La branche locale + dossier `specs/00X` non commité se jettent proprement (`git branch -D`). C'est exactement le rôle de `/speckit-clarify` : forcer la question "est-ce vraiment ce qu'on veut ?" avant que l'effort d'implémentation se déclenche.
+
+### Limitations acceptées
+
+- **POV qualitativement limités en non_diarised** : sans speaker labels, le LLM doit deviner qui agit depuis le contexte des résumés chunked. Limite explicite dans le user prompt POV. À ré-évaluer après l'arrivée de la diarisation locale (Jalon 9) — pourrait alors être étendu en map-reduce POV-aware.
+- **Mode immuable post-création** : un MJ qui s'est trompé doit créer une nouvelle session. Trade-off assumé pour éviter la complexité d'une conversion `segments ↔ chunks` qui ne préserverait pas la fidélité du texte.
+- **`/me/*` joueur réservé aux sessions `diarised`** au sub-jalon courant. Un joueur sur une session non_diarised voit 409 wrong-mode. À reconsidérer si la première vraie session non_diarised révèle un besoin UX joueur concret.
+- **Map-reduce sur mode `diarised`** : hors scope (à reconsidérer Jalon 9+ quand les sessions diarisées prendront aussi du volume).
+- **Validation E2E avec une vraie clé DeepInfra non automatisée** : pareil que T076 du Jalon 5 — à exécuter manuellement avant clôture formelle du sub-jalon (T059 dans `tasks.md`).

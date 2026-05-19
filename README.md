@@ -140,6 +140,23 @@ Variables d'environnement spécifiques (voir [`.env.example`](./.env.example) po
 
 > **Mode live** : `POST /services/jdr/live/sessions` et `WS /services/jdr/live/stream` sont publiés dans l'OpenAPI mais retournent respectivement `501` et ferment immédiatement le WebSocket avec le code `1011` — l'implémentation arrive au Jalon 6+ (FR-015/016).
 
+### Mode `non_diarised` (sub-jalon 5.5)
+
+Posture alternative opt-in pour les sessions où la diarisation cloud ne donne rien d'exploitable (Whisper sans speaker labels). Tag posé à la création de session, immuable ensuite. Détails dans [ADR 0007](./docs/adr/0007-non-diarised-mode.md), spec dans [`specs/002-non-diarised-mode/`](./specs/002-non-diarised-mode/), procédure E2E dans [`specs/002-non-diarised-mode/quickstart.md`](./specs/002-non-diarised-mode/quickstart.md).
+
+Flow MJ :
+
+1. `POST /sessions` avec `{"transcription_mode": "non_diarised", ...}` → session créée en mode chunked
+2. `POST /sessions/{id}/audio` → transcription écrite en chunks ordonnés dans `jdr_chunks` (au lieu de segments diarisés)
+3. `GET /sessions/{id}/chunks` → inspecter le texte chunked
+4. `POST /sessions/{id}/players` avec `{"pj_ids": [...]}` → déclarer les PJ présents (équivalent du mapping en mode diarised)
+5. `POST /sessions/{id}/artifacts/summary` → map-reduce LLM : 1 résumé par chunk + 1 reduce global. Persisté dans `jdr_artifacts(kind="summary")`. Régénération = cascade delete des `narrative` / `elements` / `pov:*` existants (FR-011)
+6. `POST /sessions/{id}/artifacts/{narrative|elements|povs}` → consomment les résumés de chunks au lieu des segments diarisés. Contrat HTTP côté client **inchangé** vs mode diarised
+
+Variable d'environnement additionnelle : `KAEYRIS_CHUNK_MAX_CHARS` (default `30000`, taille max d'un chunk de transcription).
+
+> **Limite assumée** : la qualité POV reste dégradée par construction tant que la diarisation n'est pas opérationnelle (Jalon 9) — le LLM doit deviner qui agit depuis le contexte narratif. Les endpoints `/me/*` joueur restent réservés aux sessions `diarised` au sub-jalon courant.
+
 ## Créer un nouveau service
 
 Voir la section "Créer un nouveau service" dans [`docs/memo.md`](./docs/memo.md). En résumé : copier `app/services/_template/`, adapter les schémas et le préfixe, monter le router dans `app/main.py` avec `dependencies=[Depends(require_api_key), Depends(enforce_rate_limit)]`, écrire les tests.
