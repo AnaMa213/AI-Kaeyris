@@ -1,5 +1,7 @@
 # AI-Kaeyris
 
+[![CI](https://github.com/AnaMa213/AI-Kaeyris/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/AnaMa213/AI-Kaeyris/actions/workflows/ci.yml)
+
 Personal AI sandbox platform — modular FastAPI services on Raspberry Pi.
 
 Plateforme AI personnelle, monolithe modulaire en FastAPI, conçue pour héberger plusieurs services métier (résumé audio JDR, etc.) derrière une API REST sur le réseau local.
