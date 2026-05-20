@@ -1,0 +1,44 @@
+# pre-commit hooks — mirror the CI safety gates locally for fast feedback.
+#
+# Setup:
+#   pip install pre-commit
+#   pre-commit install
+#
+# Manual run on the whole repo:
+#   pre-commit run --all-files
+
+repos:
+  # Generic hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: detect-private-key
+
+  # Lint + format (same rules as CI)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  # SAST (mirrors CI's `bandit -c pyproject.toml -r app --severity-level medium`)
+  - repo: https://github.com/PyCQA/bandit
+    rev: "1.8.0"
+    hooks:
+      - id: bandit
+        args: ["-c", "pyproject.toml", "-r", "app", "--severity-level", "medium"]
+        additional_dependencies: ["bandit[toml]"]
+        pass_filenames: false
+
+  # Secrets scan (mirrors CI gitleaks job, scoped to staged changes)
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks

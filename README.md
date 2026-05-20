@@ -28,7 +28,11 @@ python -m venv .venv
 # source .venv/bin/activate         # Linux/macOS
 pip install -e ".[dev]"
 
-# 3. Lancer l'API en local
+# 3. (Optionnel, recommandé) Installer les hooks pre-commit
+pip install pre-commit
+pre-commit install
+
+# 4. Lancer l'API en local
 uvicorn app.main:app --reload
 
 # OU via Docker Compose (intégration)
