@@ -36,6 +36,14 @@
 | **pip-audit** (Jalon 7) | scan deps via OSV gratuit + officiel PyPA (vs safety : version free cap 50 packages ; vs snyk : commercial) |
 | **gitleaks** (Jalon 7) | secrets scan stateless Go, action GH officielle (vs trufflehog : plus bruyant ; vs detect-secrets : baseline à maintenir) |
 | **pre-commit** (Jalon 7) | orchestrateur de hooks, miroir local de la CI, install optionnel mais documenté |
+| **PostgreSQL 16** (Jalon 8) | DB prod cible CLAUDE.md §3, ferme la dette dev/prod parity. SQLite reste en dev. |
+| **asyncpg** (Jalon 8) | driver Postgres async — switch dev/prod via `DATABASE_URL` uniquement, pas de code change |
+| **GHCR** (Jalon 8) | registry container OCI gratuit, intégré au repo GitHub (auth via `GITHUB_TOKEN`) |
+| **Docker Buildx + QEMU** (Jalon 8) | build multi-arch amd64+arm64 sur runner GH, ~30s coût, $0, garde option Pi 5 |
+| **Watchtower** (Jalon 8) | pull-based CD, label-enable pour scope, polling 5min, 0 port ouvert host |
+| **Caddy v2** (Jalon 8) | reverse proxy HTTP LAN (HTTPS triviale à activer), `basic_auth` sur `/metrics` |
+| **Prometheus** (Jalon 8) | TSDB pull-based, scrape `api:8000/metrics`, rétention 15j sur volume |
+| **Grafana 11.3** (Jalon 8) | UI métriques, provisioning automatique (datasource + dashboards) depuis le repo |
 
 ---
 
@@ -147,6 +155,44 @@ pre-commit autoupdate                                 # bump les revs des hooks
 | `bandit` | ✅ sur Medium+ | `app/` (tests/migrations exclus) |
 | `pip-audit` | ❌ (`continue-on-error`) | toutes deps installées |
 | `gitleaks` | ✅ | tout le repo + historique (CI) ou diff staged (pre-commit) |
+
+### Déploiement prod (Jalon 8)
+
+```bash
+# Première installation (sur le PC fixe Windows)
+docker run --rm caddy:2-alpine caddy hash-password --plaintext 'pwd-metrics'   # → CADDY_METRICS_HASH
+cp .env.example .env                                                            # éditer ensuite
+docker compose -f docker-compose.prod.yml up -d
+
+# Suivi
+docker compose -f docker-compose.prod.yml ps
+docker compose -f docker-compose.prod.yml logs -f api worker
+docker compose -f docker-compose.prod.yml logs --tail=100 watchtower
+
+# Déploiement d'une nouvelle version — automatique via Watchtower (~5 min après push main).
+# Forcer immédiatement :
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d
+
+# Rollback à une version précédente
+docker images ghcr.io/anama213/ai-kaeyris                                        # liste les tags
+# Set KAEYRIS_IMAGE=ghcr.io/anama213/ai-kaeyris:main-<sha> dans .env
+docker compose -f docker-compose.prod.yml stop watchtower                       # éviter qu'il re-pull
+docker compose -f docker-compose.prod.yml up -d api worker migrations
+
+# Backup Postgres + audios
+docker compose -f docker-compose.prod.yml exec postgres pg_dump -U kaeyris kaeyris > backup.sql
+```
+
+| Endpoint LAN | Service |
+|---|---|
+| `http://<host>/` | API (via Caddy reverse proxy) |
+| `http://<host>/healthz` | Liveness |
+| `http://<host>/readyz` | Readiness (DB + Redis) |
+| `http://<host>/metrics` | Prometheus exposition (basic auth `metrics:<pwd>`) |
+| `http://<host>:3000` | Grafana (login admin + `GRAFANA_ADMIN_PASSWORD`) |
+
+Détails opérationnels (troubleshooting, rotation secrets, rollback migration) : [`docs/runbook.md`](./runbook.md).
 
 ### Jobs RQ (worker)
 ```bash
