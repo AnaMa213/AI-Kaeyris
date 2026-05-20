@@ -1,0 +1,21 @@
+# gitleaks config — extends the default ruleset shipped with gitleaks v8.
+#
+# We do NOT redefine the rules here, only allowlist false positives so the
+# default detection of API keys / private keys / high-entropy tokens stays
+# active.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Files that intentionally contain placeholder or hashed secrets"
+paths = [
+    # Template only — values are placeholders, no real secret.
+    '''\.env\.example$''',
+    # Test fixtures hash dummy passwords with Argon2 — those hashes are not
+    # real credentials, they are computed on the fly by argon2-cffi.
+    '''tests/.*\.py$''',
+    # The generator script prints argon2 hashes to stdout for the user to
+    # paste into their .env — the script itself contains no secret.
+    '''scripts/generate_api_key\.py$''',
+]

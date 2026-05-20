@@ -31,6 +31,11 @@
 | **faster-whisper + pyannote** (futur GPU host) | transcription + diarisation locale sur RTX 4090 LAN, alternative au cloud OpenAI |
 | **prometheus-client** (Jalon 6) | métriques applicatives, `/metrics` text exposition, naming `kaeyris_*` |
 | **OpenTelemetry** (Jalon 6 — opt-in) | traces auto-instrumentation FastAPI/SQLAlchemy/httpx, exporter console ou OTLP |
+| **GitHub Actions** (Jalon 7) | CI native du repo, gratuit pour OSS / repo perso, workflows YAML (vs Jenkins : auto-hébergé inutile à ce scale) |
+| **bandit** (Jalon 7) | SAST Python natif, lib PyCQA, config TOML (vs semgrep : registry online + sur-dim pour mono-lang) |
+| **pip-audit** (Jalon 7) | scan deps via OSV gratuit + officiel PyPA (vs safety : version free cap 50 packages ; vs snyk : commercial) |
+| **gitleaks** (Jalon 7) | secrets scan stateless Go, action GH officielle (vs trufflehog : plus bruyant ; vs detect-secrets : baseline à maintenir) |
+| **pre-commit** (Jalon 7) | orchestrateur de hooks, miroir local de la CI, install optionnel mais documenté |
 
 ---
 
@@ -116,6 +121,32 @@ alembic history                     # historique des migrations
 | `GET /readyz` | Readiness (200 si DB+Redis OK, 503 sinon avec detail) |
 | `GET /metrics` | Prometheus text exposition, scrape direct |
 | `GET /health` | Alias legacy de `/healthz` (compat Jalon 0) |
+
+### CI / sécurité (Jalon 7)
+
+```bash
+# Tout-en-un local — miroir de la CI
+ruff check app tests migrations
+pytest -q
+bandit -c pyproject.toml -r app --severity-level medium
+pip-audit --desc                                      # non-bloquant en CI
+# Secrets — nécessite le binaire gitleaks (scoop install gitleaks)
+gitleaks detect --source . --config .gitleaks.toml --verbose
+
+# Hooks pre-commit (optionnel mais recommandé)
+pip install pre-commit
+pre-commit install                                    # installe le hook .git/hooks/pre-commit
+pre-commit run --all-files                            # exécute tous les hooks sur tout le repo
+pre-commit autoupdate                                 # bump les revs des hooks
+```
+
+| Outil | Bloquant en CI ? | Scope |
+|---|---|---|
+| `ruff check` | ✅ | `app tests migrations` |
+| `pytest` | ✅ | tout `tests/` |
+| `bandit` | ✅ sur Medium+ | `app/` (tests/migrations exclus) |
+| `pip-audit` | ❌ (`continue-on-error`) | toutes deps installées |
+| `gitleaks` | ✅ | tout le repo + historique (CI) ou diff staged (pre-commit) |
 
 ### Jobs RQ (worker)
 ```bash

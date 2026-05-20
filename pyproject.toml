@@ -32,6 +32,8 @@ dev = [
     "httpx",
     "ruff",
     "fakeredis",
+    "bandit[toml]>=1.7",
+    "pip-audit>=2.7",
 ]
 
 [tool.setuptools.packages.find]
@@ -44,3 +46,13 @@ target-version = "py312"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+# Bandit — static security analysis (SAST).
+# Scope: app/ only. Tests use `assert` legitimately (B101) and
+# migrations contain string SQL by design (B608) — both are excluded
+# from the scan by limiting recursion to `app/`.
+[tool.bandit]
+exclude_dirs = ["tests", "migrations", ".venv", "build", "dist"]
+# Skip B101 (assert) — Pydantic and FastAPI test helpers rely on it,
+# and any leftover assert in app/ is caught by ruff S101 if enabled.
+skips = ["B101"]
