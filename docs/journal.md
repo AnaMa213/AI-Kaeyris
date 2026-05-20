@@ -253,3 +253,40 @@
 - **`/me/*` joueur réservé aux sessions `diarised`** au sub-jalon courant. Un joueur sur une session non_diarised voit 409 wrong-mode. À reconsidérer si la première vraie session non_diarised révèle un besoin UX joueur concret.
 - **Map-reduce sur mode `diarised`** : hors scope (à reconsidérer Jalon 9+ quand les sessions diarisées prendront aussi du volume).
 - **Validation E2E avec une vraie clé DeepInfra non automatisée** : pareil que T076 du Jalon 5 — à exécuter manuellement avant clôture formelle du sub-jalon (T059 dans `tasks.md`).
+
+---
+
+## 2026-05-19 — Jalon 6 : Observability (logs + métriques + healthchecks + traces)
+
+### Ce qui a été fait
+
+- **Pas de Spec Kit** : décision actée en début de jalon car la feature est techno-transverse sans ambiguïté métier (stack lockée CLAUDE.md §3 sur structlog + prometheus-client, decisions tranchées au prompt). 5 phases distinctes pilotées via un mini-plan inline + ADR 0008 à la fin. Premier jalon hors `/speckit-*` du projet.
+- **Phase 1 — Logs structurés** (`structlog`) : découverte gênante que `structlog` était locké dans CLAUDE.md §3 mais **jamais réellement installé ni utilisé** (8 modules en `logging` stdlib avec calls printf-style). Phase 1 a donc été plus lourde qu'estimée : ajout de la dépendance + bridge stdlib → structlog + migration des 8 modules + reformulation des 17 calls hotpath en idiom `event.name` + kwargs. Plus un `RequestContextMiddleware` qui mint un `request_id` UUIDv4 (ou trust un `X-Request-Id` entrant) et le bind au context structlog → corrélation auto sans plumbing.
+- **Phase 2 — Métriques Prometheus** : 9 séries `kaeyris_*` (HTTP, LLM, transcription, jobs) sur 4 dimensions, naming Prometheus standard, cardinalité bornée par usage des **route templates** plutôt que paths concrets (sinon explosion 1 série/UUID). Endpoint `/metrics` text exposition, instrumentation try/finally autour de chaque adapter pour garantir la mesure même sur exception.
+- **Phase 3 — Healthchecks** : `/healthz` (liveness sans dépendance), `/readyz` (DB + Redis pingués, 503 + détail per-check si fail), `/health` legacy gardé en alias. Pattern Kubernetes-style même hors K8s (utile pour systemd / Docker Compose healthcheck / sondes futures).
+- **Phase 4 — OpenTelemetry scaffolding** : décision la plus discutée — finalement **opt-in minimal** plutôt que skip complet. Auto-instrumentation FastAPI/SQLAlchemy/httpx via `OTEL_ENABLED=true`, exporter console ou OTLP/HTTP vers `OTEL_EXPORTER_OTLP_ENDPOINT`. **Pas de spans manuels custom** — différés Jalon 8 où un collector réel sera monté. Test isolation forcée via mock des instrumentors (sinon ils patchent globalement les frameworks et fuitent entre tests).
+- **Phase 5 — Polish** : ADR 0008 (4 décisions structurantes + alternatives rejetées), README endpoints + section observabilité, `docs/memo.md` env vars + cheatsheet, `.env.example` complet.
+- **5 commits incrémentaux** sur branche `003-observability` : un par phase, rollback granulaire facile.
+- **322 tests verts** au total : 301 anciens (Jalon 5 + sub-jalon 5.5) + 21 nouveaux (6 logging + 3 metrics + 4 healthchecks + 8 tracing). Zéro régression Jalon 5/5.5.
+
+### Ce que j'ai appris
+
+- **CLAUDE.md §3 "stack lockée" peut être aspirationnel** : structlog y était mais inexistant en pratique. Leçon : auditer concrètement avant d'estimer (j'ai estimé Phase 1 à ½ j, c'était presque 1 j à cause de la migration des 8 modules). Audit avant estimation, toujours.
+- **Bridge `logging` stdlib → `structlog` plutôt que remplacement total** : les libs tierces (`httpx`, `sqlalchemy.engine`, `openai`) écrivent dans le `logging` standard. Si on switche à un autre framework de log (loguru) qui ignore stdlib, on perd leurs messages. Le bridge structlog les capture en passant. Source : https://www.structlog.org/en/stable/standard-library.html
+- **Python 3.12 + StrMixinEnum** : déjà rencontré sub-jalon 5.5. Cette fois OK car j'utilise des `os.environ.get(..., default).lower()` qui sont des strings purs.
+- **Cardinalité Prometheus = piège n°1** : si tu mets un UUID dans un label, c'est game over (1 série/UUID, le scrape met 2 min, la consommation RAM grimpe en gigas, AlertManager devient inutilisable). Le pattern correct : label `route` = **template FastAPI** (`/sessions/{session_id}/...`), pas le path concret. Documenté avec emphase dans `app/core/metrics_middleware.py`. Source : https://prometheus.io/docs/practices/naming/#labels
+- **try/finally pour mesurer la durée même sur exception** : pattern simple mais facile à oublier. Sans le `finally`, un appel LLM qui timeout n'est pas compté dans `kaeyris_llm_call_duration_seconds` → biais des p99 vers la baisse. J'ai utilisé `outcome = "success"` comme valeur par défaut + setter dans chaque except.
+- **`prometheus_client` métriques sont au niveau module** : enregistrées dans `REGISTRY` global. Pas idéal pour isoler les tests (les compteurs accumulent entre tests). Solution pragmatique : ne pas asserter sur les valeurs exactes, asserter sur les **noms** présents et le **format** de sortie via parsing du `/metrics`. Suffit pour ce qu'il faut prouver.
+- **OTEL auto-instrumentation modifie l'état global du process** : `FastAPIInstrumentor.instrument_app(app)` monkey-patche la classe FastAPI globalement. Si un test active OTEL et un autre crée une nouvelle FastAPI(), elle hérite de l'instrumentation. Fuite gênante qui fait planter les tests suivants avec des erreurs d'export de span. Solution adoptée : mock les 3 instrumentors dans le test de tracing (`monkeypatch.setattr(tracing_module, "FastAPIInstrumentor", MagicMock())`), tester juste le code path. Validation réelle est manuelle.
+- **Healthcheck `/readyz` ne devrait PAS ping le LLM provider** : tentation initiale puis arbitrage — un ping LLM coûte de l'argent (call API payant) et n'a pas de "ping gratuit" côté OpenAI-compatible. La santé du provider LLM est surveillée via `kaeyris_llm_calls_total{outcome="permanent"}` qui monte, pas via un check synchrone. Réflexe à garder : un healthcheck doit être bon marché ET corrélé à la santé réelle.
+- **redis-py est sync, le reste async** : `redis.ping()` bloque. Dans un handler FastAPI async, on l'enveloppe dans `asyncio.to_thread(...)` pour ne pas bloquer le loop. ~5 lignes mais ça évite que `/readyz` freeze le worker entier si Redis répond lentement.
+- **Spec Kit n'est pas obligatoire pour tout** : la décision de skip Spec Kit pour le Jalon 6 a fait gagner ~½ jour de cérémonie. Critère : si les décisions sont déjà documentées dans la stack lockée et qu'il n'y a pas d'arbitrage métier ouvert (FRs ambigus), implem libre + ADR à la fin suffit. Spec Kit pour les features structurantes (Jalon 5 service entier, sub-jalon 5.5 mode non_diarised), pas pour les couches techno transverses.
+
+### Limitations acceptées
+
+- **Pas de dashboard Grafana ni d'alerting Alertmanager** : le scope est instrumentation seule. Visualisation + alerting au Jalon 8 (déploiement PC fixe avec sidecars Docker Compose).
+- **OTEL réelle activation jamais testée en CI** : les tests mockent les instrumentors. La première validation en conditions réelles arrivera au Jalon 8 contre un vrai collector.
+- **`/readyz` ne check pas les workers RQ vivants** : un worker mort se voit via `kaeyris_jobs_total` plat, pas via `/readyz`. Limite assumée — un check synchrone exigerait soit un ping Redis sur la queue (déjà couvert) soit un mécanisme de heartbeat custom.
+- **Pas de profiling intégré** (`py-spy`, cProfile dumps) : à introduire si une session réelle révèle un bottleneck non-explicable via les métriques.
+- **6 deps OTEL ajoutées même si inactives par défaut** : footprint mémoire +~25 Mo au démarrage. Acceptable mais pas zéro.
+- **Pas de validation E2E formelle sur la nouvelle stack obs** : à faire avant de fermer le jalon (lancer une session JDR réelle, scraper `/metrics` à plusieurs instants, vérifier que les histograms se peuplent, que le summary `_generate_summary` met bien à jour le compteur `kaeyris_jobs_total{kind="summary",outcome="succeeded"}`, etc.).

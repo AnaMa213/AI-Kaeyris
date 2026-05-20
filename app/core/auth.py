@@ -9,7 +9,6 @@ startup, if the table is empty, every entry is imported with role ``gm``
 so an existing deployment keeps working without manual migration.
 """
 
-import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Annotated
@@ -28,10 +27,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import get_db_session
+from app.core.logging import get_logger
 from app.core.errors import AppError
 from app.services.jdr.db.models import ApiKey, ApiKeyStatus, Role
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _WWW_AUTHENTICATE = 'Bearer realm="ai-kaeyris"'
 
@@ -159,8 +159,8 @@ async def bootstrap_api_keys_from_env(session: AsyncSession) -> int:
     if existing is not None:
         if settings.API_KEYS:
             logger.info(
-                "Bootstrap skipped: jdr_api_keys already populated; "
-                "API_KEYS env var ignored."
+                "auth.bootstrap_skipped",
+                reason="jdr_api_keys already populated",
             )
         return 0
 
@@ -179,7 +179,7 @@ async def bootstrap_api_keys_from_env(session: AsyncSession) -> int:
             )
         )
     await session.commit()
-    logger.info("Bootstrap imported %d API key(s) from env var.", len(entries))
+    logger.info("auth.bootstrap_imported", inserted=len(entries))
     return len(entries)
 
 
@@ -214,8 +214,8 @@ def _verify_against_registry(
     for entry in entries:
         if entry.role == Role.PLAYER and entry.pj_id is None:
             logger.warning(
-                "Skipping player key %r without pj_id — invalid registry row.",
-                entry.name,
+                "auth.skip_player_without_pj",
+                key_name=entry.name,
             )
             continue
         try:
@@ -231,7 +231,9 @@ def _verify_against_registry(
             continue
         except (InvalidHashError, VerificationError) as exc:
             logger.warning(
-                "Skipping malformed API key hash for %r: %s", entry.name, exc
+                "auth.skip_malformed_hash",
+                key_name=entry.name,
+                error=str(exc),
             )
             continue
     return matched
@@ -262,7 +264,7 @@ async def require_api_key(
     entries = await _list_active_keys(session)
     if not entries:
         # Fail closed: an empty registry rejects every request.
-        logger.error("jdr_api_keys is empty: rejecting authenticated request.")
+        logger.error("auth.empty_registry_rejected")
         raise UnauthorizedError(detail="No API keys configured on the server.")
 
     authenticated = _verify_against_registry(token, entries)

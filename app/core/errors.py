@@ -3,14 +3,15 @@
 Spec: https://www.rfc-editor.org/rfc/rfc9457.html
 """
 
-import logging
 from typing import Any
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-logger = logging.getLogger(__name__)
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 PROBLEM_CONTENT_TYPE = "application/problem+json"
 DEFAULT_TYPE_BASE = "https://kaeyris.local/errors"
@@ -110,9 +111,9 @@ async def _handle_validation_error(
 async def _handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
     # Log server-side; never leak the stack trace to the client.
     logger.error(
-        "Unhandled exception",
+        "error.unhandled_exception",
+        path=request.url.path,
         exc_info=exc,
-        extra={"path": request.url.path},
     )
     return _problem_response(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

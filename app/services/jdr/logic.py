@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
 import secrets
 import subprocess
@@ -27,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile
 
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.jobs import enqueue_job, get_default_queue
 from app.jobs.jdr import transcribe_session_job
 from app.services.jdr.db.models import (
@@ -51,7 +51,7 @@ from app.services.jdr.db.repositories import (
     SessionRepository,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _CHUNK_SIZE = 64 * 1024  # 64 KiB streaming reads
 ACCEPTED_AUDIO_MIMES: frozenset[str] = frozenset(
@@ -579,9 +579,9 @@ async def purge_audio_for_session(
         except OSError as exc:
             # DB is the source of truth; janitor sweep can pick this up later.
             logger.warning(
-                "Failed to delete audio file %s during purge: %s",
-                full_path,
-                exc,
+                "audio.purge_unlink_failed",
+                audio_path=str(full_path),
+                error=str(exc),
             )
 
     await repo.mark_audio_purged(session.id)
@@ -618,16 +618,16 @@ def _probe_duration_seconds(audio_path: Path) -> int | None:
             env={**os.environ},
         )
     except (FileNotFoundError, subprocess.SubprocessError) as exc:
-        logger.info("ffprobe unavailable, duration unknown: %s", exc)
+        logger.info("ffprobe.unavailable", error=str(exc))
         return None
 
     if result.returncode != 0:
-        logger.info("ffprobe returned %d, duration unknown.", result.returncode)
+        logger.info("ffprobe.nonzero_exit", returncode=result.returncode)
         return None
 
     try:
         data = json.loads(result.stdout)
         return int(float(data["format"]["duration"]))
     except (json.JSONDecodeError, KeyError, ValueError) as exc:
-        logger.info("ffprobe output unparseable: %s", exc)
+        logger.info("ffprobe.unparseable", error=str(exc))
         return None

@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import re
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -38,6 +38,8 @@ from app.adapters.transcription import (
 )
 from app.core.config import settings
 from app.core.db import get_sessionmaker
+from app.core.logging import get_logger
+from app.core.metrics import JOB_DURATION_SECONDS, JOBS_TOTAL
 from app.jobs import PermanentJobError, TransientJobError
 from app.services.jdr.audio import AudioChunkingError, chunked_audio
 from app.services.jdr.db.models import (
@@ -64,12 +66,41 @@ from app.services.jdr.prompts import (
     SUMMARY_REDUCE_SYSTEM_PROMPT,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
 # Public sync entry points (registered with RQ)
 # ---------------------------------------------------------------------------
+
+
+def _run_job_with_metrics(kind: str, coro) -> None:
+    """Run an async job core inside the sync RQ entry point + record metrics.
+
+    Tracks duration in :data:`JOB_DURATION_SECONDS` and increments
+    :data:`JOBS_TOTAL` with an ``outcome`` label in:
+    - ``succeeded`` — the async core completed without raising
+    - ``transient`` — raised :class:`TransientJobError` (RQ will retry)
+    - ``permanent`` — raised :class:`PermanentJobError` (definitive fail)
+    - ``failed`` — raised any other exception (programming error)
+    """
+    start = time.perf_counter()
+    outcome = "succeeded"
+    try:
+        asyncio.run(coro)
+    except TransientJobError:
+        outcome = "transient"
+        raise
+    except PermanentJobError:
+        outcome = "permanent"
+        raise
+    except Exception:
+        outcome = "failed"
+        raise
+    finally:
+        duration = time.perf_counter() - start
+        JOB_DURATION_SECONDS.labels(kind=kind).observe(duration)
+        JOBS_TOTAL.labels(kind=kind, outcome=outcome).inc()
 
 
 def transcribe_session_job(session_id: UUID) -> None:
@@ -78,7 +109,7 @@ def transcribe_session_job(session_id: UUID) -> None:
     Sync wrapper around the async core so RQ can pickle the reference.
     See :func:`_transcribe_session` for the actual logic.
     """
-    asyncio.run(_transcribe_session(session_id))
+    _run_job_with_metrics("transcription", _transcribe_session(session_id))
 
 
 def generate_narrative_job(session_id: UUID) -> None:
@@ -86,7 +117,7 @@ def generate_narrative_job(session_id: UUID) -> None:
 
     Sync wrapper for RQ. See :func:`_generate_narrative`.
     """
-    asyncio.run(_generate_narrative(session_id))
+    _run_job_with_metrics("narrative", _generate_narrative(session_id))
 
 
 def generate_elements_job(session_id: UUID) -> None:
@@ -94,7 +125,7 @@ def generate_elements_job(session_id: UUID) -> None:
 
     Sync wrapper for RQ. See :func:`_generate_elements`.
     """
-    asyncio.run(_generate_elements(session_id))
+    _run_job_with_metrics("elements", _generate_elements(session_id))
 
 
 def generate_povs_job(session_id: UUID) -> None:
@@ -102,7 +133,7 @@ def generate_povs_job(session_id: UUID) -> None:
 
     Sync wrapper for RQ. See :func:`_generate_povs`.
     """
-    asyncio.run(_generate_povs(session_id))
+    _run_job_with_metrics("povs", _generate_povs(session_id))
 
 
 def generate_summary_job(session_id: UUID) -> None:
@@ -110,7 +141,7 @@ def generate_summary_job(session_id: UUID) -> None:
 
     Sync wrapper for RQ. See :func:`_generate_summary`.
     """
-    asyncio.run(_generate_summary(session_id))
+    _run_job_with_metrics("summary", _generate_summary(session_id))
 
 
 # ---------------------------------------------------------------------------
@@ -240,9 +271,9 @@ async def _transcribe_session(session_id: UUID) -> None:
     except OSError as exc:
         # DB already says purged; a stale file on disk is a janitor task.
         logger.warning(
-            "Failed to delete audio file %s after successful transcription: %s",
-            full_path,
-            exc,
+            "transcribe.audio_unlink_failed",
+            audio_path=str(full_path),
+            error=str(exc),
         )
 
 
@@ -472,10 +503,8 @@ async def _generate_povs(session_id: UUID) -> None:
         if pj is None:
             logger.warning(
                 "pov.skip_unknown_pj",
-                extra={
-                    "session_id": str(session_id),
-                    "pj_id": str(pj_id),
-                },
+                session_id=str(session_id),
+                pj_id=str(pj_id),
             )
             continue
         user_prompt = _build_pov_user_prompt(
@@ -785,7 +814,7 @@ def _parse_elements_response(raw: str) -> dict[str, list[dict[str, str]]]:
     if parsed is None:
         logger.warning(
             "elements.parse_failed",
-            extra={"raw_excerpt": raw[:200]},
+            raw_excerpt=raw[:200],
         )
         parsed = {}
 
