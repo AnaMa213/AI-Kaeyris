@@ -1,0 +1,16 @@
+# Auto-load every JSON dashboard living under /etc/grafana/dashboards.
+# Drop new files there (mounted via the compose volume) and Grafana
+# picks them up within `updateIntervalSeconds`.
+
+apiVersion: 1
+
+providers:
+  - name: Kaeyris
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true   # edits in UI are kept until next file reload
+    options:
+      path: /etc/grafana/dashboards

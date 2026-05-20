@@ -145,6 +145,50 @@ services:
       - internal
       - edge
 
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      # Keep ~15 days of metrics on the host PC; tune up if you want
+      # longer trend analysis.
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - internal
+    # Not published on host: Grafana proxies queries through the `internal`
+    # network. Use `docker compose exec prometheus promtool` if you need
+    # to debug from the host.
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    restart: unless-stopped
+    ports:
+      # Direct host port for the UI — the API stays behind Caddy on :80,
+      # Grafana is reachable on :3000 (LAN only). Adjust the bind if you
+      # want it fronted by Caddy too.
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      # Disable anonymous access — LAN does not mean public, but the
+      # default open admin is a footgun.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      - internal
+
   watchtower:
     # Polls GHCR every 5 min and pulls new images for labelled services.
     # Updates only containers carrying `com.centurylinklabs.watchtower.enable=true`
@@ -180,3 +224,5 @@ volumes:
   kaeyris-data:
   caddy-data:
   caddy-config:
+  prometheus-data:
+  grafana-data:
