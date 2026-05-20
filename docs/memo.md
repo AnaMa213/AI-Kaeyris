@@ -29,6 +29,8 @@
 | **aiosqlite** | driver SQLite async pour le dev ; PostgreSQL+asyncpg en cible Jalon 8 |
 | **argon2-cffi** | hash mots de passe / tokens conforme OWASP (vs bcrypt/pbkdf2 : Argon2 gagnant PHC 2015) |
 | **faster-whisper + pyannote** (futur GPU host) | transcription + diarisation locale sur RTX 4090 LAN, alternative au cloud OpenAI |
+| **prometheus-client** (Jalon 6) | métriques applicatives, `/metrics` text exposition, naming `kaeyris_*` |
+| **OpenTelemetry** (Jalon 6 — opt-in) | traces auto-instrumentation FastAPI/SQLAlchemy/httpx, exporter console ou OTLP |
 
 ---
 
@@ -96,6 +98,24 @@ alembic history                     # historique des migrations
 | `POST/GET /sessions/{id}/players` | Liste des PJ présents (équivalent /mapping sans speaker, non_diarised) |
 | `POST /sessions/{id}/artifacts/summary` | Déclenche le map-reduce LLM (non_diarised) |
 | `GET  /sessions/{id}/artifacts/summary[.md]` | Lit le résumé global (non_diarised) |
+
+### Observabilité (Jalon 6) — variables et endpoints
+
+| Var env | Default | Rôle |
+|---|---|---|
+| `LOG_FORMAT` | `console` | Format des logs : `console` (dev humain coloré) ou `json` (prod, 1 ligne par log) |
+| `LOG_LEVEL` | `INFO` | Niveau global (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `OTEL_ENABLED` | `false` | Active OpenTelemetry tracing (opt-in) |
+| `OTEL_EXPORTER` | `console` | `console` (stdout) ou `otlp` (HTTP → collector) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | URL du collector OTLP/HTTP (Tempo/Jaeger/OTEL Collector) |
+| `OTEL_SERVICE_NAME` | `ai-kaeyris` | `service.name` attribut de ressource OTel |
+
+| Endpoint | Action |
+|---|---|
+| `GET /healthz` | Liveness (200 toujours si process vivant) |
+| `GET /readyz` | Readiness (200 si DB+Redis OK, 503 sinon avec detail) |
+| `GET /metrics` | Prometheus text exposition, scrape direct |
+| `GET /health` | Alias legacy de `/healthz` (compat Jalon 0) |
 
 ### Jobs RQ (worker)
 ```bash

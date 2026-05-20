@@ -37,7 +37,10 @@ L'API écoute sur http://localhost:8000.
 
 | Endpoint | Description |
 |---|---|
-| `GET /health` | Vérifie que l'API est en vie. Retourne `{"status":"ok","version":...}` |
+| `GET /healthz` | Liveness probe (Jalon 6) — 200 si le process tourne. |
+| `GET /readyz` | Readiness probe (Jalon 6) — 200 si DB + Redis OK, sinon 503 + detail par check. |
+| `GET /metrics` | Métriques Prometheus (text exposition, Jalon 6). |
+| `GET /health` | Alias legacy de `/healthz` (compat Jalon 0). |
 | `GET /docs` | Swagger UI interactif (généré automatiquement par FastAPI) |
 | `GET /redoc` | ReDoc (alternative à Swagger, lecture seule) |
 | `GET /openapi.json` | Spec OpenAPI 3 brute |
@@ -116,6 +119,32 @@ rq worker default --url $env:REDIS_URL       # terminal 2
 Un nouveau job se crée dans `app/jobs/<topic>.py` puis s'enqueue via `enqueue_job(queue, func, *args)`. Détails dans [`docs/memo.md`](./docs/memo.md).
 
 **Rate limiting** : 60 req/min par API key (configurable via `RATE_LIMIT_PER_MINUTE`). Activer sur un router avec `dependencies=[Depends(enforce_rate_limit)]`.
+
+## Observabilité (Jalon 6)
+
+Trois piliers + healthchecks. Détail dans [ADR 0008](./docs/adr/0008-observability.md).
+
+| Pilier | Endpoint / Convention | Activation |
+|---|---|---|
+| **Logs JSON structurés** | stdout / stderr via `structlog` | `LOG_FORMAT=json` (prod) ou `console` (dev). `LOG_LEVEL=INFO\|DEBUG\|...`. |
+| **Métriques Prometheus** | `GET /metrics` (text exposition) | Toujours actif. 9 séries `kaeyris_*` (HTTP, LLM, transcription, jobs). |
+| **Traces OpenTelemetry** | Auto-instrumentation FastAPI/SQLAlchemy/httpx | `OTEL_ENABLED=true` (opt-in). `OTEL_EXPORTER=console\|otlp`, `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`. |
+| **Healthchecks** | `GET /healthz` (liveness), `GET /readyz` (readiness DB+Redis) | Toujours actifs. |
+
+Corrélation : chaque requête HTTP reçoit un `X-Request-Id` (UUIDv4 minté ou trust du header entrant) qui est bound au context structlog. Tous les logs émis pendant la requête le portent automatiquement.
+
+```bash
+# Scraper Prometheus en local
+curl http://localhost:8000/metrics | grep kaeyris_
+
+# Activer OTEL avec export console (debug)
+OTEL_ENABLED=true OTEL_EXPORTER=console uvicorn app.main:app --reload
+
+# Activer OTEL contre un collector Tempo/Jaeger
+OTEL_ENABLED=true OTEL_EXPORTER=otlp \
+  OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4318 \
+  uvicorn app.main:app
+```
 
 ## Service `kaeyris-jdr` (Jalon 5)
 
