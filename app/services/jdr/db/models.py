@@ -208,12 +208,20 @@ class Session(Base):
     # Immutable after creation; see FR-002 of feature 002-non-diarised-mode.
     # Enum() (not String) to get correct serialization via `.value` on
     # Python 3.12+ where `str(StrMixinEnum.X)` returns the repr.
+    # `values_callable` is critical: by default SQLAlchemy matches DB
+    # strings to the enum member *name* (uppercase: DIARISED), but our
+    # migration 0003 stores the *value* (lowercase: "diarised") via
+    # `server_default="diarised"`. Without this, every SELECT on
+    # jdr_sessions raises `LookupError: 'diarised' is not among the
+    # defined enum values`. See:
+    # https://docs.sqlalchemy.org/en/20/core/type_basics.html#sqlalchemy.types.Enum.params.values_callable
     transcription_mode: Mapped[TranscriptionMode] = mapped_column(
         Enum(
             TranscriptionMode,
             name="jdr_transcription_mode",
             native_enum=False,
             length=16,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
         default=TranscriptionMode.DIARISED,
