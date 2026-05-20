@@ -135,6 +135,55 @@ async def test_session_read_back_with_explicit_non_diarised_value(
     assert row.transcription_mode is TranscriptionMode.NON_DIARISED
 
 
+async def test_session_read_back_after_normalising_uppercase_legacy_row(
+    db_session, gm_key_id
+):
+    """Pin the migration 0004 path: a row inserted in DB as ``'NON_DIARISED'``
+    (UPPERCASE, the format SQLAlchemy used to write before ``values_callable``
+    was added) becomes ORM-readable after the normalisation UPDATE.
+
+    Without the UPDATE, ``values_callable`` would now reject the uppercase
+    literal — exactly the user-reported regression of the hotfix. Migration
+    0004 (``UPDATE ... SET transcription_mode = LOWER(...)``) is what makes
+    the legacy rows match the new lookup convention.
+    """
+    session_id = uuid4()
+    # Simulate the pre-hotfix ORM write: literal UPPERCASE `.name`.
+    await db_session.execute(
+        text(
+            "INSERT INTO jdr_sessions "
+            "(id, title, recorded_at, gm_key_id, mode, state, "
+            "transcription_mode, created_at, updated_at) "
+            "VALUES (:id, :title, :recorded_at, :gm_key_id, 'BATCH', "
+            "'CREATED', 'NON_DIARISED', :now, :now)"
+        ),
+        {
+            "id": session_id.hex,
+            "title": "Legacy uppercase row",
+            "recorded_at": datetime.now(UTC),
+            "gm_key_id": gm_key_id.hex,
+            "now": datetime.now(UTC),
+        },
+    )
+    await db_session.commit()
+
+    # Apply the same SQL the Alembic migration 0004 runs.
+    await db_session.execute(
+        text(
+            "UPDATE jdr_sessions "
+            "SET transcription_mode = 'non_diarised' "
+            "WHERE transcription_mode = 'NON_DIARISED'"
+        )
+    )
+    await db_session.commit()
+
+    row = await db_session.scalar(
+        select(Session).where(Session.id == session_id)
+    )
+    assert row is not None
+    assert row.transcription_mode is TranscriptionMode.NON_DIARISED
+
+
 async def test_session_orm_insert_then_read_roundtrip(db_session, gm_key_id):
     """Sanity: inserting via the ORM (passing the enum member) and reading
     back returns the same member. With ``values_callable``, the ORM now
