@@ -1,17 +1,22 @@
 """FastAPI application entry point."""
 
 from contextlib import asynccontextmanager
+from typing import Annotated
 
-from fastapi import FastAPI
-from fastapi.responses import Response
+from fastapi import Depends, FastAPI, status
+from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from redis import Redis
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import bootstrap_api_keys_from_env
 from app.core.config import settings
-from app.core.db import get_sessionmaker
+from app.core.db import get_db_session, get_sessionmaker
 from app.core.errors import register_exception_handlers
+from app.core.health import check_database, check_redis
 from app.core.logging import configure_logging, get_logger
 from app.core.metrics_middleware import MetricsMiddleware
+from app.core.redis_client import get_redis
 from app.core.request_context import RequestContextMiddleware
 from app.core.security_headers import SecurityHeadersMiddleware
 from app.services.jdr.router import router as jdr_router
@@ -71,9 +76,57 @@ register_exception_handlers(app)
 app.include_router(jdr_router)
 
 
-@app.get("/health", tags=["health"], summary="Vérifie que l'API est en vie.")
+@app.get("/health", tags=["health"], summary="Liveness alias (legacy Jalon 0).")
 def health() -> dict[str, str]:
+    """Legacy liveness endpoint kept for backward compatibility.
+
+    Equivalent to ``/healthz``. New monitoring setups should target
+    ``/healthz`` (liveness) and ``/readyz`` (readiness) instead.
+    """
     return {"status": "ok", "version": settings.APP_VERSION}
+
+
+@app.get("/healthz", tags=["health"], summary="Liveness probe (Jalon 6).")
+def healthz() -> dict[str, str]:
+    """Always 200 as long as the Python process is alive.
+
+    Does NOT check external dependencies. Use ``/readyz`` to decide
+    whether to send traffic. Intent: orchestrator should restart the
+    process iff this fails.
+    """
+    return {"status": "ok", "version": settings.APP_VERSION}
+
+
+@app.get(
+    "/readyz",
+    tags=["health"],
+    summary="Readiness probe — DB + Redis (Jalon 6).",
+)
+async def readyz(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    redis_client: Annotated[Redis, Depends(get_redis)],
+) -> Response:
+    """200 if every backing dependency is reachable, 503 otherwise.
+
+    Per-check status surfaced in the body so an operator can see
+    which dependency is down without parsing logs.
+    """
+    db_ok, db_err = await check_database(db)
+    redis_ok, redis_err = await check_redis(redis_client)
+
+    checks = {
+        "database": "ok" if db_ok else f"fail: {db_err}",
+        "redis": "ok" if redis_ok else f"fail: {redis_err}",
+    }
+    overall_ok = db_ok and redis_ok
+    payload = {
+        "status": "ok" if overall_ok else "fail",
+        "checks": checks,
+    }
+    http_status = (
+        status.HTTP_200_OK if overall_ok else status.HTTP_503_SERVICE_UNAVAILABLE
+    )
+    return JSONResponse(content=payload, status_code=http_status)
 
 
 @app.get(
