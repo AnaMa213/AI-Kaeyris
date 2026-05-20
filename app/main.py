@@ -19,6 +19,7 @@ from app.core.metrics_middleware import MetricsMiddleware
 from app.core.redis_client import get_redis
 from app.core.request_context import RequestContextMiddleware
 from app.core.security_headers import SecurityHeadersMiddleware
+from app.core.tracing import setup_tracing
 from app.services.jdr.router import router as jdr_router
 
 # Configure structured logging as early as possible — before any logger is
@@ -74,6 +75,12 @@ app.add_middleware(MetricsMiddleware)
 app.add_middleware(RequestContextMiddleware)
 register_exception_handlers(app)
 app.include_router(jdr_router)
+
+# OpenTelemetry tracing setup — no-op unless OTEL_ENABLED=true.
+# Instruments FastAPI / SQLAlchemy / httpx automatically when active.
+# Must be called AFTER the router is mounted so FastAPIInstrumentor
+# sees every route.
+setup_tracing(app)
 
 
 @app.get("/health", tags=["health"], summary="Liveness alias (legacy Jalon 0).")
