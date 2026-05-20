@@ -57,6 +57,10 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    # Run again on every Watchtower pull so a new image with new
+    # migrations gets them applied before api/worker restart.
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
     depends_on:
       postgres:
         condition: service_healthy
@@ -76,6 +80,9 @@ services:
       # Force JSON logs in prod — humans read them via the orchestrator,
       # not via tail. Override LOG_FORMAT=console in .env if debugging live.
       LOG_FORMAT: json
+    # Watchtower target — automatic pull on `:latest` move.
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
     volumes:
       # Persist uploaded audios + transcriptions across restarts (and
       # share with the worker so the JDR pipeline can read what the API
@@ -100,6 +107,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       KAEYRIS_DATA_DIR: /app/data
       LOG_FORMAT: json
+    # Watchtower target — automatic pull on `:latest` move.
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
     volumes:
       - kaeyris-data:/app/data
     depends_on:
@@ -134,6 +144,27 @@ services:
     networks:
       - internal
       - edge
+
+  watchtower:
+    # Polls GHCR every 5 min and pulls new images for labelled services.
+    # Updates only containers carrying `com.centurylinklabs.watchtower.enable=true`
+    # so we never restart postgres/redis/caddy by accident.
+    image: containrrr/watchtower:latest
+    restart: unless-stopped
+    environment:
+      WATCHTOWER_POLL_INTERVAL: "300"        # 5 min — matches CI/CD propagation expectation
+      WATCHTOWER_CLEANUP: "true"             # delete obsolete images after update
+      WATCHTOWER_LABEL_ENABLE: "true"        # only update labelled containers
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+      # Uncomment to receive an HTTP notification on each update event.
+      # WATCHTOWER_NOTIFICATIONS: shoutrrr
+      # WATCHTOWER_NOTIFICATION_URL: generic+https://...
+    volumes:
+      # Docker socket — Watchtower drives the local daemon to pull, stop
+      # and restart containers. Read-write is required.
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - internal
 
 networks:
   # `internal` carries all service-to-service traffic (DB, queue, app).
