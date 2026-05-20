@@ -290,3 +290,68 @@
 - **Pas de profiling intégré** (`py-spy`, cProfile dumps) : à introduire si une session réelle révèle un bottleneck non-explicable via les métriques.
 - **6 deps OTEL ajoutées même si inactives par défaut** : footprint mémoire +~25 Mo au démarrage. Acceptable mais pas zéro.
 - **Pas de validation E2E formelle sur la nouvelle stack obs** : à faire avant de fermer le jalon (lancer une session JDR réelle, scraper `/metrics` à plusieurs instants, vérifier que les histograms se peuplent, que le summary `_generate_summary` met bien à jour le compteur `kaeyris_jobs_total{kind="summary",outcome="succeeded"}`, etc.).
+
+## 2026-05-20 — Hotfix `transcription_mode` Enum lookup (post-Jalon 5.5)
+
+### Le bug
+
+`GET /services/jdr/sessions` renvoyait un `500` avec `LookupError: 'diarised' is not among the defined enum values. Possible values: DIARISED, NON_DIARISE..`. La migration `0003_non_diarised_mode` avait posé un `server_default='diarised'` (lowercase, le `.value` de l'enum) sur la nouvelle colonne `transcription_mode`. Le mapping SQLAlchemy `Enum(TranscriptionMode, native_enum=False)` matche par défaut les valeurs DB contre **le nom** des membres (UPPERCASE) — donc le `SELECT` cassait sur toutes les rows héritant du default.
+
+### Le fix (commit `0cdca84`)
+
+Ajout de `values_callable=lambda enum_cls: [m.value for m in enum_cls]` sur la colonne, qui force SQLAlchemy à matcher par `.value` (lowercase, source: [doc SA Enum.params.values_callable](https://docs.sqlalchemy.org/en/20/core/type_basics.html#sqlalchemy.types.Enum.params.values_callable)). Scope limité à `transcription_mode` car c'est la seule colonne avec un `server_default` lowercase ; appliquer le fix à `mode`/`state`/`role`/`kind`/`status` aurait invalidé les rows historiques écrites en UPPERCASE par l'ORM.
+
+Test régression à 3 cas dans `tests/services/jdr/test_transcription_mode_enum_lookup.py` :
+- Une row dont le `transcription_mode` est posé par le `server_default` lowercase → ORM SELECT OK.
+- Une row avec `'non_diarised'` explicite → ORM SELECT OK.
+- Roundtrip ORM insert→read.
+
+### Le second bug (et l'ADR de la pédagogie)
+
+Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les rows déjà créées en E2E sub-jalon 5.5 contenaient `'NON_DIARISED'` (UPPERCASE, ce que l'ORM écrivait avant le fix). Après le fix, l'ORM matche par `.value` → ces rows-là devenaient illisibles. Symptôme identique mais inversé : `LookupError: 'NON_DIARISED' is not among the defined enum values`.
+
+**Cause racine de ma rétrospective** : j'avais identifié ce risque en analysant le fix mais j'ai supposé que la DB ne contiendrait que des rows lowercase. Mauvais pari — la phase de QA sub-jalon 5.5 avait créé plusieurs sessions UPPERCASE via l'ORM. Mes tests n'ont pas couvert le scenario "row UPPERCASE pré-fix".
+
+### Migration 0004 (commit `3327640`)
+
+`UPDATE jdr_sessions SET transcription_mode = LOWER(transcription_mode) WHERE transcription_mode IN ('DIARISED', 'NON_DIARISED')`. Downgrade pour la réversibilité. Test régression ajouté qui insère raw SQL une row UPPERCASE, applique l'UPDATE, et asserte que l'ORM lit `TranscriptionMode.NON_DIARISED`.
+
+### Ce que j'ai appris
+
+- **`values_callable` est la convention par défaut souhaitable** quand on veut que la sérialisation Enum corresponde à ce que l'API REST expose via Pydantic. Si on l'avait mis dès le Jalon 5, le bug n'aurait jamais existé.
+- **Un test de régression doit couvrir le "before-state" et le "after-state"** d'une migration. Pour un fix qui change une convention de stockage, il faut tester les rows pré-existant le fix, pas juste le scenario nominal.
+- **Les server_default Alembic doivent être lockstep avec la sérialisation ORM**. Idéalement, utiliser `server_default=MyEnum.X.value` ET `values_callable` ensemble (et c'est ce qu'on a fini par faire).
+
+## 2026-05-20 — Jalon 7 : CI/CD + Security hardening
+
+### Phases livrées
+
+1. **CI GitHub Actions** (`ci.yml`) : `lint` (ruff) + `test` (pytest -q) sur push `main` et PR vers main. Concurrency group pour annuler les runs périmés. Badge dans README.
+2. **SAST bandit** : configuration dans `[tool.bandit]` (`exclude_dirs` pour tests/migrations, `skips=[B101]`), job CI gate `--severity-level medium` — 0 finding M/H au baseline (5 Low ignorés sur les appels subprocess `ffmpeg`/`ffprobe`).
+3. **Dependency scan pip-audit** : non-bloquant (`continue-on-error: true`). 1 CVE upstream identifiée au baseline (`idna 3.13` → CVE-2026-45409, fix `3.15`) — surfacée dans les logs CI, à traiter quand le fix sort.
+4. **Secrets scan gitleaks** : `gitleaks/gitleaks-action@v2` avec config `.gitleaks.toml` (allowlist `.env.example`, `tests/`, `scripts/generate_api_key.py`). Bloquant.
+5. **Pre-commit hooks** : `.pre-commit-config.yaml` qui miroir la CI (ruff, bandit, gitleaks + hygiène trailing whitespace/EOF/large-files/detect-private-key). Installation optionnelle.
+6. **ADR `0009-cicd-security.md`** + cette entrée + entrée mémo (commandes locales).
+
+### Décisions structurantes
+
+- **bandit > semgrep** : mono-langage Python à 5k LoC, semgrep est sur-dimensionné et dépend du registry en ligne.
+- **pip-audit > safety / snyk** : OSV gratuit, sans cap, sans compte.
+- **gitleaks > trufflehog / detect-secrets** : moins bruyant, pas de baseline à maintenir.
+- **pip-audit non-bloquant** : pragmatisme. Un CVE upstream sans patch immédiat ne doit pas bloquer une PR sans lien. Discipline humaine de relire les logs.
+- **Pre-commit optionnel mais documenté** : la CI reste le filet de sécurité primaire ; les hooks accélèrent juste le feedback local.
+
+### Ce que j'ai appris
+
+- **Le `concurrency` group est sous-utilisé** : sans lui, push 3 commits successifs lance 3 workflows full, dont 2 deviennent obsolètes immédiatement. Avec `cancel-in-progress: true`, seul le dernier tourne.
+- **`severity-level medium` sur bandit est le bon défaut** pour démarrer. Bloquer sur Low aurait imposé de désactiver B404/B603/B607 ou de wrapper chaque subprocess dans un `# nosec` — bruit pour zéro valeur.
+- **Sécurité par défaut ≠ paranoïa par défaut** : `pip-audit` bloquant donnerait l'illusion de la rigueur mais friction quotidienne sans valeur ajoutée (les CVE upstream ne sont pas exploitables dans un contexte API privée LAN). Le bon réflexe : surveiller, pas bloquer.
+- **Pre-commit + gitleaks staged-only**, c'est rapide (<1s) parce qu'il scan le diff, pas l'historique. La CI scanne l'historique complet via `fetch-depth: 0` pour rattraper les forced-push.
+
+### Limitations acceptées
+
+- **Pas de coverage tracking** : repoussé au Jalon 8 quand on aura une cible chiffrée. Mesurer un % sans budget actionnable = vanity metric.
+- **pip-audit non-bloquant** : à promouvoir à bloquant quand on aura un tracker formel pour le triage CVE (Linear ou GitHub Projects).
+- **Pas de signature de commits** (`commit.gpgsign`) : pas de chaîne de confiance entre `main` et l'image Docker. À ajouter au Jalon 8 si on déploie sur infra non-locale.
+- **Pas de SBOM** (CycloneDX/syft) : hors-scope, projet perso. À ajouter avec la signature d'image Docker.
+- **Branch protection rules côté GitHub à activer manuellement** : la CI peut être bypass-ée par un admin tant que les rules ne sont pas configurées. La doc README pointe l'action à faire.

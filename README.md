@@ -60,6 +60,35 @@ pytest                      # tests
 pytest -v                   # tests verbeux
 ```
 
+## CI et sécurité (Jalon 7)
+
+GitHub Actions exécute 5 gates sur chaque push vers `main` et chaque PR — voir [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) et [ADR 0009](./docs/adr/0009-cicd-security.md).
+
+| Gate | Outil | Bloquant ? |
+|---|---|---|
+| Lint | `ruff check` | ✅ |
+| Tests | `pytest -q` | ✅ |
+| SAST | `bandit` (`--severity-level medium`) | ✅ sur Medium+ |
+| Deps scan | `pip-audit --desc` | ❌ (`continue-on-error`) |
+| Secrets | `gitleaks-action@v2` + [`.gitleaks.toml`](./.gitleaks.toml) | ✅ |
+
+```powershell
+# Tout-en-un local (mêmes flags que la CI)
+ruff check app tests migrations
+pytest -q
+bandit -c pyproject.toml -r app --severity-level medium
+pip-audit --desc
+```
+
+Hooks pre-commit miroir de la CI (cf. [`.pre-commit-config.yaml`](./.pre-commit-config.yaml)) — installation optionnelle mais recommandée :
+```powershell
+pip install pre-commit
+pre-commit install                  # active le hook .git/hooks/pre-commit
+pre-commit run --all-files          # exécute tous les hooks sur l'ensemble du repo
+```
+
+**Action manuelle requise côté GitHub** : activer les branch protection rules sur `main` (Settings → Branches → Add rule) pour rendre les statuts `lint`, `test`, `security-sast`, `security-secrets` obligatoires avant merge.
+
 ## Architecture
 
 ```
