@@ -1,0 +1,60 @@
+# Keep the build context lean and avoid leaking host artefacts into the
+# image. Anything not listed in COPY directives is invisible anyway, but
+# pruning the context speeds up `docker build` and prevents accidental
+# leaks (e.g. a stray .env, IDE caches, the local SQLite DB).
+
+# VCS
+.git
+.gitignore
+.gitattributes
+.gitleaks.toml
+.github
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+.venv
+venv
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# Secrets — NEVER ship .env into the image (12-Factor §III, CLAUDE.md §2.6)
+.env
+.env.*
+!.env.example
+
+# Local data dir (SQLite DB, uploaded audios, etc.). Bind-mounted via
+# Compose in dev; volume-mounted in prod. Never baked into the image.
+data
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+
+# IDE / OS
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+*.swp
+
+# Claude / agent local config
+.claude
+
+# Pre-commit
+.pre-commit-config.yaml
+
+# Docs and meta — not needed at runtime, would bloat the image.
+docs
+specs
+README.md
+LICENSE
+*.md
+!docker/*.md
+
+# Tests are not shipped to production.
+tests

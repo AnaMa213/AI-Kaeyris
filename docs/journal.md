@@ -355,3 +355,41 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
 - **Pas de signature de commits** (`commit.gpgsign`) : pas de chaîne de confiance entre `main` et l'image Docker. À ajouter au Jalon 8 si on déploie sur infra non-locale.
 - **Pas de SBOM** (CycloneDX/syft) : hors-scope, projet perso. À ajouter avec la signature d'image Docker.
 - **Branch protection rules côté GitHub à activer manuellement** : la CI peut être bypass-ée par un admin tant que les rules ne sont pas configurées. La doc README pointe l'action à faire.
+
+## 2026-05-20 — Jalon 8 : Déploiement PC fixe LAN (Postgres + Caddy + Watchtower + monitoring)
+
+### Phases livrées
+
+1. **Dockerfile prod-ready** : HEALTHCHECK baked sur `/healthz`, layering optimisé (pyproject.toml AVANT source pour cache), shipping de `migrations/` + `alembic.ini`. `.dockerignore` qui prune .git/.venv/.env*/data/tests/docs.
+2. **PostgreSQL en prod** : ajout `asyncpg>=0.30` aux deps runtime. Aucun code change dans `app/core/db.py` — le switch est purement via `DATABASE_URL`. Les migrations 0001-0004 utilisent uniquement des types portables.
+3. **`docker-compose.prod.yml`** : 9 services orchestrés — postgres + redis + migrations (one-shot) + api + worker + caddy + watchtower + prometheus + grafana. Réseaux séparés `internal` / `edge`. Volumes nommés pour persistance.
+4. **Caddy reverse proxy HTTP** : seul service publié sur le host (port 80). `/metrics` gated par basic auth (hash bcrypt en env). Headers de sécurité, strip du banner `Server`.
+5. **Workflow `release.yml`** : build multi-arch (amd64 + arm64 via QEMU) + push GHCR sur `main` et tags `v*`. Watchtower poll 5min, scope label-enable pour ne toucher que api/worker/migrations.
+6. **Prometheus + Grafana** auto-provisionnés : datasource locked, dashboard `kaeyris-overview.json` à 5 panels (HTTP rate/p95, jobs rate/duration, LLM tokens).
+7. **ADR 0010** + nouveau **`docs/runbook.md`** + cette entrée + memo + README.
+
+### Décisions structurantes
+
+- **Pattern delivery = Pull-based GHCR + Watchtower** (option A) : le PC fixe est derrière un routeur sans IP publique, le pull supprime toute exigence de port ouvert. ~5 min de latence acceptable pour un projet perso.
+- **Postgres en prod** (vs SQLite) : ferme la dette dev/prod parity (12-Factor §X) et débloque la concurrence write multi-worker.
+- **Caddy HTTP only** : LAN privée 192.168.x.x, HTTPS via internal CA forcerait trust-store install sur chaque client. Promotion HTTPS triviale plus tard (1 ligne dans le Caddyfile).
+- **Multi-arch amd64+arm64** malgré Pi 5 optionnel : ~30s build supplémentaires, $0, garde l'option matérielle ouverte.
+- **Migrations comme service one-shot** : isolation des préoccupations, visibilité via `docker compose ps`, Watchtower-friendly (re-run automatique sur nouvelle image).
+
+### Ce que j'ai appris
+
+- **`depends_on.condition: service_completed_successfully`** est exactement le bon outil pour orchestrer des one-shot tasks comme les migrations. Sans ça, on aurait besoin d'un init container ou d'un script d'entrypoint qui pollue le Dockerfile.
+- **Watchtower label-enable** est crucial sur un compose avec stateful services : sans `WATCHTOWER_LABEL_ENABLE=true`, postgres/redis/caddy seraient pull-restart à chaque release upstream — désastreux pour les volumes attachés et les connexions ouvertes.
+- **Caddy `basic_auth` (v2.8+)** prend un hash bcrypt PAS le plaintext. La directive existe depuis longtemps mais a été renommée de `basicauth` à `basic_auth`. La commande `caddy hash-password --plaintext` est la voie officielle.
+- **`docker compose config --quiet`** est la meilleure CI-friendly validation : exit non-zero si une env var manque, silence si tout résout. Bien meilleur que `up --dry-run`.
+- **GHA cache `type=gha,mode=max`** est gratuit et accélère les builds multi-arch de ~60s → ~20s sur les itérations.
+- **Dev/prod parity ne veut pas dire "même DB"** mais "même classe d'incidents". SQLite en prod aurait été acceptable pour un mono-worker — mais avec RQ workers en parallèle, le risque de corruption sur fsync race justifie Postgres même à ce scale.
+
+### Limitations acceptées
+
+- **Pas de secret manager** : `.env` sur la machine hôte contient `POSTGRES_PASSWORD`, `GRAFANA_ADMIN_PASSWORD`, clés API. Acceptable pour projet perso, à promouvoir vers Vault/Doppler si le projet sort de la sphère perso.
+- **Watchtower `rw` Docker socket** : trade-off classique automation vs least-privilege. Mitigé par le scope `label-enable` mais reste un super-pouvoir.
+- **Pas de canary / blue-green** : tout déploiement est un swap atomique de `:latest`. Acceptable au scale actuel.
+- **Pas de validation E2E du déploiement complet** : `docker compose config` valide la syntaxe mais pas le `up` réel. Le user fera le run réel sur son PC fixe. Documenté dans le runbook.
+- **`CADDY_METRICS_HASH` initial dans `.env.example`** est un placeholder évident (`REPLACE_ME_WITH_REAL_HASH`) — gitleaks scan le repo, le placeholder ne déclenche pas la règle bcrypt. Le user doit obligatoirement le régénérer avant le premier `up`.
+- **HTTPS skipped** : justification dans ADR 0010, promotion triviale plus tard.

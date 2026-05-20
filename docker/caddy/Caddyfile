@@ -1,0 +1,47 @@
+# Caddy v2 — HTTP-only reverse proxy on LAN.
+#
+# Listens on :80, fronts the FastAPI service `api`, and protects
+# `/metrics` (Prometheus exposition) behind basic auth so a curious
+# device on the LAN can't pull the metrics scrape.
+#
+# Why HTTP only: the host PC is on a trusted home LAN (192.168.x.x).
+# HTTPS via Caddy automatic certs would mean either (a) Let's Encrypt
+# with a public DNS, or (b) an internal CA that has to be trusted on
+# every client. Both add friction without clear benefit at this stage
+# (see ADR 0010 §HTTPS). Promotion to HTTPS is a one-line change here.
+
+:80 {
+	# Strip the default `Server: Caddy` banner — small fingerprint reduction.
+	header {
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# Logs in JSON to stdout (collected by Docker logging driver).
+	log {
+		format json
+	}
+
+	# /metrics: protected by basic auth. Prometheus embeds the credentials
+	# in its scrape target config (see docker/prometheus/prometheus.yml).
+	# Hash generated locally via: caddy hash-password --plaintext '<pwd>'.
+	@metrics path /metrics
+	handle @metrics {
+		basic_auth {
+			metrics {$CADDY_METRICS_HASH}
+		}
+		reverse_proxy api:8000
+	}
+
+	# Everything else proxies straight through to the API.
+	handle {
+		reverse_proxy api:8000 {
+			# Keep the original Host header so FastAPI sees the public
+			# hostname (useful for OpenAPI server URL generation).
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+}

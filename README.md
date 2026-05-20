@@ -14,6 +14,7 @@ Plateforme AI personnelle, monolithe modulaire en FastAPI, conçue pour héberge
 - [`docs/Jalon1.md`](./docs/Jalon1.md) … [`docs/Jalon5.md`](./docs/Jalon5.md) — walkthroughs pédagogiques par jalon
 - [`docs/services/jdr.md`](./docs/services/jdr.md) — premier service métier (Jalon 5) : architecture, opérations, hôte GPU LAN
 - [`docs/adr/`](./docs/adr/) — Architecture Decision Records (décisions structurantes)
+- [`docs/runbook.md`](./docs/runbook.md) — procédures d'exploitation prod (Jalon 8)
 - [`docs/journal.md`](./docs/journal.md) — journal d'apprentissage par jalon
 
 ## Setup local
@@ -88,6 +89,32 @@ pre-commit run --all-files          # exécute tous les hooks sur l'ensemble du 
 ```
 
 **Action manuelle requise côté GitHub** : activer les branch protection rules sur `main` (Settings → Branches → Add rule) pour rendre les statuts `lint`, `test`, `security-sast`, `security-secrets` obligatoires avant merge.
+
+## Déploiement (Jalon 8 — PC fixe LAN)
+
+Architecture pull-based : GitHub Actions publie une image multi-arch (amd64 + arm64) sur GHCR à chaque push `main` (ou tag `v*`), et Watchtower sur le PC fixe pull et redéploie automatiquement toutes les 5 min — voir [`docker-compose.prod.yml`](./docker-compose.prod.yml) et [ADR 0010](./docs/adr/0010-deployment.md).
+
+```
+git push origin main
+└─ CI verte (Jalon 7) ──→ release.yml ──→ ghcr.io/anama213/ai-kaeyris:latest
+                                                                      │
+                                       Watchtower poll ←─── ~5 min ───┘
+                                                ↓
+                                       PC fixe : migrations + restart api + worker
+```
+
+Stack runtime déployée :
+
+| Service | Rôle | Accès LAN |
+|---|---|---|
+| `api` + `worker` | FastAPI + workers RQ | via Caddy |
+| `postgres` 16 | persistance prod (ferme la dette dev/prod parity) | — |
+| `redis` 7 | queue RQ + rate-limit counters | — |
+| `caddy` 2 | reverse proxy HTTP, basic auth sur `/metrics` | `http://<host>:80` |
+| `prometheus` + `grafana` | observabilité (dashboards provisionnés depuis le repo) | `http://<host>:3000` |
+| `watchtower` | pull GHCR + redeploy auto | — |
+
+Procédures opérationnelles complètes (install première fois, rollback, troubleshooting, rotation secrets) : [`docs/runbook.md`](./docs/runbook.md).
 
 ## Architecture
 

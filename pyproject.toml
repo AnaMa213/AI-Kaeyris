@@ -14,6 +14,7 @@ dependencies = [
     "sqlalchemy>=2.0",
     "alembic",
     "aiosqlite",
+    "asyncpg>=0.30",
     "python-multipart",
     "structlog>=24.0",
     "prometheus-client>=0.20",

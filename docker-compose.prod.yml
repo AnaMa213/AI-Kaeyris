@@ -1,0 +1,228 @@
+# Production stack — meant to run on the host PC (LAN), pulled by Watchtower
+# from GHCR. Uses real Postgres (not aiosqlite) and a Caddy reverse proxy
+# so the API is reachable on http://<host>:80 instead of :8000 directly.
+#
+# Boot order (depends_on + healthcheck):
+#   postgres → migrations → api
+#                       └→ worker
+#   redis ─────────────────┘
+#
+# Operate with:
+#   docker compose -f docker-compose.prod.yml up -d
+#   docker compose -f docker-compose.prod.yml logs -f api
+#   docker compose -f docker-compose.prod.yml down
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      # Read from .env (POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB).
+      # 12-Factor §III — no defaults baked here so a missing var fails loudly.
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # AOF on for persistence (rate-limit counters + job queue);
+    # `appendfsync everysec` is the sane default (≤1s data loss on crash).
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--loglevel", "warning"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - internal
+
+  migrations:
+    # One-shot: applies Alembic migrations and exits 0. API/worker wait
+    # on this to succeed via depends_on.condition: service_completed_successfully.
+    image: ${KAEYRIS_IMAGE:-ghcr.io/anama213/ai-kaeyris:latest}
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    # Run again on every Watchtower pull so a new image with new
+    # migrations gets them applied before api/worker restart.
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+    networks:
+      - internal
+
+  api:
+    image: ${KAEYRIS_IMAGE:-ghcr.io/anama213/ai-kaeyris:latest}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      KAEYRIS_DATA_DIR: /app/data
+      # Force JSON logs in prod — humans read them via the orchestrator,
+      # not via tail. Override LOG_FORMAT=console in .env if debugging live.
+      LOG_FORMAT: json
+    # Watchtower target — automatic pull on `:latest` move.
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    volumes:
+      # Persist uploaded audios + transcriptions across restarts (and
+      # share with the worker so the JDR pipeline can read what the API
+      # uploaded). NEVER mount source code in prod — image is the contract.
+      - kaeyris-data:/app/data
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    # Healthcheck is baked into the image (Dockerfile HEALTHCHECK).
+    networks:
+      - internal
+
+  worker:
+    image: ${KAEYRIS_IMAGE:-ghcr.io/anama213/ai-kaeyris:latest}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      KAEYRIS_DATA_DIR: /app/data
+      LOG_FORMAT: json
+    # Watchtower target — automatic pull on `:latest` move.
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    volumes:
+      - kaeyris-data:/app/data
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    command: ["rq", "worker", "default", "--url", "redis://redis:6379/0"]
+    networks:
+      - internal
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    # Caddy is the only service published on the host. Port 80 is the
+    # LAN-facing entry; nothing else (api, postgres, redis…) is reachable
+    # from outside the Compose network.
+    ports:
+      - "80:80"
+    environment:
+      # Bcrypt hash of the password protecting GET /metrics. Generate with:
+      #   docker run --rm caddy:2-alpine caddy hash-password --plaintext '<pwd>'
+      CADDY_METRICS_HASH: ${CADDY_METRICS_HASH}
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Caddy state — when we later switch to HTTPS, the autogenerated
+      # certs live here so they survive a redeploy.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+    networks:
+      - internal
+      - edge
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      # Keep ~15 days of metrics on the host PC; tune up if you want
+      # longer trend analysis.
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - internal
+    # Not published on host: Grafana proxies queries through the `internal`
+    # network. Use `docker compose exec prometheus promtool` if you need
+    # to debug from the host.
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    restart: unless-stopped
+    ports:
+      # Direct host port for the UI — the API stays behind Caddy on :80,
+      # Grafana is reachable on :3000 (LAN only). Adjust the bind if you
+      # want it fronted by Caddy too.
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      # Disable anonymous access — LAN does not mean public, but the
+      # default open admin is a footgun.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      - internal
+
+  watchtower:
+    # Polls GHCR every 5 min and pulls new images for labelled services.
+    # Updates only containers carrying `com.centurylinklabs.watchtower.enable=true`
+    # so we never restart postgres/redis/caddy by accident.
+    image: containrrr/watchtower:latest
+    restart: unless-stopped
+    environment:
+      WATCHTOWER_POLL_INTERVAL: "300"        # 5 min — matches CI/CD propagation expectation
+      WATCHTOWER_CLEANUP: "true"             # delete obsolete images after update
+      WATCHTOWER_LABEL_ENABLE: "true"        # only update labelled containers
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+      # Uncomment to receive an HTTP notification on each update event.
+      # WATCHTOWER_NOTIFICATIONS: shoutrrr
+      # WATCHTOWER_NOTIFICATION_URL: generic+https://...
+    volumes:
+      # Docker socket — Watchtower drives the local daemon to pull, stop
+      # and restart containers. Read-write is required.
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - internal
+
+networks:
+  # `internal` carries all service-to-service traffic (DB, queue, app).
+  # Only Caddy joins `edge` and publishes a host port.
+  internal:
+    driver: bridge
+  edge:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  kaeyris-data:
+  caddy-data:
+  caddy-config:
+  prometheus-data:
+  grafana-data:
