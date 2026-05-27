@@ -62,10 +62,32 @@ class Settings(BaseSettings):
     # marge prompt + sortie. À affiner par benchmarks empiriques.
     KAEYRIS_CHUNK_MAX_CHARS: int = 30000
 
+    # Web auth sessions. Cookies are HTTP-only and issued by the API after
+    # username/password login. CORS origins stay explicit when credentials
+    # are enabled.
+    CORS_ALLOWED_ORIGINS: str = ""
+    SESSION_COOKIE_NAME: str = "session"
+    SESSION_COOKIE_SECURE: bool = False
+    SESSION_COOKIE_SAMESITE: str = "lax"
+    WEB_SESSION_TTL_SECONDS: int = 28800
+
+    @property
+    def cors_allowed_origins(self) -> list[str]:
+        return [
+            origin.strip()
+            for origin in self.CORS_ALLOWED_ORIGINS.split(",")
+            if origin.strip()
+        ]
+
 
 settings = Settings()
 if settings.KAEYRIS_CHUNK_MAX_CHARS <= 0:
     raise RuntimeError(
         "KAEYRIS_CHUNK_MAX_CHARS must be strictly positive "
         f"(got {settings.KAEYRIS_CHUNK_MAX_CHARS!r})."
+    )
+if settings.WEB_SESSION_TTL_SECONDS <= 0:
+    raise RuntimeError(
+        "WEB_SESSION_TTL_SECONDS must be strictly positive "
+        f"(got {settings.WEB_SESSION_TTL_SECONDS!r})."
     )

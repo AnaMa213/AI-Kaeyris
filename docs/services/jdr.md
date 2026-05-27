@@ -82,6 +82,14 @@ python scripts/generate_api_key.py owner   # imprime le token plaintext (à cons
 ```
 Au premier démarrage, l'app importe cette entrée dans `jdr_api_keys` avec `role='gm'`. Les démarrages suivants ignorent l'env var (la DB devient source de vérité).
 
+**Authentification web** :
+1. `GET /services/jdr/auth/setup/status` retourne `{"required": true}` tant que `core_users` est vide.
+2. `POST /services/jdr/auth/setup` crée le premier compte `gm` avec `username + password`, puis pose le cookie HTTP-only `session`.
+3. Un GM connecté crée ensuite les autres profils via `POST /services/jdr/users`.
+4. `POST /services/jdr/auth/login` accepte `username + profile + password` et pose un cookie `session` utilisable par les routes protégées.
+
+Les API keys historiques restent supportées pour les clients machine. Pour compatibilité avec les tables JDR existantes, un compte web `gm` reçoit aussi une clé JDR interne non exposée : les ownership FKs continuent donc de pointer vers `jdr_api_keys`.
+
 **Bascule transcription cloud → local** (sans modifier le code) :
 ```ini
 TRANSCRIPTION_PROVIDER=local

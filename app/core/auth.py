@@ -20,7 +20,7 @@ from argon2.exceptions import (
     VerificationError,
     VerifyMismatchError,
 )
-from fastapi import Depends, status
+from fastapi import Depends, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +29,8 @@ from app.core.config import settings
 from app.core.db import get_db_session
 from app.core.logging import get_logger
 from app.core.errors import AppError
+from app.core.models import Profile
+from app.core.users import validate_web_session
 from app.services.jdr.db.models import ApiKey, ApiKeyStatus, Role
 
 logger = get_logger(__name__)
@@ -101,8 +103,9 @@ class AuthenticatedKey:
 
     id: UUID
     name: str
-    role: Role
+    role: Role | Profile
     pj_id: UUID | None
+    source: str = "api_key"
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +229,7 @@ def _verify_against_registry(
                         name=entry.name,
                         role=entry.role,
                         pj_id=entry.pj_id,
+                        source="api_key",
                     )
         except VerifyMismatchError:
             continue
@@ -245,32 +249,48 @@ def _verify_against_registry(
 
 
 async def require_api_key(
+    request: Request,
     credentials: Annotated[
         HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
     ],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> AuthenticatedKey:
-    """FastAPI dependency: enforce a valid Authorization: Bearer header.
+    """FastAPI dependency: enforce valid Bearer credentials or a web session.
 
     Lookup is DB-backed (``jdr_api_keys`` table). The 401 response carries
     a ``WWW-Authenticate`` header per RFC 6750 §3. ``HTTPBearer`` advertises
     the scheme in the OpenAPI spec so Swagger UI renders the Authorize
     lock at the top of /docs.
     """
-    if credentials is None or not credentials.credentials.strip():
-        raise UnauthorizedError(detail="Missing or malformed Authorization header.")
-    token = credentials.credentials.strip()
+    if credentials is not None and credentials.credentials.strip():
+        token = credentials.credentials.strip()
 
-    entries = await _list_active_keys(session)
-    if not entries:
-        # Fail closed: an empty registry rejects every request.
-        logger.error("auth.empty_registry_rejected")
-        raise UnauthorizedError(detail="No API keys configured on the server.")
+        entries = await _list_active_keys(session)
+        if not entries:
+            # Fail closed: an empty registry rejects every Bearer request.
+            logger.error("auth.empty_registry_rejected")
+            raise UnauthorizedError(detail="No API keys configured on the server.")
 
-    authenticated = _verify_against_registry(token, entries)
-    if authenticated is None:
-        raise UnauthorizedError(detail="Invalid API key.")
-    return authenticated
+        authenticated = _verify_against_registry(token, entries)
+        if authenticated is None:
+            raise UnauthorizedError(detail="Invalid API key.")
+        return authenticated
+
+    session_token = request.cookies.get(settings.SESSION_COOKIE_NAME)
+    if session_token:
+        validated = await validate_web_session(session, session_token)
+        if validated is not None:
+            user = validated.user
+            auth_id = user.api_key_id if user.profile == Profile.GM else user.id
+            return AuthenticatedKey(
+                id=auth_id or user.id,
+                name=user.username,
+                role=user.profile,
+                pj_id=None,
+                source="web_session",
+            )
+
+    raise UnauthorizedError(detail="Missing or malformed credentials.")
 
 
 def require_role(
@@ -290,7 +310,7 @@ def require_role(
     def _dep(
         auth: Annotated[AuthenticatedKey, Depends(require_api_key)],
     ) -> AuthenticatedKey:
-        if auth.role != role:
+        if auth.role.value != role.value:
             raise ForbiddenError(
                 detail=f"This endpoint requires role {role.value!r}.",
             )

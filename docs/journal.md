@@ -393,3 +393,29 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
 - **Pas de validation E2E du déploiement complet** : `docker compose config` valide la syntaxe mais pas le `up` réel. Le user fera le run réel sur son PC fixe. Documenté dans le runbook.
 - **`CADDY_METRICS_HASH` initial dans `.env.example`** est un placeholder évident (`REPLACE_ME_WITH_REAL_HASH`) — gitleaks scan le repo, le placeholder ne déclenche pas la règle bcrypt. Le user doit obligatoirement le régénérer avant le premier `up`.
 - **HTTPS skipped** : justification dans ADR 0010, promotion triviale plus tard.
+
+---
+
+## 2026-05-27 — Feature 003 : User/password auth web
+
+### Ce qui a été fait
+
+- Ajout d'un setup initial sans mot de passe par défaut : `GET /services/jdr/auth/setup/status`, puis `POST /services/jdr/auth/setup` crée le premier GM seulement si `core_users` est vide.
+- Ajout des tables `core_users` et `core_web_sessions` avec migration Alembic `0005_user_password_auth.py`.
+- Ajout du login web `POST /services/jdr/auth/login` avec `username + profile + password`, réponse 200 et cookie HTTP-only `session`.
+- Ajout de la gestion GM des comptes : création, liste, modification, suppression logique, garde-fou contre la suppression du dernier GM actif.
+- Conservation des API keys existantes : Bearer reste prioritaire ; le cookie est utilisé seulement sans header `Authorization`.
+- Tests ciblés : hashing, sessions actives/expirées/révoquées, setup, login, logout, gestion users, et cookie-auth sur route protégée.
+
+### Ce que j'ai appris
+
+- **Le setup initial est meilleur qu'un `admin/admin` connu** : il évite le piège OWASP des credentials hardcodés tout en gardant une UX de première installation simple. Source : https://owasp.org/www-community/vulnerabilities/Use_of_hard-coded_password
+- **Session opaque côté serveur > JWT pour ce besoin** : le backend peut révoquer immédiatement une session supprimée ou logout sans gérer de blacklist. C'est plus simple pour un monolithe avec DB.
+- **Compatibilité progressive** : les routes JDR existantes stockent encore l'ownership via `jdr_api_keys.id`. Donner aux GM web une clé interne non exposée évite de refactorer tout le modèle JDR dans la même feature.
+- **Un cookie HTTP-only ne suffit pas seul** : il réduit l'exposition au JavaScript, mais il faut aussi limiter les origins CORS et garder `SameSite=Lax`. Référence cookie HTTP : https://developer.mozilla.org/en-US/docs/Web/HTTP/Cookies
+
+### Limitations acceptées
+
+- Pas d'OAuth/OIDC, invitation email, reset email ou self-service signup public.
+- Les profils web sont limités à `gm` et `user`; `user` n'est pas encore mappé au rôle JDR `player`.
+- La garantie anti double-setup est verrouillée par process applicatif ; en multi-process strict, il faudra renforcer avec contrainte/lock DB.
