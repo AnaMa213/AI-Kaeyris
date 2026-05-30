@@ -22,6 +22,7 @@ import enum
 import uuid
 from datetime import UTC, datetime
 from typing import Any
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     JSON,
@@ -39,6 +40,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
 
+if TYPE_CHECKING:
+    from app.core.models import User
+
 # ---------------------------------------------------------------------------
 # Enumerations
 # ---------------------------------------------------------------------------
@@ -48,6 +52,13 @@ class Role(str, enum.Enum):
     """Auth role borne by an API key (data-model.md §1)."""
 
     GM = "gm"
+    PLAYER = "player"
+
+
+class CampaignRole(str, enum.Enum):
+    """Role borne by a user inside a JDR campaign."""
+
+    MJ = "mj"
     PLAYER = "player"
 
 
@@ -155,12 +166,37 @@ class ApiKey(Base):
     pj: Mapped[Pj | None] = relationship("Pj", foreign_keys=[pj_id])
 
 
+class Campaign(Base):
+    """A JDR campaign, used as the V1 multi-tenancy boundary."""
+
+    __tablename__ = "campaigns"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("core_users.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    owner: Mapped["User"] = relationship("User", foreign_keys=[owner_id])
+    members: Mapped[list[CampaignMember]] = relationship(
+        "CampaignMember",
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+    )
+
+
 class Pj(Base):
     """A character (Personnage Joueur) — stable across sessions."""
 
     __tablename__ = "jdr_pjs"
     __table_args__ = (
-        UniqueConstraint("owner_gm_key_id", "name", name="owner_name"),
+        UniqueConstraint("campaign_id", "owner_gm_key_id", "name", name="campaign_owner_name"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -171,11 +207,58 @@ class Pj(Base):
         nullable=False,
         index=True,
     )
+    campaign_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("campaigns.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
 
     owner: Mapped[ApiKey] = relationship("ApiKey", foreign_keys=[owner_gm_key_id])
+    campaign: Mapped[Campaign | None] = relationship("Campaign", foreign_keys=[campaign_id])
+
+
+class CampaignMember(Base):
+    """Membership and campaign role for a browser user."""
+
+    __tablename__ = "campaign_members"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("core_users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("campaigns.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    role: Mapped[CampaignRole] = mapped_column(
+        Enum(
+            CampaignRole,
+            name="campaign_role",
+            native_enum=False,
+            length=16,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        nullable=False,
+    )
+    character_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("jdr_pjs.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    joined_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    user: Mapped["User"] = relationship("User", foreign_keys=[user_id])
+    campaign: Mapped[Campaign] = relationship("Campaign", back_populates="members")
+    character: Mapped[Pj | None] = relationship("Pj", foreign_keys=[character_id])
 
 
 class Session(Base):
@@ -192,6 +275,12 @@ class Session(Base):
         Uuid,
         ForeignKey("jdr_api_keys.id", ondelete="RESTRICT"),
         nullable=False,
+        index=True,
+    )
+    campaign_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("campaigns.id", ondelete="RESTRICT"),
+        nullable=True,
         index=True,
     )
     mode: Mapped[SessionMode] = mapped_column(
@@ -245,6 +334,7 @@ class Session(Base):
     )
 
     gm: Mapped[ApiKey] = relationship("ApiKey", foreign_keys=[gm_key_id])
+    campaign: Mapped[Campaign | None] = relationship("Campaign", foreign_keys=[campaign_id])
     audio_source: Mapped[AudioSource | None] = relationship(
         "AudioSource", back_populates="session", uselist=False, cascade="all, delete-orphan"
     )

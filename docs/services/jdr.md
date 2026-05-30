@@ -28,6 +28,8 @@ Le mode live (WebSocket Discord) est un **stub publié sans implémentation** (F
 ```
 app/services/jdr/
 ├── router.py         # routes /services/jdr/*, AppError pour chaque cas HTTP
+├── auth_router.py    # auth web JDR, /auth/me, gestion users
+├── campaigns.py      # campagne V1, memberships, résolution active
 ├── logic.py          # orchestration métier (pas de SQL direct, pas d'imports vendor)
 ├── schemas.py        # Pydantic v2 — projections in/out de chaque entité
 ├── prompts.py        # NARRATIVE_/ELEMENTS_/POV_SYSTEM_PROMPT (centralisés, CLAUDE.md §2.4)
@@ -87,8 +89,16 @@ Au premier démarrage, l'app importe cette entrée dans `jdr_api_keys` avec `rol
 2. `POST /services/jdr/auth/setup` crée le premier compte `gm` avec `username + password`, puis pose le cookie HTTP-only `session`.
 3. Un GM connecté crée ensuite les autres profils via `POST /services/jdr/users`.
 4. `POST /services/jdr/auth/login` accepte `username + profile + password` et pose un cookie `session` utilisable par les routes protégées.
+5. `GET /services/jdr/auth/me` renvoie `{ user, active_campaign }` avec `Cache-Control: no-store`.
+
+**Contexte campagne BD-4** :
+- La campagne est la frontière de multi-tenancy JDR. La V1 seed une campagne par défaut `00000000-0000-0000-0000-000000000001` nommée `Campagne par defaut`.
+- Les rôles membership sont dérivés du profil web : `gm -> mj`, `user -> player`.
+- Le backend dérive toujours `campaign_id` depuis l'auth/session. Les payloads frontend contenant `campaign_id` sont rejetés en validation.
+- Hors scope V1 : CRUD de campagnes, switch de campagne, couche tenant/organisation, endpoints d'administration des memberships.
 
 Les API keys historiques restent supportées pour les clients machine. Pour compatibilité avec les tables JDR existantes, un compte web `gm` reçoit aussi une clé JDR interne non exposée : les ownership FKs continuent donc de pointer vers `jdr_api_keys`.
+Quand une requête Bearer n'a pas de user web associé, elle est rattachée à la campagne V1 si elle existe ; les anciennes données null-campaign restent lisibles en fallback legacy.
 
 **Bascule transcription cloud → local** (sans modifier le code) :
 ```ini

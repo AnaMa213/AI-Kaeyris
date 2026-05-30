@@ -419,3 +419,28 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
 - Pas d'OAuth/OIDC, invitation email, reset email ou self-service signup public.
 - Les profils web sont limités à `gm` et `user`; `user` n'est pas encore mappé au rôle JDR `player`.
 - La garantie anti double-setup est verrouillée par process applicatif ; en multi-process strict, il faudra renforcer avec contrainte/lock DB.
+
+---
+
+## 2026-05-30 — BD-4 : contexte campagne et `/auth/me`
+
+### Ce qui a été fait
+
+- Ajout du contrat `GET /services/jdr/auth/me` pour le frontend : identité user + `active_campaign`, cookie web obligatoire, `Cache-Control: no-store`.
+- Ajout des tables `campaigns` et `campaign_members`, du `default_campaign_id` côté users, et du `campaign_id` sur sessions/PJ.
+- Seed idempotent de la campagne V1 `Campagne par defaut`, avec owner déterministe : premier GM actif, sinon premier user actif.
+- Scoping serveur des sessions/PJ et routes dérivées par campagne active ; les payloads front contenant `campaign_id` sont rejetés.
+- Gestion users rendue campaign-aware : création de membership, liste par campagne active, synchronisation du rôle si `profile` change, conservation des memberships au soft-delete.
+
+### Ce que j'ai appris
+
+- **La frontière campagne suffit pour V1** : ajouter tenant/org maintenant aurait créé une abstraction sans second consommateur. YAGNI reste une vraie discipline d'architecture.
+- **`/auth/me` est un contrat d'autorisation, pas seulement d'identité** : `no-store` est pertinent car le rôle et la campagne peuvent changer.
+- **Compatibilité progressive > migration big bang** : garder les API keys Bearer et les clés internes GM évite de refaire tout l'ownership JDR dans la même feature.
+- **Le scoping doit vivre dans les requêtes SQL** : filtrer par `campaign_id` dans repositories/routes réduit le risque de fuite inter-campagne par oubli de filtrage Python.
+
+### Limitations acceptées
+
+- Pas de CRUD campagne ni switch de campagne en BD-4.
+- Les anciennes données null-campaign restent supportées comme fallback legacy pour API keys sans campagne V1 disponible.
+- Le contrôle same-campaign de `CampaignMember.character_id` est appliqué côté repository/app ; une contrainte DB stricte multi-table nécessiterait une approche plus lourde et non portable SQLite/PostgreSQL.

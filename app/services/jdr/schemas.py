@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Generic, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.services.jdr.db.models import (
     JobKind,
@@ -36,6 +36,8 @@ T = TypeVar("T")
 
 class SessionCreate(BaseModel):
     """Payload accepted by ``POST /services/jdr/sessions``."""
+
+    model_config = ConfigDict(extra="forbid")
 
     title: str = Field(..., min_length=1, max_length=500)
     recorded_at: datetime = Field(
@@ -75,8 +77,18 @@ class SessionUpdate(BaseModel):
     "unset" from "explicit null" via Pydantic's ``model_fields_set``).
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     title: str | None = Field(default=None, min_length=1, max_length=500)
     campaign_context: str | None = Field(default=None, max_length=8000)
+    transcription_mode: TranscriptionMode | None = None
+    campaign_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def reject_campaign_id(self) -> "SessionUpdate":
+        if "campaign_id" in self.model_fields_set:
+            raise ValueError("campaign_id is derived from authentication.")
+        return self
 
 
 class SessionOut(BaseModel):
@@ -159,6 +171,8 @@ class TranscriptionOut(BaseModel):
 class PjCreate(BaseModel):
     """Payload accepted by ``POST /services/jdr/pjs``."""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(..., min_length=1, max_length=255)
 
 
@@ -183,6 +197,8 @@ class MappingPut(BaseModel):
     Shape ``{speaker_label: pj_id}`` per ``contracts/rest-api.md``
     §148-163.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     mapping: dict[str, UUID] = Field(
         default_factory=dict,
@@ -242,6 +258,8 @@ class PovArtifactOut(BaseModel):
 
 class PlayerCreate(BaseModel):
     """Body for ``POST /services/jdr/players``."""
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=255)
     pj_id: UUID
@@ -418,6 +436,8 @@ class SessionPlayersIn(BaseModel):
 
     Replaces the player list integrally (PUT-like semantics).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     pj_ids: list[UUID] = Field(..., min_length=1, max_length=50)
 

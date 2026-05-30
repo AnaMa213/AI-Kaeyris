@@ -9,13 +9,21 @@ from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import AuthenticatedKey, require_api_key, require_gm
+from app.core.auth import (
+    AuthenticatedKey,
+    require_api_key,
+    require_gm,
+    require_web_session_user,
+)
 from app.core.config import settings
 from app.core.db import get_db_session
 from app.core.errors import AppError, PROBLEM_CONTENT_TYPE
 from app.core.logging import get_logger
-from app.core.models import Profile
+from app.core.models import Profile, User
 from app.core.user_schemas import (
+    AuthMeCampaignOut,
+    AuthMeOut,
+    AuthMeUserOut,
     LoginRequest,
     SetupRequest,
     SetupStatusOut,
@@ -38,6 +46,13 @@ from app.core.users import (
     revoke_web_session,
     setup_required,
     update_user,
+)
+from app.services.jdr.campaigns import (
+    ensure_default_campaign,
+    ensure_user_membership,
+    resolve_active_campaign_for_user,
+    resolve_campaign_for_auth,
+    sync_membership_role_for_user,
 )
 
 logger = get_logger(__name__)
@@ -92,6 +107,14 @@ def _request_client_ip(request: Request) -> str | None:
     return request.client.host if request.client is not None else None
 
 
+async def _active_campaign_id(
+    db: AsyncSession,
+    auth: AuthenticatedKey,
+) -> UUID | None:
+    context = await resolve_campaign_for_auth(db, auth)
+    return context.id if context is not None else None
+
+
 @router.get(
     "/services/jdr/auth/setup/status",
     response_model=SetupStatusOut,
@@ -124,6 +147,13 @@ async def post_setup(
     except DuplicateUserError as exc:
         raise DuplicateUserAppError("Username already exists.") from exc
 
+    seed_result = await ensure_default_campaign(db)
+    logger.info(
+        "jdr.auth.default_campaign_seeded",
+        campaign_created=seed_result.campaign_created,
+        memberships_created=seed_result.memberships_created,
+        memberships_updated=seed_result.memberships_updated,
+    )
     token, _web_session = await create_web_session(
         db,
         user,
@@ -174,6 +204,40 @@ async def post_login(
     return response
 
 
+@router.get(
+    "/services/jdr/auth/me",
+    response_model=AuthMeOut,
+)
+async def get_auth_me(
+    response: Response,
+    user: Annotated[User, Depends(require_web_session_user)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> AuthMeOut:
+    response.headers["Cache-Control"] = "no-store"
+    active_campaign = await resolve_active_campaign_for_user(db, user)
+    if active_campaign is None:
+        logger.info("jdr.auth.me_no_campaign", user_id=str(user.id))
+        return AuthMeOut(
+            user=AuthMeUserOut(id=user.id, username=user.username),
+            active_campaign=None,
+        )
+
+    logger.info(
+        "jdr.auth.me_succeeded",
+        user_id=str(user.id),
+        campaign_id=str(active_campaign.id),
+    )
+    return AuthMeOut(
+        user=AuthMeUserOut(id=user.id, username=user.username),
+        active_campaign=AuthMeCampaignOut(
+            id=active_campaign.id,
+            name=active_campaign.name or "",
+            role=active_campaign.role.value if active_campaign.role else "",
+            character_id=active_campaign.character_id,
+        ),
+    )
+
+
 @router.post("/services/jdr/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def post_logout(
     request: Request,
@@ -201,16 +265,19 @@ async def post_logout(
 )
 async def post_user(
     payload: UserCreate,
-    _auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> UserOut:
     try:
+        campaign_id = await _active_campaign_id(db, auth)
         user = await create_user(
             db,
             username=payload.username,
             profile=payload.profile,
             password=payload.password,
         )
+        if campaign_id is not None:
+            await ensure_user_membership(db, user=user, campaign_id=campaign_id)
     except DuplicateUserError as exc:
         raise DuplicateUserAppError("Username already exists.") from exc
 
@@ -220,20 +287,27 @@ async def post_user(
 
 @router.get("/services/jdr/users", response_model=UserListOut)
 async def get_users(
-    _auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> UserListOut:
-    return UserListOut(items=[UserOut.model_validate(user) for user in await list_users(db)])
+    campaign_id = await _active_campaign_id(db, auth)
+    return UserListOut(
+        items=[
+            UserOut.model_validate(user)
+            for user in await list_users(db, campaign_id=campaign_id)
+        ]
+    )
 
 
 @router.patch("/services/jdr/users/{user_id}", response_model=UserOut)
 async def patch_user(
     user_id: UUID,
     payload: UserUpdate,
-    _auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> UserOut:
     try:
+        campaign_id = await _active_campaign_id(db, auth)
         user = await update_user(
             db,
             user_id,
@@ -241,6 +315,8 @@ async def patch_user(
             password=payload.password,
             status=payload.status,
         )
+        if campaign_id is not None and payload.profile is not None:
+            await sync_membership_role_for_user(db, user=user, campaign_id=campaign_id)
     except UserNotFoundError as exc:
         raise UserNotFoundAppError("User not found.") from exc
     except LastActiveGmError as exc:
@@ -251,11 +327,17 @@ async def patch_user(
 @router.delete("/services/jdr/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user_route(
     user_id: UUID,
-    _auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Response:
     try:
+        campaign_id = await _active_campaign_id(db, auth)
         await delete_user(db, user_id)
+        logger.info(
+            "jdr.users.deleted_memberships_retained",
+            user_id=str(user_id),
+            campaign_id=str(campaign_id) if campaign_id is not None else None,
+        )
     except UserNotFoundError as exc:
         raise UserNotFoundAppError("User not found.") from exc
     except LastActiveGmError as exc:

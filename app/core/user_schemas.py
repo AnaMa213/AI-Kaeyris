@@ -15,23 +15,31 @@ class SetupStatusOut(BaseModel):
 
 
 class SetupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     username: str = Field(min_length=1, max_length=150)
     password: str = Field(min_length=1, max_length=256)
 
 
 class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     username: str = Field(min_length=1, max_length=150)
     profile: str = Field(min_length=1, max_length=32)
     password: str = Field(min_length=1, max_length=256)
 
 
 class UserCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     username: str = Field(min_length=1, max_length=150)
     profile: Profile
     password: str = Field(min_length=1, max_length=256)
 
 
 class UserUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     profile: Profile | None = None
     password: str | None = Field(default=None, min_length=1, max_length=256)
     status: UserStatus | None = None
@@ -57,3 +65,20 @@ class UserOut(BaseModel):
 
 class UserListOut(BaseModel):
     items: list[UserOut]
+
+
+class AuthMeUserOut(BaseModel):
+    id: UUID
+    username: str
+
+
+class AuthMeCampaignOut(BaseModel):
+    id: UUID
+    name: str
+    role: str
+    character_id: UUID | None = None
+
+
+class AuthMeOut(BaseModel):
+    user: AuthMeUserOut
+    active_campaign: AuthMeCampaignOut | None

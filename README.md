@@ -140,6 +140,8 @@ Sur une base vide, aucun compte par défaut n'existe. Le front doit appeler `GET
 
 Le login front utilise `POST /services/jdr/auth/login` et reçoit un cookie `session` HTTP-only en cas de succès. Les requêtes navigateur doivent envoyer les cookies avec `credentials: "include"`.
 
+Le contexte courant du front se lit via `GET /services/jdr/auth/me` : réponse `{ user, active_campaign }`, cookie web obligatoire, header `Cache-Control: no-store`. Au setup/startup, les users actifs sont rattachés à la campagne V1 `00000000-0000-0000-0000-000000000001` (`Campagne par defaut`), avec rôle `gm -> mj` et `user -> player`.
+
 Les clés API restent disponibles pour l'automatisation :
 
 ```powershell
@@ -230,11 +232,12 @@ rq worker default --url redis://localhost:6379/0
 
 Scénario E2E (résumé — la procédure complète est dans [`specs/001-kaeyris-jdr/quickstart.md`](./specs/001-kaeyris-jdr/quickstart.md)) :
 
-1. MJ : `POST /services/jdr/sessions` puis `POST /sessions/{id}/audio` (M4A) → job de transcription.
-2. MJ : `POST /pjs`, `PUT /sessions/{id}/mapping` pour relier `speaker_X` à chaque PJ.
-3. MJ : `POST /sessions/{id}/artifacts/{narrative|elements|povs}` puis polling `GET /jobs/{id}`.
-4. MJ : `POST /players` pour enrôler un joueur (token plaintext renvoyé **une seule fois**).
-5. Joueur : `GET /me`, `GET /me/sessions`, `GET /me/sessions/{id}/{narrative|pov}[.md]` — strictement scoppé à son PJ (FR-014).
+1. Front : `GET /services/jdr/auth/me` pour récupérer `active_campaign` ; le backend dérive ensuite `campaign_id` côté serveur.
+2. MJ : `POST /services/jdr/sessions` puis `POST /sessions/{id}/audio` (M4A) → job de transcription.
+3. MJ : `POST /pjs`, `PUT /sessions/{id}/mapping` pour relier `speaker_X` à chaque PJ.
+4. MJ : `POST /sessions/{id}/artifacts/{narrative|elements|povs}` puis polling `GET /jobs/{id}`.
+5. MJ : `POST /players` pour enrôler un joueur (token plaintext renvoyé **une seule fois**).
+6. Joueur : `GET /me`, `GET /me/sessions`, `GET /me/sessions/{id}/{narrative|pov}[.md]` — strictement scoppé à son PJ et à sa campagne.
 
 Variables d'environnement spécifiques (voir [`.env.example`](./.env.example) pour le détail) : `DATABASE_URL`, `KAEYRIS_DATA_DIR`, `TRANSCRIPTION_PROVIDER` (`cloud` par défaut, `local` pour l'hôte GPU LAN), `TRANSCRIPTION_BASE_URL`, `TRANSCRIPTION_API_KEY`, `TRANSCRIPTION_MODEL`, `TRANSCRIPTION_LANGUAGE_HINT`, `TRANSCRIPTION_CHUNK_DURATION_SECONDS`.
 

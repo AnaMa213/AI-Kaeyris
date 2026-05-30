@@ -29,6 +29,9 @@ from sqlalchemy.exc import IntegrityError
 from app.services.jdr.db.models import (
     Artifact,
     AudioSource,
+    Campaign,
+    CampaignMember,
+    CampaignRole,
     Chunk,
     Pj,
     Session,
@@ -82,8 +85,25 @@ class ApiKeyRepository(_BaseRepository):
 class PjRepository(_BaseRepository):
     """``jdr_pjs`` access. Used by US3 (mapping) and US4 (player listing)."""
 
-    async def create(self, *, name: str, owner_gm_key_id: UUID) -> Pj:
-        row = Pj(name=name, owner_gm_key_id=owner_gm_key_id)
+    async def create(
+        self,
+        *,
+        name: str,
+        owner_gm_key_id: UUID,
+        campaign_id: UUID | None = None,
+    ) -> Pj:
+        duplicate_stmt = select(Pj.id).where(
+            Pj.owner_gm_key_id == owner_gm_key_id,
+            Pj.name == name,
+        )
+        if campaign_id is None:
+            duplicate_stmt = duplicate_stmt.where(Pj.campaign_id.is_(None))
+        else:
+            duplicate_stmt = duplicate_stmt.where(Pj.campaign_id == campaign_id)
+        if await self._session.scalar(duplicate_stmt) is not None:
+            raise DuplicatePjNameError(f"GM already has a PJ named {name!r}.")
+
+        row = Pj(name=name, owner_gm_key_id=owner_gm_key_id, campaign_id=campaign_id)
         self._session.add(row)
         try:
             await self._session.flush()
@@ -98,22 +118,112 @@ class PjRepository(_BaseRepository):
         await self._session.refresh(row)
         return row
 
-    async def list_for_gm(self, gm_key_id: UUID) -> list[Pj]:
+    async def list_for_gm(
+        self, gm_key_id: UUID, campaign_id: UUID | None = None
+    ) -> list[Pj]:
         stmt = (
             select(Pj)
             .where(Pj.owner_gm_key_id == gm_key_id)
             .order_by(Pj.created_at)
         )
+        if campaign_id is not None:
+            stmt = stmt.where(Pj.campaign_id == campaign_id)
         result = await self._session.scalars(stmt)
         return list(result.all())
 
     async def find_by_id_owned_by(
-        self, pj_id: UUID, gm_key_id: UUID
+        self, pj_id: UUID, gm_key_id: UUID, campaign_id: UUID | None = None
     ) -> Pj | None:
         stmt = select(Pj).where(
             Pj.id == pj_id, Pj.owner_gm_key_id == gm_key_id
         )
+        if campaign_id is not None:
+            stmt = stmt.where(Pj.campaign_id == campaign_id)
         return await self._session.scalar(stmt)
+
+
+class CampaignRepository(_BaseRepository):
+    """Campaign and membership access for the JDR auth context."""
+
+    async def get_campaign(self, campaign_id: UUID) -> Campaign | None:
+        return await self._session.get(Campaign, campaign_id)
+
+    async def create_campaign(
+        self,
+        *,
+        campaign_id: UUID,
+        name: str,
+        owner_id: UUID,
+    ) -> Campaign:
+        row = Campaign(id=campaign_id, name=name, owner_id=owner_id)
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
+    async def get_membership(
+        self, *, user_id: UUID, campaign_id: UUID
+    ) -> CampaignMember | None:
+        return await self._session.get(CampaignMember, (user_id, campaign_id))
+
+    async def upsert_membership(
+        self,
+        *,
+        user_id: UUID,
+        campaign_id: UUID,
+        role: CampaignRole,
+        character_id: UUID | None = None,
+    ) -> CampaignMember:
+        if character_id is not None:
+            character_campaign_id = await self._session.scalar(
+                select(Pj.campaign_id).where(Pj.id == character_id)
+            )
+            if character_campaign_id != campaign_id:
+                raise ValueError("character_id must belong to the same campaign.")
+
+        row = await self.get_membership(user_id=user_id, campaign_id=campaign_id)
+        if row is None:
+            row = CampaignMember(
+                user_id=user_id,
+                campaign_id=campaign_id,
+                role=role,
+                character_id=character_id,
+            )
+            self._session.add(row)
+        else:
+            row.role = role
+            row.character_id = character_id
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
+    async def find_membership_with_campaign(
+        self,
+        *,
+        user_id: UUID,
+        campaign_id: UUID,
+    ) -> tuple[CampaignMember, Campaign] | None:
+        stmt = (
+            select(CampaignMember, Campaign)
+            .join(Campaign, Campaign.id == CampaignMember.campaign_id)
+            .where(
+                CampaignMember.user_id == user_id,
+                CampaignMember.campaign_id == campaign_id,
+            )
+        )
+        return (await self._session.execute(stmt)).first()
+
+    async def first_membership_with_campaign(
+        self, *, user_id: UUID
+    ) -> tuple[CampaignMember, Campaign] | None:
+        stmt = (
+            select(CampaignMember, Campaign)
+            .join(Campaign, Campaign.id == CampaignMember.campaign_id)
+            .where(CampaignMember.user_id == user_id)
+            .order_by(CampaignMember.joined_at.asc(), CampaignMember.campaign_id.asc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).first()
 
 
 class SessionRepository(_BaseRepository):
@@ -129,6 +239,7 @@ class SessionRepository(_BaseRepository):
         title: str,
         recorded_at: datetime,
         gm_key_id: UUID,
+        campaign_id: UUID | None = None,
         campaign_context: str | None = None,
         transcription_mode: TranscriptionMode = TranscriptionMode.DIARISED,
     ) -> Session:
@@ -136,6 +247,7 @@ class SessionRepository(_BaseRepository):
             title=title,
             recorded_at=recorded_at,
             gm_key_id=gm_key_id,
+            campaign_id=campaign_id,
             campaign_context=campaign_context,
             transcription_mode=transcription_mode,
         )
@@ -144,22 +256,28 @@ class SessionRepository(_BaseRepository):
         await self._session.refresh(row)
         return row
 
-    async def list_for_gm(self, gm_key_id: UUID) -> list[Session]:
+    async def list_for_gm(
+        self, gm_key_id: UUID, campaign_id: UUID | None = None
+    ) -> list[Session]:
         stmt = (
             select(Session)
             .where(Session.gm_key_id == gm_key_id)
             .order_by(Session.created_at)
         )
+        if campaign_id is not None:
+            stmt = stmt.where(Session.campaign_id == campaign_id)
         result = await self._session.scalars(stmt)
         return list(result.all())
 
     async def get_for_gm(
-        self, session_id: UUID, gm_key_id: UUID
+        self, session_id: UUID, gm_key_id: UUID, campaign_id: UUID | None = None
     ) -> Session | None:
         stmt = select(Session).where(
             Session.id == session_id,
             Session.gm_key_id == gm_key_id,
         )
+        if campaign_id is not None:
+            stmt = stmt.where(Session.campaign_id == campaign_id)
         return await self._session.scalar(stmt)
 
     async def store_audio_source(

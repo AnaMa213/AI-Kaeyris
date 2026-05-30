@@ -280,6 +280,7 @@ Puis dans le nouveau dossier :
 | `GET /services/jdr/auth/setup/status` | Indique si la base vide exige la création du premier GM |
 | `POST /services/jdr/auth/setup` | Crée le premier GM (`username` + `password`) et pose `session` |
 | `POST /services/jdr/auth/login` | Login web `username` + `profile` + `password`, pose un cookie HTTP-only |
+| `GET /services/jdr/auth/me` | Renvoie `{ user, active_campaign }` depuis le cookie web ; `Cache-Control: no-store` |
 | `POST /services/jdr/auth/logout` | Révoque la session courante et expire le cookie |
 | `POST/GET/PATCH/DELETE /services/jdr/users` | Gestion GM des comptes applicatifs |
 
@@ -296,7 +297,17 @@ curl http://localhost:8000/services/jdr/auth/setup/status
 curl -X POST http://localhost:8000/services/jdr/auth/setup `
   -H "Content-Type: application/json" `
   -d '{"username":"admin","password":"mot-de-passe-choisi"}'
+curl http://localhost:8000/services/jdr/auth/me --cookie "session=<cookie>"
 ```
+
+### Contexte campagne BD-4
+
+| Élément | Valeur |
+|---|---|
+| Campagne V1 | `00000000-0000-0000-0000-000000000001` / `Campagne par defaut` |
+| Résolution active | `core_users.default_campaign_id` valide, sinon premier `campaign_members.joined_at`, sinon `null` |
+| Rôle membership | `profile=gm -> mj`, `profile=user -> player` |
+| Scoping JDR | `campaign_id` dérivé côté serveur, jamais accepté dans les payloads front |
 
 ## Authentification API key (Jalon 2 — ADR 0003)
 

@@ -22,6 +22,7 @@ from app.core.request_context import RequestContextMiddleware
 from app.core.security_headers import SecurityHeadersMiddleware
 from app.core.tracing import setup_tracing
 from app.services.jdr.auth_router import router as jdr_auth_router
+from app.services.jdr.campaigns import ensure_default_campaign
 from app.services.jdr.router import router as jdr_router
 
 # Configure structured logging as early as possible — before any logger is
@@ -45,6 +46,15 @@ async def _run_startup_tasks() -> None:
             inserted = await bootstrap_api_keys_from_env(session)
             if inserted:
                 logger.info("startup.api_keys_bootstrapped", inserted=inserted)
+            seed_result = await ensure_default_campaign(session)
+            await session.commit()
+            logger.info(
+                "startup.default_campaign_seeded",
+                campaign_created=seed_result.campaign_created,
+                memberships_created=seed_result.memberships_created,
+                memberships_updated=seed_result.memberships_updated,
+                users_seen=seed_result.users_seen,
+            )
     except Exception as exc:  # noqa: BLE001 — log and continue
         logger.error(
             "startup.api_keys_bootstrap_failed",

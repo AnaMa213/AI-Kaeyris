@@ -9,11 +9,15 @@ from __future__ import annotations
 import enum
 import uuid
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Enum, ForeignKey, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
+
+if TYPE_CHECKING:
+    from app.services.jdr.db.models import Campaign
 
 
 def _utcnow() -> datetime:
@@ -76,6 +80,12 @@ class User(Base):
         nullable=True,
         index=True,
     )
+    default_campaign_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("campaigns.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
@@ -94,6 +104,9 @@ class User(Base):
 
     sessions: Mapped[list[WebSession]] = relationship(
         "WebSession", back_populates="user", cascade="all, delete-orphan"
+    )
+    default_campaign: Mapped["Campaign | None"] = relationship(
+        "Campaign", foreign_keys=[default_campaign_id]
     )
 
 

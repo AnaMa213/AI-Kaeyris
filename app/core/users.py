@@ -19,7 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.models import Profile, User, UserStatus, WebSession
-from app.services.jdr.db.models import ApiKey, ApiKeyStatus, Role
+from app.services.jdr.db.models import ApiKey, ApiKeyStatus, CampaignMember, Role
 
 _hasher = PasswordHasher()
 _setup_lock = asyncio.Lock()
@@ -263,8 +263,17 @@ async def revoke_user_sessions(session: AsyncSession, user_id: UUID) -> None:
         web_session.revoked_at = now
 
 
-async def list_users(session: AsyncSession) -> list[User]:
-    result = await session.scalars(select(User).order_by(User.username.asc()))
+async def list_users(
+    session: AsyncSession,
+    *,
+    campaign_id: UUID | None = None,
+) -> list[User]:
+    stmt = select(User).order_by(User.username.asc())
+    if campaign_id is not None:
+        stmt = stmt.join(CampaignMember, CampaignMember.user_id == User.id).where(
+            CampaignMember.campaign_id == campaign_id
+        )
+    result = await session.scalars(stmt)
     return list(result.all())
 
 

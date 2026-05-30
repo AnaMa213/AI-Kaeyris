@@ -29,7 +29,7 @@ from app.core.config import settings
 from app.core.db import get_db_session
 from app.core.logging import get_logger
 from app.core.errors import AppError
-from app.core.models import Profile
+from app.core.models import Profile, User
 from app.core.users import validate_web_session
 from app.services.jdr.db.models import ApiKey, ApiKeyStatus, Role
 
@@ -106,6 +106,7 @@ class AuthenticatedKey:
     role: Role | Profile
     pj_id: UUID | None
     source: str = "api_key"
+    user_id: UUID | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -288,9 +289,25 @@ async def require_api_key(
                 role=user.profile,
                 pj_id=None,
                 source="web_session",
+                user_id=user.id,
             )
 
     raise UnauthorizedError(detail="Missing or malformed credentials.")
+
+
+async def require_web_session_user(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> User:
+    """FastAPI dependency: enforce browser-session auth and return the user."""
+    session_token = request.cookies.get(settings.SESSION_COOKIE_NAME)
+    if not session_token:
+        raise UnauthorizedError(detail="Missing or malformed credentials.")
+
+    validated = await validate_web_session(session, session_token)
+    if validated is None:
+        raise UnauthorizedError(detail="Missing or malformed credentials.")
+    return validated.user
 
 
 def require_role(
