@@ -23,9 +23,20 @@ services:
       - .env
     environment:
       REDIS_URL: redis://redis:6379/0
+      # CORS dev — autorise le front Next.js sur localhost:3000.
+      # Override du .env (vide par défaut, prod-safe). Ajouter d'autres
+      # origines (LAN, https://kaeyris.lan…) via CORS_ALLOWED_ORIGINS dans
+      # le .env quand nécessaire, séparées par des virgules.
+      CORS_ALLOWED_ORIGINS: http://localhost:3000
     depends_on:
       - redis
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    # Watch ONLY the source tree. Without --reload-dir, watchfiles walks the
+    # whole working tree including the bind-mounted /app/data, which holds
+    # pytest tmp dirs and the SQLite DB. A single subdir with restrictive
+    # permissions (typical on Docker Desktop Windows bind mounts) makes the
+    # underlying Rust watcher crash with EACCES and uvicorn dies. Restricting
+    # the watch to /app/app fixes the root cause and is also faster.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/app"]
 
   worker:
     build:
