@@ -30,12 +30,12 @@
 **CRITICAL**: No user story work should start until this phase is complete.
 
 - [ ] T004 Add unit tests for default campaign id, `Profile` to campaign role mapping, and null-campaign handling in `D:\Projets\dev\AI-Kaeyris\tests\core\test_campaign_context.py`
-- [ ] T005 [P] Add ORM relationship tests for `Campaign`, `CampaignMember`, `User.default_campaign_id`, `Session.campaign_id`, and `Pj.campaign_id` in `D:\Projets\dev\AI-Kaeyris\tests\services\jdr\test_campaign_memberships.py`
+- [ ] T005 [P] Add ORM relationship tests for `Campaign`, `CampaignMember`, same-campaign `character_id`, `User.default_campaign_id`, `Session.campaign_id`, and `Pj.campaign_id` in `D:\Projets\dev\AI-Kaeyris\tests\services\jdr\test_campaign_memberships.py`
 - [ ] T006 Add `CampaignRole`, `Campaign`, `CampaignMember`, `Session.campaign_id`, and `Pj.campaign_id` ORM mappings in `D:\Projets\dev\AI-Kaeyris\app\services\jdr\db\models.py`
 - [ ] T007 Add `default_campaign_id` and optional relationship metadata to `User` in `D:\Projets\dev\AI-Kaeyris\app\core\models.py`
 - [ ] T008 Create Alembic migration `0006_campaign_auth_context.py` for campaign tables, membership table, `core_users.default_campaign_id`, `jdr_sessions.campaign_id`, and `jdr_pjs.campaign_id` in `D:\Projets\dev\AI-Kaeyris\migrations\versions\0006_campaign_auth_context.py`
-- [ ] T009 Implement `CampaignRepository` methods for create/get default campaign, membership upsert, membership lookup, and active-campaign lookup in `D:\Projets\dev\AI-Kaeyris\app\services\jdr\db\repositories.py`
-- [ ] T010 Implement active campaign dataclasses, `ensure_default_campaign`, `ensure_user_membership`, and `resolve_active_campaign_for_user` in `D:\Projets\dev\AI-Kaeyris\app\services\jdr\campaigns.py`
+- [ ] T009 Implement `CampaignRepository` methods for create/get default campaign, membership upsert with same-campaign `character_id` validation, membership lookup, and active-campaign lookup in `D:\Projets\dev\AI-Kaeyris\app\services\jdr\db\repositories.py`
+- [ ] T010 Implement active campaign dataclasses, deterministic default campaign owner selection, `ensure_default_campaign`, `ensure_user_membership`, and `resolve_active_campaign_for_user` in `D:\Projets\dev\AI-Kaeyris\app\services\jdr\campaigns.py`
 - [ ] T011 Add a web-session-only auth dependency returning the current `User` for `/auth/me` in `D:\Projets\dev\AI-Kaeyris\app\core\auth.py`
 - [ ] T012 Run foundational focused tests for campaign primitives in `D:\Projets\dev\AI-Kaeyris\tests\core\test_campaign_context.py` and `D:\Projets\dev\AI-Kaeyris\tests\services\jdr\test_campaign_memberships.py`
 
@@ -76,11 +76,11 @@
 ### Tests for User Story 2
 
 - [ ] T021 [P] [US2] Add migration/backfill tests for existing `gm` and `user` rows in `D:\Projets\dev\AI-Kaeyris\tests\services\jdr\test_campaign_memberships.py`
-- [ ] T022 [P] [US2] Add startup/default-campaign idempotency tests proving repeated runs do not duplicate campaign or membership rows in `D:\Projets\dev\AI-Kaeyris\tests\core\test_campaign_context.py`
+- [ ] T022 [P] [US2] Add startup/default-campaign idempotency and deterministic owner-selection tests proving repeated runs do not duplicate campaign or membership rows in `D:\Projets\dev\AI-Kaeyris\tests\core\test_campaign_context.py`
 
 ### Implementation for User Story 2
 
-- [ ] T023 [US2] Extend `0006_campaign_auth_context.py` to backfill the V1 default campaign, memberships, `core_users.default_campaign_id`, `jdr_sessions.campaign_id`, and `jdr_pjs.campaign_id` in `D:\Projets\dev\AI-Kaeyris\migrations\versions\0006_campaign_auth_context.py`
+- [ ] T023 [US2] Extend `0006_campaign_auth_context.py` to backfill the V1 default campaign with deterministic owner selection, memberships, `core_users.default_campaign_id`, `jdr_sessions.campaign_id`, and `jdr_pjs.campaign_id` in `D:\Projets\dev\AI-Kaeyris\migrations\versions\0006_campaign_auth_context.py`
 - [ ] T024 [US2] Call `ensure_default_campaign` during application startup after API-key bootstrap in `D:\Projets\dev\AI-Kaeyris\app\main.py`
 - [ ] T025 [US2] Add startup logging for default campaign creation/backfill counts in `D:\Projets\dev\AI-Kaeyris\app\main.py`
 - [ ] T026 [US2] Run membership migration/idempotency tests in `D:\Projets\dev\AI-Kaeyris\tests\services\jdr\test_campaign_memberships.py` and `D:\Projets\dev\AI-Kaeyris\tests\core\test_campaign_context.py`
@@ -98,9 +98,9 @@
 ### Tests for User Story 3
 
 - [ ] T027 [US3] Add session creation/list isolation tests with two campaigns in `D:\Projets\dev\AI-Kaeyris\tests\services\jdr\test_campaign_scoping.py`
-- [ ] T028 [US3] Add single-session child route isolation tests for audio, chunks, mapping, players, transcription, and artifacts in `D:\Projets\dev\AI-Kaeyris\tests\services\jdr\test_campaign_scoping.py`
+- [ ] T028 [US3] Add single-session child route isolation tests for audio, chunks, mapping, players, transcription, artifacts, player-facing `/me/*` routes, and `GET /services/jdr/jobs/{job_id}` in `D:\Projets\dev\AI-Kaeyris\tests\services\jdr\test_campaign_scoping.py`
 - [ ] T029 [US3] Add PJ list/create and PJ validation isolation tests for mappings, session players, player enrolment, and POVs in `D:\Projets\dev\AI-Kaeyris\tests\services\jdr\test_campaign_scoping.py`
-- [ ] T030 [US3] Add negative tests proving `campaign_id` in create/update request bodies is ignored or rejected according to existing validation policy in `D:\Projets\dev\AI-Kaeyris\tests\services\jdr\test_campaign_scoping.py`
+- [ ] T030 [US3] Add negative tests proving explicit `campaign_id` in create/update request bodies is rejected with validation error semantics in `D:\Projets\dev\AI-Kaeyris\tests\services\jdr\test_campaign_scoping.py`
 
 ### Implementation for User Story 3
 
@@ -108,7 +108,7 @@
 - [ ] T032 [US3] Update `PjRepository.create`, `list_for_gm`, and `find_by_id_owned_by` to accept and filter by active `campaign_id` in `D:\Projets\dev\AI-Kaeyris\app\services\jdr\db\repositories.py`
 - [ ] T033 [US3] Update JDR session and PJ orchestration functions to accept active campaign context in `D:\Projets\dev\AI-Kaeyris\app\services\jdr\logic.py`
 - [ ] T034 [US3] Resolve active campaign in session and PJ routes and pass `campaign_id` into logic calls in `D:\Projets\dev\AI-Kaeyris\app\services\jdr\router.py`
-- [ ] T035 [US3] Enforce campaign-scoped single-session lookup for session child endpoints in `D:\Projets\dev\AI-Kaeyris\app\services\jdr\router.py`
+- [ ] T035 [US3] Enforce campaign-scoped single-session lookup for session child endpoints, player-facing `/me/*` routes, and `GET /services/jdr/jobs/{job_id}` in `D:\Projets\dev\AI-Kaeyris\app\services\jdr\router.py`
 - [ ] T036 [US3] Enforce campaign-scoped session lookup in audio upload and purge routes in `D:\Projets\dev\AI-Kaeyris\app\services\jdr\batch\router.py`
 - [ ] T037 [US3] Preserve existing API-key compatibility by resolving API-key requests to the V1 default campaign when no web user campaign is available in `D:\Projets\dev\AI-Kaeyris\app\services\jdr\campaigns.py`
 - [ ] T038 [US3] Run focused campaign scoping tests in `D:\Projets\dev\AI-Kaeyris\tests\services\jdr\test_campaign_scoping.py`
@@ -150,7 +150,7 @@
 - [ ] T049 [P] Add ADR 0012 documenting campaign as the JDR multi-tenancy boundary and why campaign CRUD is out of scope in `D:\Projets\dev\AI-Kaeyris\docs\adr\0012-campaign-auth-context.md`
 - [ ] T050 [P] Add journal entry for BD-4 campaign context learnings in `D:\Projets\dev\AI-Kaeyris\docs\journal.md`
 - [ ] T051 [P] Update README setup/runtime notes for `/services/jdr/auth/me` and default campaign seed behavior in `D:\Projets\dev\AI-Kaeyris\README.md`
-- [ ] T052 Generate or refresh backend OpenAPI output if the project stores a generated artifact in `D:\Projets\dev\AI-Kaeyris\docs\context\api\openapi.json`
+- [ ] T052 Verify runtime `/openapi.json` includes `/services/jdr/auth/me`; generate or refresh `D:\Projets\dev\AI-Kaeyris\docs\context\api\openapi.json` only if the backend repo stores that artifact
 - [ ] T053 Run migration smoke test using `alembic upgrade head`, `alembic downgrade -1`, and `alembic upgrade head` from `D:\Projets\dev\AI-Kaeyris\alembic.ini`
 - [ ] T054 Run quickstart validation from `D:\Projets\dev\AI-Kaeyris\specs\004-campaign-auth-context\quickstart.md`
 - [ ] T055 Run full quality gate with `ruff check .` from `D:\Projets\dev\AI-Kaeyris\pyproject.toml`
@@ -203,9 +203,9 @@
 
 ```text
 Task: "T027 Add session creation/list isolation tests in tests/services/jdr/test_campaign_scoping.py"
-Task: "T028 Add single-session child route isolation tests in tests/services/jdr/test_campaign_scoping.py"
+Task: "T028 Add session child, /me/*, and jobs isolation tests in tests/services/jdr/test_campaign_scoping.py"
 Task: "T029 Add PJ validation isolation tests in tests/services/jdr/test_campaign_scoping.py"
-Task: "T030 Add negative campaign_id body tests in tests/services/jdr/test_campaign_scoping.py"
+Task: "T030 Add rejected campaign_id body tests in tests/services/jdr/test_campaign_scoping.py"
 ```
 
 ## Implementation Strategy

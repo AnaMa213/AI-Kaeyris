@@ -28,14 +28,15 @@ JDR play space and multi-tenancy boundary.
 |---|---|---|---|
 | `id` | UUID | yes | Primary key. V1 seed uses fixed id `00000000-0000-0000-0000-000000000001`. |
 | `name` | string/text | yes | Display name, e.g. `Campagne par defaut`. |
-| `owner_id` | UUID | yes | FK to `core_users.id`; V1 owner is the first/primary GM user. |
+| `owner_id` | UUID | yes | FK to `core_users.id`; V1 owner is selected deterministically from active GM users. |
 | `created_at` | datetime tz | yes | Creation timestamp. |
 
 ### Constraints
 
 - `name` must not be blank.
 - `owner_id` must reference an existing user.
-- V1 seed creates exactly one default campaign for normal local usage.
+- V1 seed creates exactly one default campaign for normal local usage once at least one user exists.
+- V1 default campaign owner selection is deterministic: first active GM ordered by `created_at ASC, id ASC`. If no active GM exists, fallback to first active user by the same ordering; if no user exists, startup does not create the campaign yet.
 
 ## 3. `campaign_members`
 
@@ -54,7 +55,7 @@ Membership and role of a user inside one campaign.
 - Primary key: `(user_id, campaign_id)`.
 - `role` accepted values: `mj`, `player`.
 - A user can have multiple campaign memberships in the data model, but V1 creates one membership per user.
-- `character_id` may be null. If non-null, it must reference a PJ/character in the same campaign.
+- `character_id` may be null. If non-null, it must reference a PJ/character in the same campaign; cross-campaign character assignment is invalid.
 
 ## 4. `core_users` additions
 
@@ -127,7 +128,7 @@ else:
 
 1. Create campaign and membership tables.
 2. Add nullable `core_users.default_campaign_id`.
-3. Create the V1 default campaign if users exist or seed requires it.
+3. Create the V1 default campaign if users exist or seed requires it, using the deterministic owner rule above.
 4. Insert one membership per existing user:
    - `profile = gm` -> `role = mj`
    - `profile = user` -> `role = player`

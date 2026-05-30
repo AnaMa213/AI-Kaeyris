@@ -80,7 +80,7 @@ Un MJ veut continuer a creer, lister, modifier et desactiver les utilisateurs vi
 - Un utilisateur authentifie peut exister sans campagne accessible ; il reste authentifie, mais ne peut pas executer d'operation JDR.
 - Plusieurs memberships peuvent exister pour un meme utilisateur, mais la V1 ne cree automatiquement qu'un seul membership par utilisateur.
 - Le champ historique `profile` reste disponible en V1 pour compatibilite et sert a deriver le role de campagne lors des creations et migrations.
-- Les requetes front ne doivent pas pouvoir choisir arbitrairement une campagne via body ou query param.
+- Les requetes front ne doivent pas pouvoir choisir arbitrairement une campagne via body ou query param ; tout `campaign_id` explicite dans un body de creation/modification JDR est rejete.
 - Une deuxieme campagne creee manuellement en base pour les tests ne doit jamais apparaitre dans les resultats d'un utilisateur non membre.
 - La suppression logique d'un utilisateur ne doit pas supprimer les traces de membership.
 - Le front ne dispose pas d'UI de gestion de campagnes en V1 ; aucune route publique de creation ou modification de campagne n'est requise.
@@ -105,7 +105,7 @@ Un MJ veut continuer a creer, lister, modifier et desactiver les utilisateurs vi
 - **FR-014**: Soft-deleted users MUST keep their campaign membership records for auditability.
 - **FR-015**: JDR data reads MUST be scoped to the active campaign derived from the authenticated session.
 - **FR-016**: JDR data writes MUST assign the active campaign derived from the authenticated session.
-- **FR-017**: JDR create/update request bodies MUST NOT require the front to provide `campaign_id`.
+- **FR-017**: JDR create/update request bodies MUST NOT require or accept `campaign_id`; if a client sends it explicitly, the request MUST be rejected.
 - **FR-018**: Existing JDR user management API contracts MUST remain stable at the request/response level unless explicitly documented for `/auth/me`.
 - **FR-019**: The system MUST NOT expose V1 campaign management endpoints for creating, listing, switching, or editing campaigns.
 - **FR-020**: The generated backend API documentation MUST include the new `/services/jdr/auth/me` contract so the frontend can regenerate client types.

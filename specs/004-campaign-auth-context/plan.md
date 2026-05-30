@@ -17,7 +17,7 @@ Technical approach: add minimal campaign/membership persistence and active-campa
 **Testing**: pytest + pytest-asyncio + httpx ASGITransport; existing in-memory SQLite fixtures create all ORM tables
 **Target Platform**: Local development on Windows/Linux; Raspberry Pi 5 deployment later via Docker Compose and Caddy
 **Project Type**: Web-service API in a modular monolith
-**Performance Goals**: `/auth/me` and campaign-context resolution complete within normal interactive web latency (< 200 ms local p95 excluding cold DB setup); list endpoints avoid cross-campaign scans where `campaign_id` is available
+**Performance Goals**: `/auth/me` and campaign-context resolution stay within normal interactive web latency; list endpoints avoid cross-campaign scans where `campaign_id` is available
 **Constraints**: No campaign management UI/API in V1; no `campaign_id` in frontend create bodies; preserve existing user-management contracts; preserve Bearer API-key compatibility for existing JDR workflows; no new framework or service split
 **Scale/Scope**: Personal sandbox scale: one normal V1 campaign, tens of users/sessions; design allows multiple campaigns in DB for isolation tests and later Hub work
 

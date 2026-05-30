@@ -73,7 +73,7 @@ Additional BD-4 effects:
 - Derives membership role:
   - `profile = "gm"` -> `role = "mj"`
   - `profile = "user"` -> `role = "player"`
-- Does not accept `campaign_id` in the request body.
+- Does not accept `campaign_id` in the request body. If present, validation rejects the request.
 
 ### `GET /services/jdr/users`
 
@@ -98,7 +98,7 @@ Additional BD-4 behavior:
 
 ## 3. JDR data scoping behavior
 
-All JDR data endpoints derive the campaign from the authenticated context. Frontend request bodies must not send `campaign_id`.
+All JDR data endpoints derive the campaign from the authenticated context. Frontend request bodies must not send `campaign_id`; explicit `campaign_id` fields in create/update bodies are rejected with validation error semantics.
 
 ### Session endpoints
 
@@ -109,12 +109,15 @@ Affected endpoint families:
 - `GET /services/jdr/sessions/{session_id}`
 - `PATCH /services/jdr/sessions/{session_id}`
 - all session child endpoints such as audio, chunks, mapping, players, transcription and artifacts
+- player-facing session endpoints under `/services/jdr/me/*`
+- `GET /services/jdr/jobs/{job_id}`
 
 Contract additions:
 
 - Creation assigns `campaign_id = active_campaign.id` server-side.
 - Lists return only rows for `active_campaign.id`.
 - Single-resource operations require the resource to belong to `active_campaign.id`; otherwise they return the existing not-found/forbidden convention for that endpoint.
+- Player-facing `/me/*` endpoints and job status reads inherit campaign scope from their session/PJ and must not reveal foreign-campaign data.
 
 ### PJ/character endpoints
 
@@ -142,4 +145,4 @@ These endpoints must not be added in BD-4:
 
 ## 5. OpenAPI requirement
 
-The backend OpenAPI output must include `GET /services/jdr/auth/me` and its response schema so the frontend can regenerate client types from the backend contract.
+The backend runtime OpenAPI output at `/openapi.json` must include `GET /services/jdr/auth/me` and its response schema so the frontend can regenerate client types from the backend contract. A generated file such as `docs/context/api/openapi.json` is refreshed only if the backend repo already versions that artifact.
