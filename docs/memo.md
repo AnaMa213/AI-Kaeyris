@@ -273,7 +273,32 @@ Puis dans le nouveau dossier :
 
 ---
 
-## Authentification (Jalon 2 — ADR 0003)
+## Authentification web (feature 003)
+
+| Endpoint | Rôle |
+|---|---|
+| `GET /services/jdr/auth/setup/status` | Indique si la base vide exige la création du premier GM |
+| `POST /services/jdr/auth/setup` | Crée le premier GM (`username` + `password`) et pose `session` |
+| `POST /services/jdr/auth/login` | Login web `username` + `profile` + `password`, pose un cookie HTTP-only |
+| `POST /services/jdr/auth/logout` | Révoque la session courante et expire le cookie |
+| `POST/GET/PATCH/DELETE /services/jdr/users` | Gestion GM des comptes applicatifs |
+
+| Var env | Default | Rôle |
+|---|---|---|
+| `CORS_ALLOWED_ORIGINS` | vide | Liste explicite des origins front autorisées avec cookies |
+| `SESSION_COOKIE_NAME` | `session` | Nom du cookie HTTP-only |
+| `SESSION_COOKIE_SECURE` | `false` | `true` derrière HTTPS |
+| `SESSION_COOKIE_SAMESITE` | `lax` | Protection CSRF de base côté navigateur |
+| `WEB_SESSION_TTL_SECONDS` | `28800` | Durée de vie serveur d'une session web |
+
+```powershell
+curl http://localhost:8000/services/jdr/auth/setup/status
+curl -X POST http://localhost:8000/services/jdr/auth/setup `
+  -H "Content-Type: application/json" `
+  -d '{"username":"admin","password":"mot-de-passe-choisi"}'
+```
+
+## Authentification API key (Jalon 2 — ADR 0003)
 
 ```powershell
 # 1. Générer une clé API (et son hash Argon2id)

@@ -131,7 +131,16 @@ app/
 
 ## Authentification
 
-Toutes les routes hors `/health`, `/docs`, `/redoc`, `/openapi.json` exigent un header `Authorization: Bearer <api_key>` (cf. [ADR 0003](./docs/adr/0003-authentication-strategy.md)).
+Les routes protégées acceptent deux modes d'authentification :
+
+- un header `Authorization: Bearer <api_key>` pour les usages machine existants (cf. [ADR 0003](./docs/adr/0003-authentication-strategy.md)) ;
+- un cookie HTTP-only `session` posé après login web `username + password`.
+
+Sur une base vide, aucun compte par défaut n'existe. Le front doit appeler `GET /services/jdr/auth/setup/status`, afficher un écran de création du premier GM si `required=true`, puis appeler `POST /services/jdr/auth/setup` avec le `username` et le mot de passe choisis. Dès qu'un utilisateur existe, l'endpoint de setup est fermé.
+
+Le login front utilise `POST /services/jdr/auth/login` et reçoit un cookie `session` HTTP-only en cas de succès. Les requêtes navigateur doivent envoyer les cookies avec `credentials: "include"`.
+
+Les clés API restent disponibles pour l'automatisation :
 
 ```powershell
 # Générer une clé API

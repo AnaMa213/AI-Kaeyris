@@ -16,6 +16,7 @@ from alembic import context
 
 from app.core.config import settings
 from app.core.db import Base
+from app.core import models as _core_models  # noqa: F401
 
 # Import all model modules so their tables are registered on Base.metadata
 # *before* Alembic inspects it. Imports are below the Base import to keep

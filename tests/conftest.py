@@ -29,6 +29,7 @@ async def db_engine() -> AsyncIterator[AsyncEngine]:
     """
     # Importing the models module registers every table on Base.metadata
     # before we call create_all.
+    from app.core import models as core_models  # noqa: F401
     from app.services.jdr.db import models  # noqa: F401
 
     engine = create_async_engine(

@@ -107,6 +107,7 @@ Pour chaque brique, se poser :
 **Sécurité — questions à se poser**
 - OWASP API Top 10 (https://owasp.org/API-Security/) couvert ?
 - Secrets via env vars uniquement, jamais en dur ?
+- Pas de mot de passe par défaut connu ou hardcodé ? (OWASP : https://owasp.org/www-community/vulnerabilities/Use_of_hard-coded_password)
 - Validation systématique des inputs (Pydantic, zod, joi) ?
 - Auth + Authz séparées et testées ?
 - Dépendances scannées (Dependabot, Snyk, pip-audit) ?

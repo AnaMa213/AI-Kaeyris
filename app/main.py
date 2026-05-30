@@ -5,6 +5,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, status
 from fastapi.responses import JSONResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +21,7 @@ from app.core.redis_client import get_redis
 from app.core.request_context import RequestContextMiddleware
 from app.core.security_headers import SecurityHeadersMiddleware
 from app.core.tracing import setup_tracing
+from app.services.jdr.auth_router import router as jdr_auth_router
 from app.services.jdr.router import router as jdr_router
 
 # Configure structured logging as early as possible — before any logger is
@@ -73,7 +75,16 @@ app.add_middleware(SecurityHeadersMiddleware)
 # pipeline including auth/rate-limit etc.).
 app.add_middleware(MetricsMiddleware)
 app.add_middleware(RequestContextMiddleware)
+if settings.cors_allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 register_exception_handlers(app)
+app.include_router(jdr_auth_router)
 app.include_router(jdr_router)
 
 # OpenTelemetry tracing setup — no-op unless OTEL_ENABLED=true.
