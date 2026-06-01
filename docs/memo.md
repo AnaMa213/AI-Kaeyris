@@ -114,6 +114,30 @@ alembic history                     # historique des migrations
 | `POST /sessions/{id}/artifacts/summary` | Déclenche le map-reduce LLM (non_diarised) |
 | `GET  /sessions/{id}/artifacts/summary[.md]` | Lit le résumé global (non_diarised) |
 
+### Campagnes JDR BD-6
+
+| Endpoint | Action |
+|---|---|
+| `GET /services/jdr/campaigns` | Liste les campagnes du user connecté avec rôle, compte sessions, dernière session et création |
+| `POST /services/jdr/campaigns` | Crée une campagne et rattache le créateur en `gm` |
+| `GET /services/jdr/campaigns/{campaign_id}` | Lit une campagne si le user en est membre |
+| `PATCH /services/jdr/campaigns/{campaign_id}` | Modifie `name` / `description` si le user est `gm` de la campagne |
+| `DELETE /services/jdr/campaigns/{campaign_id}` | Supprime seulement une campagne vide ; `409` si elle contient des sessions |
+| `POST /services/jdr/sessions` | Exige `campaign_id` dans le body |
+| `GET /services/jdr/sessions?campaign_id=<uuid>` | Filtre les sessions d'une campagne après vérification de membership |
+
+```powershell
+curl -X POST http://localhost:8000/services/jdr/campaigns `
+  -H "Content-Type: application/json" `
+  -H "Cookie: session=<cookie_session>" `
+  -d '{"name":"Les Royaumes Brises","description":"Campagne principale"}'
+
+curl -X POST http://localhost:8000/services/jdr/sessions `
+  -H "Content-Type: application/json" `
+  -H "Cookie: session=<cookie_session>" `
+  -d '{"title":"Session 13","recorded_at":"2026-05-31T18:00:00Z","campaign_id":"<campaign_uuid>"}'
+```
+
 ### Observabilité (Jalon 6) — variables et endpoints
 
 | Var env | Default | Rôle |

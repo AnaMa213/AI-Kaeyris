@@ -12,8 +12,9 @@ from app.core.db import get_db_session
 from app.core.errors import register_exception_handlers
 from app.core.redis_client import get_redis
 from app.services.jdr.auth_router import router as auth_router
-from app.services.jdr.db.models import ApiKey, ApiKeyStatus, Role
+from app.services.jdr.db.models import ApiKey, ApiKeyStatus, Campaign, Role
 from app.services.jdr.router import router as jdr_router
+from app.services.jdr.schemas import CampaignOut
 
 _TZ_SUFFIX = re.compile(r"(Z|[+-]\d{2}:\d{2})$")
 
@@ -41,6 +42,14 @@ async def _seed_gm(db_session, plain_token: str = "gm-datetime-token") -> ApiKey
     return gm
 
 
+async def _seed_campaign(db_session, gm: ApiKey) -> Campaign:
+    campaign = Campaign(name="Datetime campaign", owner_user_id=gm.id)
+    db_session.add(campaign)
+    await db_session.commit()
+    await db_session.refresh(campaign)
+    return campaign
+
+
 def _parse_datetime(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
@@ -66,12 +75,28 @@ def assert_datetime_fields_have_explicit_timezone(payload: Any) -> None:
             assert_datetime_fields_have_explicit_timezone(item)
 
 
+def test_campaign_out_serializes_datetime_fields_with_timezone_suffix():
+    payload = CampaignOut(
+        id="11111111-1111-1111-1111-111111111111",
+        name="A",
+        description=None,
+        role="gm",
+        session_count=1,
+        last_session_at=datetime(2026, 5, 29, 18, 30),
+        created_at=datetime(2026, 1, 12, 18, 0),
+    ).model_dump(mode="json")
+
+    assert_explicit_timezone(payload["last_session_at"])
+    assert_explicit_timezone(payload["created_at"])
+
+
 async def test_session_create_and_detail_emit_explicit_timezone_suffixes(
     db_session,
     make_db_session_dep,
 ):
     plain = "gm-datetime-session"
-    await _seed_gm(db_session, plain)
+    gm = await _seed_gm(db_session, plain)
+    campaign = await _seed_campaign(db_session, gm)
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
     submitted = datetime(2026, 5, 31, 18, 0, tzinfo=UTC)
@@ -83,6 +108,7 @@ async def test_session_create_and_detail_emit_explicit_timezone_suffixes(
                 "title": "DIAGNOSTIC-TZ",
                 "recorded_at": "2026-05-31T18:00:00.000Z",
                 "transcription_mode": "non_diarised",
+                "campaign_id": str(campaign.id),
             },
             headers={"Authorization": f"Bearer {plain}"},
         )
@@ -105,7 +131,8 @@ async def test_session_list_emits_explicit_timezone_suffixes(
     make_db_session_dep,
 ):
     plain = "gm-datetime-list"
-    await _seed_gm(db_session, plain)
+    gm = await _seed_gm(db_session, plain)
+    campaign = await _seed_campaign(db_session, gm)
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
 
@@ -113,7 +140,11 @@ async def test_session_list_emits_explicit_timezone_suffixes(
         for title in ("TZ List A", "TZ List B"):
             response = await client.post(
                 "/services/jdr/sessions",
-                json={"title": title, "recorded_at": "2026-05-31T18:00:00Z"},
+                json={
+                    "title": title,
+                    "recorded_at": "2026-05-31T18:00:00Z",
+                    "campaign_id": str(campaign.id),
+                },
                 headers={"Authorization": f"Bearer {plain}"},
             )
             assert response.status_code == 201
@@ -184,7 +215,8 @@ async def test_session_create_accepts_datetime_input_variants(
     make_db_session_dep,
 ):
     plain = "gm-datetime-inputs"
-    await _seed_gm(db_session, plain)
+    gm = await _seed_gm(db_session, plain)
+    campaign = await _seed_campaign(db_session, gm)
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
     cases = [
@@ -201,7 +233,11 @@ async def test_session_create_accepts_datetime_input_variants(
         for label, recorded_at, expected in cases:
             response = await client.post(
                 "/services/jdr/sessions",
-                json={"title": f"TZ input {label}", "recorded_at": recorded_at},
+                json={
+                    "title": f"TZ input {label}",
+                    "recorded_at": recorded_at,
+                    "campaign_id": str(campaign.id),
+                },
                 headers={"Authorization": f"Bearer {plain}"},
             )
 

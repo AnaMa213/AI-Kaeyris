@@ -34,6 +34,7 @@ from app.services.jdr.db.models import (
     ApiKeyStatus,
     AudioSource,
     Chunk,
+    CampaignRole,
     Pj,
     Role,
     Session,
@@ -43,7 +44,10 @@ from app.services.jdr.db.models import (
 )
 from app.services.jdr.db.repositories import (
     ArtifactRepository,
+    CampaignRepository,
+    CampaignSummary,
     ChunkRepository,
+    DuplicateCampaignNameError,
     DuplicatePjNameError,
     MappingRepository,
     PjRepository,
@@ -124,6 +128,129 @@ class NoAudioToPurgeError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# Campaigns (BD-6)
+# ---------------------------------------------------------------------------
+
+
+class CampaignNotFoundError(Exception):
+    """The campaign does not exist."""
+
+
+class CampaignForbiddenError(Exception):
+    """The current user is not allowed to access the campaign."""
+
+
+class DuplicateCampaignError(Exception):
+    """The current user already has a campaign with this name."""
+
+
+class CampaignHasSessionsError(Exception):
+    """The campaign cannot be deleted because it still has sessions."""
+
+
+async def list_campaigns(db: AsyncSession, *, user_id: UUID) -> list[CampaignSummary]:
+    return await CampaignRepository(db).list_for_user(user_id)
+
+
+async def get_campaign(
+    db: AsyncSession,
+    *,
+    campaign_id: UUID,
+    user_id: UUID,
+) -> CampaignSummary:
+    repo = CampaignRepository(db)
+    campaign = await repo.get(campaign_id)
+    if campaign is None:
+        raise CampaignNotFoundError(f"Campaign {campaign_id} not found.")
+    summary = await repo.get_summary_for_user(user_id=user_id, campaign_id=campaign_id)
+    if summary is None:
+        raise CampaignForbiddenError("User is not a member of this campaign.")
+    return summary
+
+
+async def create_campaign(
+    db: AsyncSession,
+    *,
+    owner_user_id: UUID,
+    name: str,
+    description: str | None = None,
+) -> CampaignSummary:
+    repo = CampaignRepository(db)
+    try:
+        campaign = await repo.create(
+            name=name,
+            description=description,
+            owner_user_id=owner_user_id,
+        )
+    except DuplicateCampaignNameError as exc:
+        raise DuplicateCampaignError(str(exc)) from exc
+    await repo.add_membership(
+        user_id=owner_user_id,
+        campaign_id=campaign.id,
+        role=CampaignRole.GM,
+    )
+    await db.commit()
+    summary = await repo.get_summary_for_user(
+        user_id=owner_user_id,
+        campaign_id=campaign.id,
+    )
+    if summary is None:
+        raise CampaignForbiddenError("Created campaign membership is missing.")
+    return summary
+
+
+async def update_campaign(
+    db: AsyncSession,
+    *,
+    campaign_id: UUID,
+    user_id: UUID,
+    name: str | None = None,
+    description: str | None = None,
+    set_description: bool = False,
+) -> CampaignSummary:
+    repo = CampaignRepository(db)
+    campaign = await repo.get(campaign_id)
+    if campaign is None:
+        raise CampaignNotFoundError(f"Campaign {campaign_id} not found.")
+    membership = await repo.get_membership(user_id=user_id, campaign_id=campaign_id)
+    if membership is None or membership.role is not CampaignRole.GM:
+        raise CampaignForbiddenError("User is not GM of this campaign.")
+    try:
+        await repo.update_campaign(
+            campaign=campaign,
+            name=name,
+            description=description,
+            set_description=set_description,
+        )
+    except DuplicateCampaignNameError as exc:
+        raise DuplicateCampaignError(str(exc)) from exc
+    await db.commit()
+    summary = await repo.get_summary_for_user(user_id=user_id, campaign_id=campaign_id)
+    if summary is None:
+        raise CampaignForbiddenError("Updated campaign membership is missing.")
+    return summary
+
+
+async def delete_campaign(
+    db: AsyncSession,
+    *,
+    campaign_id: UUID,
+    user_id: UUID,
+) -> None:
+    repo = CampaignRepository(db)
+    campaign = await repo.get(campaign_id)
+    if campaign is None:
+        raise CampaignNotFoundError(f"Campaign {campaign_id} not found.")
+    membership = await repo.get_membership(user_id=user_id, campaign_id=campaign_id)
+    if membership is None or membership.role is not CampaignRole.GM:
+        raise CampaignForbiddenError("User is not GM of this campaign.")
+    if await repo.count_sessions(campaign_id) > 0:
+        raise CampaignHasSessionsError("Cannot delete a campaign with sessions.")
+    await repo.delete_campaign(campaign)
+    await db.commit()
+
+
+# ---------------------------------------------------------------------------
 # Sessions (CRUD already exposed at jalon 5 sub-lot 3a)
 # ---------------------------------------------------------------------------
 
@@ -184,8 +311,6 @@ async def set_session_players(
         stmt = select(Pj.id).where(
             Pj.id.in_(unique_ids), Pj.owner_gm_key_id == gm_key_id
         )
-        if campaign_id is not None:
-            stmt = stmt.where(Pj.campaign_id == campaign_id)
         found = set((await db.execute(stmt)).scalars().all())
         missing = unique_ids - found
         if missing:
@@ -439,8 +564,7 @@ async def revoke_player(
             Pj.owner_gm_key_id == gm_key_id,
         )
     )
-    if campaign_id is not None:
-        stmt = stmt.where(Pj.campaign_id == campaign_id)
+    _ = campaign_id
     row = await db.scalar(stmt)
     if row is None:
         return False
@@ -496,9 +620,8 @@ async def get_player_pj(
     db: AsyncSession, *, pj_id: UUID, campaign_id: UUID | None = None
 ) -> Pj | None:
     """Load the PJ row referenced by a player key (for GET /me)."""
+    _ = campaign_id
     stmt = select(Pj).where(Pj.id == pj_id)
-    if campaign_id is not None:
-        stmt = stmt.where(Pj.campaign_id == campaign_id)
     return await db.scalar(stmt)
 
 
@@ -553,8 +676,6 @@ async def set_session_mapping(
             Pj.id.in_(unique_pj_ids),
             Pj.owner_gm_key_id == gm_key_id,
         )
-        if campaign_id is not None:
-            stmt = stmt.where(Pj.campaign_id == campaign_id)
         found_ids = set((await db.execute(stmt)).scalars().all())
         missing = unique_pj_ids - found_ids
         if missing:

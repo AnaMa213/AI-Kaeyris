@@ -1,7 +1,9 @@
 """Campaign membership repository and invariant tests."""
 
-import pytest
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
+
+import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -16,11 +18,12 @@ from app.services.jdr.campaign_context import (
 )
 from app.services.jdr.auth_router import router as auth_router
 from app.services.jdr.db.models import Campaign, CampaignMember, CampaignRole
-from app.services.jdr.db.repositories import CampaignRepository
+from app.services.jdr.db.repositories import CampaignRepository, DuplicateCampaignNameError
 from tests.services.jdr.campaign_fixtures import (
     make_campaign,
     make_membership,
     make_pj,
+    make_session,
     make_user,
     make_web_session,
 )
@@ -45,6 +48,78 @@ async def test_campaign_repository_lists_campaign_members(db_session):
     user_ids = await CampaignRepository(db_session).list_campaign_user_ids(campaign.id)
 
     assert set(user_ids) == {gm.id, player.id}
+
+
+async def test_campaign_repository_lists_user_campaign_summaries(db_session):
+    gm = await make_user(db_session, username="gm", profile=Profile.GM)
+    player = await make_user(db_session, username="player", profile=Profile.USER)
+    campaign_a = await make_campaign(
+        db_session,
+        owner=gm,
+        name="A",
+        description="Visible campaign",
+    )
+    campaign_b = await make_campaign(db_session, owner=gm, name="B")
+    foreign = await make_campaign(db_session, owner=gm, name="Foreign")
+    await make_membership(db_session, user=gm, campaign=campaign_a, role=CampaignRole.GM)
+    await make_membership(
+        db_session,
+        user=gm,
+        campaign=campaign_b,
+        role=CampaignRole.PLAYER,
+    )
+    await make_membership(db_session, user=player, campaign=foreign)
+    latest = datetime(2026, 5, 29, 18, 30, tzinfo=UTC)
+    await make_session(
+        db_session,
+        owner=gm,
+        campaign=campaign_a,
+        title="Old",
+        recorded_at=latest - timedelta(days=1),
+    )
+    await make_session(
+        db_session,
+        owner=gm,
+        campaign=campaign_a,
+        title="Latest",
+        recorded_at=latest,
+    )
+    await db_session.commit()
+
+    summaries = await CampaignRepository(db_session).list_for_user(gm.id)
+
+    assert [summary.campaign.name for summary in summaries] == ["A", "B"]
+    assert summaries[0].campaign.description == "Visible campaign"
+    assert summaries[0].role == CampaignRole.GM
+    assert summaries[0].session_count == 2
+    assert summaries[0].last_session_at == latest
+    assert summaries[1].role == CampaignRole.PLAYER
+    assert summaries[1].session_count == 0
+    assert summaries[1].last_session_at is None
+
+
+async def test_campaign_repository_detects_duplicate_name_for_user(db_session):
+    gm = await make_user(db_session, username="gm", profile=Profile.GM)
+    other = await make_user(db_session, username="other", profile=Profile.GM)
+    await make_campaign(db_session, owner=gm, name="A")
+    await make_campaign(db_session, owner=other, name="A")
+    await db_session.commit()
+
+    repo = CampaignRepository(db_session)
+
+    assert await repo.user_has_campaign_named(user_id=gm.id, name=" A ")
+    assert not await repo.user_has_campaign_named(user_id=gm.id, name="B")
+    assert await repo.user_has_campaign_named(user_id=other.id, name="a")
+
+
+async def test_campaign_repository_create_duplicate_raises(db_session):
+    gm = await make_user(db_session, username="gm", profile=Profile.GM)
+    repo = CampaignRepository(db_session)
+    await repo.create(name="A", owner_user_id=gm.id)
+    await db_session.commit()
+
+    with pytest.raises(DuplicateCampaignNameError):
+        await repo.create(name=" a ", owner_user_id=gm.id)
 
 
 async def test_profile_to_campaign_role_mapping_is_stable():

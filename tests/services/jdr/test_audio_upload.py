@@ -22,11 +22,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
 from app.core.errors import register_exception_handlers
+from app.core.models import Profile, User, UserStatus
 from app.core.redis_client import get_redis
+from app.core.users import hash_password
 from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
     AudioSource,
+    Campaign,
     Role,
     Session,
     SessionState,
@@ -50,8 +53,21 @@ async def seeded_gm(db_session: AsyncSession) -> tuple[str, ApiKey]:
         pj_id=None,
     )
     db_session.add(api_key)
+    await db_session.flush()
+    user = User(
+        username="gm-upload-test",
+        profile=Profile.GM,
+        password_hash=hash_password("gm-password"),
+        status=UserStatus.ACTIVE,
+        api_key_id=api_key.id,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    campaign = Campaign(name="Upload test", owner_user_id=user.id)
+    db_session.add(campaign)
     await db_session.commit()
     await db_session.refresh(api_key)
+    api_key.test_campaign_id = campaign.id
     return plain, api_key
 
 
@@ -68,11 +84,18 @@ def _make_jdr_app(
 
 
 async def _create_session(
-    client: AsyncClient, token: str, title: str = "Upload test"
+    client: AsyncClient,
+    token: str,
+    campaign_id: object,
+    title: str = "Upload test",
 ) -> str:
     resp = await client.post(
         "/services/jdr/sessions",
-        json={"title": title, "recorded_at": "2026-05-04T20:30:00+00:00"},
+        json={
+            "title": title,
+            "recorded_at": "2026-05-04T20:30:00+00:00",
+            "campaign_id": str(campaign_id),
+        },
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 201, resp.text
@@ -90,7 +113,7 @@ async def test_upload_m4a_returns_202_with_job_id(
     monkeypatch.setattr(
         "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
     )
-    plain, _ = seeded_gm
+    plain, api_key = seeded_gm
     redis_client = fakeredis.FakeStrictRedis()
     app = _make_jdr_app(make_db_session_dep, redis_client)
     transport = ASGITransport(app=app)
@@ -98,7 +121,7 @@ async def test_upload_m4a_returns_202_with_job_id(
     fake_audio = b"\x00\x00\x00\x20ftypM4A " + b"\x00" * 2000
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        session_id = await _create_session(client, plain)
+        session_id = await _create_session(client, plain, api_key.test_campaign_id)
         response = await client.post(
             f"/services/jdr/sessions/{session_id}/audio",
             files={"audio": ("demo.m4a", fake_audio, "audio/mp4")},
@@ -121,13 +144,13 @@ async def test_upload_writes_file_to_data_dir(
     monkeypatch.setattr(
         "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
     )
-    plain, _ = seeded_gm
+    plain, api_key = seeded_gm
     app = _make_jdr_app(make_db_session_dep, fakeredis.FakeStrictRedis())
     transport = ASGITransport(app=app)
     fake_audio = b"fake-m4a-content-for-test"
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        session_id = await _create_session(client, plain)
+        session_id = await _create_session(client, plain, api_key.test_campaign_id)
         await client.post(
             f"/services/jdr/sessions/{session_id}/audio",
             files={"audio": ("session.m4a", fake_audio, "audio/mp4")},
@@ -149,12 +172,12 @@ async def test_upload_transitions_session_state(
     monkeypatch.setattr(
         "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
     )
-    plain, _ = seeded_gm
+    plain, api_key = seeded_gm
     app = _make_jdr_app(make_db_session_dep, fakeredis.FakeStrictRedis())
     transport = ASGITransport(app=app)
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        session_id = await _create_session(client, plain)
+        session_id = await _create_session(client, plain, api_key.test_campaign_id)
         await client.post(
             f"/services/jdr/sessions/{session_id}/audio",
             files={"audio": ("a.m4a", b"abc", "audio/mp4")},
@@ -178,13 +201,13 @@ async def test_upload_creates_audio_source_row(
     monkeypatch.setattr(
         "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
     )
-    plain, _ = seeded_gm
+    plain, api_key = seeded_gm
     app = _make_jdr_app(make_db_session_dep, fakeredis.FakeStrictRedis())
     transport = ASGITransport(app=app)
     fake_audio = b"another-audio-blob"
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        session_id = await _create_session(client, plain)
+        session_id = await _create_session(client, plain, api_key.test_campaign_id)
         await client.post(
             f"/services/jdr/sessions/{session_id}/audio",
             files={"audio": ("ok.m4a", fake_audio, "audio/mp4")},
@@ -207,13 +230,13 @@ async def test_upload_enqueues_transcription_job(
     monkeypatch.setattr(
         "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
     )
-    plain, _ = seeded_gm
+    plain, api_key = seeded_gm
     redis_client = fakeredis.FakeStrictRedis()
     app = _make_jdr_app(make_db_session_dep, redis_client)
     transport = ASGITransport(app=app)
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        session_id = await _create_session(client, plain)
+        session_id = await _create_session(client, plain, api_key.test_campaign_id)
         before_keys = set(redis_client.keys("rq:job:*"))
         await client.post(
             f"/services/jdr/sessions/{session_id}/audio",
@@ -237,12 +260,12 @@ async def test_upload_rejects_non_audio_mime(
     monkeypatch.setattr(
         "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
     )
-    plain, _ = seeded_gm
+    plain, api_key = seeded_gm
     app = _make_jdr_app(make_db_session_dep, fakeredis.FakeStrictRedis())
     transport = ASGITransport(app=app)
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        session_id = await _create_session(client, plain)
+        session_id = await _create_session(client, plain, api_key.test_campaign_id)
         response = await client.post(
             f"/services/jdr/sessions/{session_id}/audio",
             files={"audio": ("wrong.txt", b"hello", "text/plain")},
@@ -259,12 +282,12 @@ async def test_upload_double_returns_409(
     monkeypatch.setattr(
         "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
     )
-    plain, _ = seeded_gm
+    plain, api_key = seeded_gm
     app = _make_jdr_app(make_db_session_dep, fakeredis.FakeStrictRedis())
     transport = ASGITransport(app=app)
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        session_id = await _create_session(client, plain)
+        session_id = await _create_session(client, plain, api_key.test_campaign_id)
         first = await client.post(
             f"/services/jdr/sessions/{session_id}/audio",
             files={"audio": ("a.m4a", b"first", "audio/mp4")},

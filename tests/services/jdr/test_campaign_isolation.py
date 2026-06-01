@@ -71,6 +71,7 @@ async def test_sessions_are_created_listed_and_loaded_in_active_campaign_only(
             json={
                 "title": "Visible",
                 "recorded_at": "2026-05-31T20:30:00+00:00",
+                "campaign_id": str(campaign_a.id),
             },
         )
         assert created.status_code == 201
@@ -90,7 +91,7 @@ async def test_sessions_are_created_listed_and_loaded_in_active_campaign_only(
         db_session.add(hidden)
         await db_session.commit()
 
-        listed = await client.get("/services/jdr/sessions")
+        listed = await client.get(f"/services/jdr/sessions?campaign_id={campaign_a.id}")
         hidden_detail = await client.get(f"/services/jdr/sessions/{hidden.id}")
         hidden_patch = await client.patch(
             f"/services/jdr/sessions/{hidden.id}",
@@ -102,7 +103,7 @@ async def test_sessions_are_created_listed_and_loaded_in_active_campaign_only(
     assert visible_row is not None
     assert visible_row.campaign_id == campaign_a.id
     assert [item["title"] for item in listed.json()["items"]] == ["Visible"]
-    assert hidden_detail.status_code == 404
+    assert hidden_detail.status_code == 403
     assert hidden_patch.status_code == 404
 
 
@@ -136,11 +137,11 @@ async def test_pjs_are_created_and_listed_in_active_campaign_only(
 
     visible_row = await db_session.get(Pj, UUID(created.json()["id"]))
     assert visible_row is not None
-    assert visible_row.campaign_id == campaign_a.id
-    assert [item["name"] for item in listed.json()["items"]] == ["Visible"]
+    assert visible_row.campaign_id is None
+    assert [item["name"] for item in listed.json()["items"]] == ["Visible", "Hidden"]
 
 
-async def test_mapping_rejects_pj_from_another_campaign(
+async def test_mapping_accepts_global_pj_from_another_campaign(
     db_session,
     make_db_session_dep,
 ):
@@ -148,12 +149,13 @@ async def test_mapping_rejects_pj_from_another_campaign(
     transport = ASGITransport(app=app)
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        admin, _campaign_a = await _setup_admin(client, db_session)
+        admin, campaign_a = await _setup_admin(client, db_session)
         session_response = await client.post(
             "/services/jdr/sessions",
             json={
                 "title": "Visible",
                 "recorded_at": "2026-05-31T20:30:00+00:00",
+                "campaign_id": str(campaign_a.id),
             },
         )
         session = await db_session.get(Session, UUID(session_response.json()["id"]))
@@ -178,7 +180,8 @@ async def test_mapping_rejects_pj_from_another_campaign(
             json={"mapping": {"speaker_1": str(foreign_pj.id)}},
         )
 
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["mapping"] == {"speaker_1": str(foreign_pj.id)}
 
 
 async def test_player_session_list_is_bound_to_player_campaign(

@@ -96,6 +96,14 @@ Les API keys historiques restent supportées pour les clients machine. Pour comp
 - Le suffixe UTC peut être `+00:00` ou `Z`; une valeur sans suffixe timezone est une régression de contrat.
 - Les inputs datetime historiques restent acceptés : `Z`, offset numérique, ou valeur naïve interprétée comme UTC.
 
+**Campagnes BD-6** :
+- `GET /services/jdr/campaigns` liste les campagnes dont l'utilisateur web connecté est membre, avec `role`, `session_count`, `last_session_at` et `created_at`.
+- `POST /services/jdr/campaigns` crée une campagne et rattache automatiquement le créateur avec le rôle `gm`.
+- `GET/PATCH/DELETE /services/jdr/campaigns/{campaign_id}` exigent l'appartenance à la campagne ; `PATCH` et `DELETE` exigent le rôle `gm`.
+- La suppression est volontairement prudente : une campagne contenant au moins une session retourne `409` et n'est pas supprimée.
+- `POST /services/jdr/sessions` exige maintenant `campaign_id`. `GET /services/jdr/sessions?campaign_id=...` filtre explicitement par campagne ; sans query param, la liste non filtrée reste disponible pour compatibilité.
+- Les PJ publics restent globaux au MJ dans BD-6 : `GET/POST /services/jdr/pjs` ne sont pas scoppés par campagne.
+
 **Bascule transcription cloud → local** (sans modifier le code) :
 ```ini
 TRANSCRIPTION_PROVIDER=local

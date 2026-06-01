@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from redis import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -59,6 +59,7 @@ from app.services.jdr.db.models import (
 )
 from app.services.jdr.db.repositories import (
     ArtifactRepository,
+    CampaignRepository,
     MappingRepository,
     PjRepository,
     TranscriptionRepository,
@@ -71,6 +72,9 @@ from app.services.jdr.markdown import (
     render_transcription_md,
 )
 from app.services.jdr.schemas import (
+    CampaignCreate,
+    CampaignOut,
+    CampaignPatch,
     ChunkListOut,
     ChunkOut,
     Element,
@@ -197,6 +201,30 @@ class PlayerForbiddenError(AppError):
     title = "Forbidden — your PJ is not mapped on this session"
 
 
+class CampaignNotFoundError(AppError):
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "campaign-not-found"
+    title = "Campaign not found"
+
+
+class CampaignForbiddenError(AppError):
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "campaign-forbidden"
+    title = "Forbidden"
+
+
+class DuplicateCampaignConflictError(AppError):
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "duplicate-campaign"
+    title = "Duplicate campaign name"
+
+
+class CampaignDeleteConflictError(AppError):
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "campaign-has-sessions"
+    title = "Campaign has sessions"
+
+
 # --- Feature 002 (non_diarised mode) -----------------------------------------
 
 
@@ -285,6 +313,36 @@ async def _campaign_id_for_auth(
     return scope.campaign_id if scope is not None else None
 
 
+def _web_user_id(auth: AuthenticatedKey) -> UUID:
+    if auth.source != "web_session" or auth.user_id is None:
+        raise CampaignForbiddenError(detail="A web session is required.")
+    return auth.user_id
+
+
+def _campaign_out(summary) -> CampaignOut:
+    return CampaignOut(
+        id=summary.campaign.id,
+        name=summary.campaign.name,
+        description=summary.campaign.description,
+        role=summary.role.value,
+        session_count=summary.session_count,
+        last_session_at=summary.last_session_at,
+        created_at=summary.campaign.created_at,
+    )
+
+
+def _map_campaign_error(exc: Exception) -> AppError:
+    if isinstance(exc, logic.CampaignNotFoundError):
+        return CampaignNotFoundError(detail=str(exc))
+    if isinstance(exc, logic.CampaignForbiddenError):
+        return CampaignForbiddenError(detail=str(exc))
+    if isinstance(exc, logic.DuplicateCampaignError):
+        return DuplicateCampaignConflictError(detail=str(exc))
+    if isinstance(exc, logic.CampaignHasSessionsError):
+        return CampaignDeleteConflictError(detail=str(exc))
+    raise exc
+
+
 # The class above is exported for tests and future error handling; the
 # unused-import linter would otherwise prune the reference.
 _ = UnauthorizedError
@@ -299,6 +357,117 @@ router = APIRouter(
 # Sub-routers — each adds its own routes; auth/rate-limit are inherited.
 router.include_router(batch_router)
 router.include_router(live_router)
+
+
+# ---------------------------------------------------------------------------
+# Campaigns (BD-6)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/campaigns",
+    response_model=Page[CampaignOut],
+    summary="List the current web user's campaigns.",
+)
+async def list_campaigns(
+    auth: Annotated[AuthenticatedKey, Depends(require_api_key)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Page[CampaignOut]:
+    user_id = _web_user_id(auth)
+    summaries = await logic.list_campaigns(db, user_id=user_id)
+    items = [_campaign_out(summary) for summary in summaries]
+    return Page[CampaignOut](items=items, total=len(items), page=1, size=50)
+
+
+@router.post(
+    "/campaigns",
+    response_model=CampaignOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a campaign and make the current user its GM.",
+)
+async def create_campaign(
+    payload: CampaignCreate,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> CampaignOut:
+    user_id = _web_user_id(auth)
+    try:
+        summary = await logic.create_campaign(
+            db,
+            owner_user_id=user_id,
+            name=payload.name,
+            description=payload.description,
+        )
+    except Exception as exc:
+        raise _map_campaign_error(exc) from exc
+    return _campaign_out(summary)
+
+
+@router.get(
+    "/campaigns/{campaign_id}",
+    response_model=CampaignOut,
+    summary="Fetch one of the current web user's campaigns.",
+)
+async def get_campaign(
+    campaign_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_api_key)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> CampaignOut:
+    user_id = _web_user_id(auth)
+    try:
+        summary = await logic.get_campaign(
+            db,
+            campaign_id=campaign_id,
+            user_id=user_id,
+        )
+    except Exception as exc:
+        raise _map_campaign_error(exc) from exc
+    return _campaign_out(summary)
+
+
+@router.patch(
+    "/campaigns/{campaign_id}",
+    response_model=CampaignOut,
+    summary="Partially update a campaign.",
+)
+async def patch_campaign(
+    campaign_id: UUID,
+    payload: CampaignPatch,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> CampaignOut:
+    user_id = _web_user_id(auth)
+    fields_set = payload.model_fields_set
+    try:
+        summary = await logic.update_campaign(
+            db,
+            campaign_id=campaign_id,
+            user_id=user_id,
+            name=payload.name if "name" in fields_set else None,
+            description=payload.description,
+            set_description="description" in fields_set,
+        )
+    except Exception as exc:
+        raise _map_campaign_error(exc) from exc
+    return _campaign_out(summary)
+
+
+@router.delete(
+    "/campaigns/{campaign_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an empty campaign.",
+)
+async def delete_campaign(
+    campaign_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Response:
+    user_id = _web_user_id(auth)
+    try:
+        await logic.delete_campaign(db, campaign_id=campaign_id, user_id=user_id)
+    except Exception as exc:
+        raise _map_campaign_error(exc) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ---------------------------------------------------------------------------
@@ -325,13 +494,21 @@ async def create_session(
     The optional ``campaign_context`` is a steering block for the LLM
     (PNJ récurrents, ton, fil narratif) — see PATCH for updating it.
     """
-    campaign_id = await _campaign_id_for_auth(db, auth)
+    if auth.user_id is not None:
+        membership = await CampaignRepository(db).get_membership(
+            user_id=auth.user_id,
+            campaign_id=payload.campaign_id,
+        )
+        if membership is None or membership.role.value != "gm":
+            raise CampaignForbiddenError(
+                detail="This endpoint requires GM membership for the campaign."
+            )
     row = await logic.create_session(
         db,
         title=payload.title,
         recorded_at=payload.recorded_at,
         gm_key_id=auth.id,
-        campaign_id=campaign_id,
+        campaign_id=payload.campaign_id,
         campaign_context=payload.campaign_context,
         transcription_mode=(
             payload.transcription_mode
@@ -350,8 +527,17 @@ async def create_session(
 async def list_sessions(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    campaign_id: Annotated[UUID | None, Query()] = None,
 ) -> Page[SessionOut]:
-    campaign_id = await _campaign_id_for_auth(db, auth)
+    if campaign_id is not None and auth.user_id is not None:
+        membership = await CampaignRepository(db).get_membership(
+            user_id=auth.user_id,
+            campaign_id=campaign_id,
+        )
+        if membership is None:
+            raise CampaignForbiddenError(
+                detail="User is not a member of this campaign."
+            )
     rows = await logic.list_sessions(
         db, gm_key_id=auth.id, campaign_id=campaign_id
     )
@@ -369,14 +555,39 @@ async def get_session(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> SessionOut:
-    campaign_id = await _campaign_id_for_auth(db, auth)
     row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
+        db,
+        session_id=session_id,
+        gm_key_id=auth.id,
+        campaign_id=None,
     )
     if row is None:
+        existing = await db.get(SessionModel, session_id)
+        if (
+            existing is not None
+            and existing.campaign_id is not None
+            and auth.user_id is not None
+        ):
+            membership = await CampaignRepository(db).get_membership(
+                user_id=auth.user_id,
+                campaign_id=existing.campaign_id,
+            )
+            if membership is None:
+                raise CampaignForbiddenError(
+                    detail="User is not a member of this campaign."
+                )
         raise SessionNotFoundError(
             detail=f"Session {session_id} not found."
         )
+    if row.campaign_id is not None and auth.user_id is not None:
+        membership = await CampaignRepository(db).get_membership(
+            user_id=auth.user_id,
+            campaign_id=row.campaign_id,
+        )
+        if membership is None:
+            raise CampaignForbiddenError(
+                detail="User is not a member of this campaign."
+            )
     return SessionOut.model_validate(row)
 
 
@@ -501,13 +712,12 @@ async def create_pj(
 
     Duplicate name within the same MJ -> 409 ``duplicate-pj``.
     """
-    campaign_id = await _campaign_id_for_auth(db, auth)
     try:
         pj = await logic.create_pj(
             db,
             name=payload.name,
             gm_key_id=auth.id,
-            campaign_id=campaign_id,
+            campaign_id=None,
         )
     except DuplicatePjError as exc:
         raise DuplicatePjConflictError(detail=str(exc)) from exc
@@ -523,8 +733,7 @@ async def list_pjs(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Page[PjOut]:
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    rows = await logic.list_pjs(db, gm_key_id=auth.id, campaign_id=campaign_id)
+    rows = await logic.list_pjs(db, gm_key_id=auth.id, campaign_id=None)
     items = [PjOut.model_validate(r) for r in rows]
     return Page[PjOut](items=items, total=len(items), page=1, size=len(items) or 1)
 

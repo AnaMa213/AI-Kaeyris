@@ -11,14 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import AuthenticatedKey
 from app.core.models import Profile, User, UserStatus
-from app.services.jdr.db.models import (
-    Campaign,
-    CampaignMember,
-    CampaignRole,
-    Pj,
-    Role,
-    Session,
-)
+from app.services.jdr.db.models import Campaign, CampaignMember, CampaignRole, Pj, Role, Session
 
 DEFAULT_CAMPAIGN_NAME = "Campagne par defaut"
 
@@ -29,6 +22,10 @@ class CampaignContextError(Exception):
 
 class CampaignMembershipError(CampaignContextError):
     """Raised when a campaign membership invariant is violated."""
+
+
+class CampaignAccessError(CampaignContextError):
+    """Raised when a user is not allowed to access a campaign."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,12 +245,40 @@ async def adopt_existing_users_into_default_campaign(
         if user.default_campaign_id is None:
             user.default_campaign_id = campaign.id
     await session.execute(
-        update(Pj).where(Pj.campaign_id.is_(None)).values(campaign_id=campaign.id)
-    )
-    await session.execute(
         update(Session)
         .where(Session.campaign_id.is_(None))
         .values(campaign_id=campaign.id)
     )
     await session.flush()
     return campaign
+
+
+async def require_campaign_membership(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    campaign_id: UUID,
+) -> CampaignMember:
+    membership = await session.get(
+        CampaignMember,
+        {"user_id": user_id, "campaign_id": campaign_id},
+    )
+    if membership is None:
+        raise CampaignAccessError("User is not a member of this campaign.")
+    return membership
+
+
+async def require_campaign_gm(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    campaign_id: UUID,
+) -> CampaignMember:
+    membership = await require_campaign_membership(
+        session,
+        user_id=user_id,
+        campaign_id=campaign_id,
+    )
+    if membership.role is not CampaignRole.GM:
+        raise CampaignAccessError("User is not GM of this campaign.")
+    return membership

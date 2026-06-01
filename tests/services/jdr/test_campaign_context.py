@@ -24,7 +24,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from app.adapters.llm import LLMAdapter
 from app.core.db import get_db_session
 from app.core.errors import register_exception_handlers
+from app.core.models import Profile, User, UserStatus
 from app.core.redis_client import get_redis
+from app.core.users import hash_password
 from app.jobs.jdr import (
     _build_user_prompt_with_context,
     _generate_elements,
@@ -33,12 +35,17 @@ from app.jobs.jdr import (
 from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
+    Campaign,
     Role,
     Session,
     SessionState,
     Transcription,
 )
 from app.services.jdr.router import router as jdr_router
+
+
+class _GmToken(str):
+    campaign_id: UUID
 
 
 # ---------------------------------------------------------------------------
@@ -85,18 +92,31 @@ def _make_jdr_app(make_db_session_dep: Callable[..., Any]) -> FastAPI:
 
 
 @pytest_asyncio.fixture
-async def gm_token(db_session) -> str:
+async def gm_token(db_session) -> _GmToken:
     plain = "gm-context-token"
-    db_session.add(
-        ApiKey(
-            name=f"gm-{uuid4().hex[:8]}",
-            hash=PasswordHasher().hash(plain),
-            role=Role.GM,
-            status=ApiKeyStatus.ACTIVE,
-        )
+    api_key = ApiKey(
+        name=f"gm-{uuid4().hex[:8]}",
+        hash=PasswordHasher().hash(plain),
+        role=Role.GM,
+        status=ApiKeyStatus.ACTIVE,
     )
+    db_session.add(api_key)
+    await db_session.flush()
+    user = User(
+        username=f"gm-context-{uuid4().hex[:8]}",
+        profile=Profile.GM,
+        password_hash=hash_password("gm-password"),
+        status=UserStatus.ACTIVE,
+        api_key_id=api_key.id,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    campaign = Campaign(name="Context test", owner_user_id=user.id)
+    db_session.add(campaign)
     await db_session.commit()
-    return plain
+    token = _GmToken(plain)
+    token.campaign_id = campaign.id
+    return token
 
 
 async def test_post_session_accepts_campaign_context(
@@ -110,6 +130,7 @@ async def test_post_session_accepts_campaign_context(
             json={
                 "title": "Session avec contexte",
                 "recorded_at": "2026-05-13T19:00:00+00:00",
+                "campaign_id": str(gm_token.campaign_id),
                 "campaign_context": "Campagne : Terres du Milieu.\nPJ : Frodon, Aragorn.",
             },
             headers={"Authorization": f"Bearer {gm_token}"},
@@ -131,6 +152,7 @@ async def test_post_session_works_without_campaign_context(
             json={
                 "title": "Session sans contexte",
                 "recorded_at": "2026-05-13T19:00:00+00:00",
+                "campaign_id": str(gm_token.campaign_id),
             },
             headers={"Authorization": f"Bearer {gm_token}"},
         )
@@ -150,6 +172,7 @@ async def test_get_session_returns_campaign_context(
             json={
                 "title": "Read back",
                 "recorded_at": "2026-05-13T19:00:00+00:00",
+                "campaign_id": str(gm_token.campaign_id),
                 "campaign_context": "Bible courte.",
             },
             headers={"Authorization": f"Bearer {gm_token}"},
@@ -179,6 +202,7 @@ async def test_patch_session_updates_title_only(gm_token, make_db_session_dep):
             json={
                 "title": "Original",
                 "recorded_at": "2026-05-13T19:00:00+00:00",
+                "campaign_id": str(gm_token.campaign_id),
                 "campaign_context": "Bible intacte.",
             },
             headers={"Authorization": f"Bearer {gm_token}"},
@@ -209,6 +233,7 @@ async def test_patch_session_updates_campaign_context(
             json={
                 "title": "Same title",
                 "recorded_at": "2026-05-13T19:00:00+00:00",
+                "campaign_id": str(gm_token.campaign_id),
                 "campaign_context": "v1",
             },
             headers={"Authorization": f"Bearer {gm_token}"},
@@ -237,6 +262,7 @@ async def test_patch_session_clears_campaign_context_with_explicit_null(
             json={
                 "title": "To be cleared",
                 "recorded_at": "2026-05-13T19:00:00+00:00",
+                "campaign_id": str(gm_token.campaign_id),
                 "campaign_context": "à effacer",
             },
             headers={"Authorization": f"Bearer {gm_token}"},
@@ -280,6 +306,7 @@ async def test_patch_session_cross_tenant_returns_404(
             json={
                 "title": "GM A's session",
                 "recorded_at": "2026-05-13T19:00:00+00:00",
+                "campaign_id": str(gm_token.campaign_id),
             },
             headers={"Authorization": f"Bearer {gm_token}"},
         )
