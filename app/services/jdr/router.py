@@ -43,6 +43,7 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Job
 from app.services.jdr import logic
 from app.services.jdr.batch.router import router as batch_router
+from app.services.jdr.campaign_context import resolve_campaign_scope_for_auth
 from app.services.jdr.live.router import router as live_router
 from app.services.jdr.logic import (
     DuplicatePjError,
@@ -276,6 +277,14 @@ def _ensure_aware(dt):
     return dt
 
 
+async def _campaign_id_for_auth(
+    db: AsyncSession,
+    auth: AuthenticatedKey,
+) -> UUID | None:
+    scope = await resolve_campaign_scope_for_auth(db, auth)
+    return scope.campaign_id if scope is not None else None
+
+
 # The class above is exported for tests and future error handling; the
 # unused-import linter would otherwise prune the reference.
 _ = UnauthorizedError
@@ -316,11 +325,13 @@ async def create_session(
     The optional ``campaign_context`` is a steering block for the LLM
     (PNJ récurrents, ton, fil narratif) — see PATCH for updating it.
     """
+    campaign_id = await _campaign_id_for_auth(db, auth)
     row = await logic.create_session(
         db,
         title=payload.title,
         recorded_at=payload.recorded_at,
         gm_key_id=auth.id,
+        campaign_id=campaign_id,
         campaign_context=payload.campaign_context,
         transcription_mode=(
             payload.transcription_mode
@@ -340,7 +351,10 @@ async def list_sessions(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Page[SessionOut]:
-    rows = await logic.list_sessions(db, gm_key_id=auth.id)
+    campaign_id = await _campaign_id_for_auth(db, auth)
+    rows = await logic.list_sessions(
+        db, gm_key_id=auth.id, campaign_id=campaign_id
+    )
     items = [SessionOut.model_validate(r) for r in rows]
     return Page[SessionOut](items=items, total=len(items), page=1, size=len(items) or 1)
 
@@ -355,8 +369,9 @@ async def get_session(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> SessionOut:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if row is None:
         raise SessionNotFoundError(
@@ -397,8 +412,9 @@ async def patch_session(
             detail="transcription_mode is immutable after session creation.",
         )
 
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -436,8 +452,9 @@ async def get_session_chunks(
     Returns 404 transcription-not-ready if no chunks have been produced
     yet for the session.
     """
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -484,8 +501,14 @@ async def create_pj(
 
     Duplicate name within the same MJ -> 409 ``duplicate-pj``.
     """
+    campaign_id = await _campaign_id_for_auth(db, auth)
     try:
-        pj = await logic.create_pj(db, name=payload.name, gm_key_id=auth.id)
+        pj = await logic.create_pj(
+            db,
+            name=payload.name,
+            gm_key_id=auth.id,
+            campaign_id=campaign_id,
+        )
     except DuplicatePjError as exc:
         raise DuplicatePjConflictError(detail=str(exc)) from exc
     return PjOut.model_validate(pj)
@@ -500,7 +523,8 @@ async def list_pjs(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Page[PjOut]:
-    rows = await logic.list_pjs(db, gm_key_id=auth.id)
+    campaign_id = await _campaign_id_for_auth(db, auth)
+    rows = await logic.list_pjs(db, gm_key_id=auth.id, campaign_id=campaign_id)
     items = [PjOut.model_validate(r) for r in rows]
     return Page[PjOut](items=items, total=len(items), page=1, size=len(items) or 1)
 
@@ -532,8 +556,9 @@ async def put_session_mapping(
     deleted (data-model.md §6 invariant). A subsequent
     ``POST /artifacts/povs`` is required to regenerate them.
     """
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -557,6 +582,7 @@ async def put_session_mapping(
             session=session,
             mapping=payload.mapping,
             gm_key_id=auth.id,
+            campaign_id=campaign_id,
         )
     except logic.InvalidMappingError as exc:
         raise InvalidMappingError(detail=str(exc)) from exc
@@ -582,8 +608,9 @@ async def get_session_mapping(
 
     409 wrong-mode if the session is non_diarised (use GET /players).
     """
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -625,8 +652,9 @@ async def post_session_players(
     ``invalid-player-list`` otherwise). Reserved for non_diarised
     sessions (409 ``wrong-mode`` on diarised).
     """
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -644,6 +672,7 @@ async def post_session_players(
             session=session,
             pj_ids=payload.pj_ids,
             gm_key_id=auth.id,
+            campaign_id=campaign_id,
         )
     except LogicInvalidPlayerListError as exc:
         raise InvalidPlayerListError(detail=str(exc)) from exc
@@ -665,8 +694,9 @@ async def get_session_players(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> SessionPlayersOut:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -700,8 +730,9 @@ async def get_transcription(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> TranscriptionOut:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -744,8 +775,9 @@ async def get_transcription_md(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Response:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -785,8 +817,9 @@ async def post_narrative(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
 ) -> JobQueuedOut:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -830,8 +863,9 @@ async def get_narrative(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> NarrativeArtifactOut:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -863,8 +897,9 @@ async def get_narrative_md(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Response:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -897,8 +932,9 @@ async def post_elements(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
 ) -> JobQueuedOut:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -942,8 +978,9 @@ async def get_elements(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ElementsArtifactOut:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -991,8 +1028,9 @@ async def get_elements_md(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Response:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -1038,8 +1076,9 @@ async def post_summary(
     elements / pov:* artefacts for the session. The atomicity is
     enforced by ``_generate_summary`` (see research.md §2).
     """
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -1089,8 +1128,9 @@ async def get_summary(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> SummaryArtifactOut:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -1129,8 +1169,9 @@ async def get_summary_md(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Response:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -1176,8 +1217,9 @@ async def post_povs(
     speaker-PJ mapping yet — the operator must call
     ``PUT /mapping`` first.
     """
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -1231,14 +1273,20 @@ async def post_povs(
 
 
 async def _load_owned_pj_or_404(
-    db: AsyncSession, *, pj_id: UUID, gm_key_id: UUID
+    db: AsyncSession,
+    *,
+    pj_id: UUID,
+    gm_key_id: UUID,
+    campaign_id: UUID | None = None,
 ):
     """Return the PJ row or raise ``PjNotFoundError`` (404).
 
     Both "doesn't exist" and "owned by another MJ" collapse to 404 so a
     MJ cannot probe the existence of foreign PJ ids.
     """
-    pj = await PjRepository(db).find_by_id_owned_by(pj_id, gm_key_id)
+    pj = await PjRepository(db).find_by_id_owned_by(
+        pj_id, gm_key_id, campaign_id
+    )
     if pj is None:
         raise PjNotFoundError(detail=f"PJ {pj_id} not found.")
     return pj
@@ -1269,12 +1317,15 @@ async def get_pov(
     except ValueError as exc:
         raise PjNotFoundError(detail=f"PJ {pj_id_raw} not found.") from exc
 
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
-    pj = await _load_owned_pj_or_404(db, pj_id=pj_id, gm_key_id=auth.id)
+    pj = await _load_owned_pj_or_404(
+        db, pj_id=pj_id, gm_key_id=auth.id, campaign_id=campaign_id
+    )
 
     artifact = await ArtifactRepository(db).get(session_id, f"pov:{pj_id}")
     if artifact is None:
@@ -1322,8 +1373,13 @@ async def post_player(
     server only keeps the Argon2 hash.
     """
     try:
+        campaign_id = await _campaign_id_for_auth(db, auth)
         result = await logic.enroll_player(
-            db, name=payload.name, pj_id=payload.pj_id, gm_key_id=auth.id
+            db,
+            name=payload.name,
+            pj_id=payload.pj_id,
+            gm_key_id=auth.id,
+            campaign_id=campaign_id,
         )
     except InvalidPlayerError as exc:
         raise InvalidPlayerEnrolmentError(detail=str(exc)) from exc
@@ -1346,8 +1402,9 @@ async def delete_player(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Response:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     revoked = await logic.revoke_player(
-        db, player_id=player_id, gm_key_id=auth.id
+        db, player_id=player_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if not revoked:
         raise PlayerNotFoundError(detail=f"Player {player_id} not found.")
@@ -1360,7 +1417,11 @@ async def delete_player(
 
 
 async def _ensure_player_can_read_session(
-    db: AsyncSession, *, session_id: UUID, player_pj_id: UUID | None
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    player_pj_id: UUID | None,
+    campaign_id: UUID | None = None,
 ) -> None:
     """Block access unless the player's PJ is mapped on this session.
 
@@ -1372,7 +1433,10 @@ async def _ensure_player_can_read_session(
             detail="Player key has no PJ bound — refuse by default."
         )
     mapped = await logic.is_pj_mapped_on_session(
-        db, session_id=session_id, pj_id=player_pj_id
+        db,
+        session_id=session_id,
+        pj_id=player_pj_id,
+        campaign_id=campaign_id,
     )
     if not mapped:
         raise PlayerForbiddenError(
@@ -1395,7 +1459,10 @@ async def get_me(
     if auth.pj_id is None:
         # Defence in depth — auth should already have rejected this.
         raise ForbiddenError(detail="Player key has no PJ bound.")
-    pj = await logic.get_player_pj(db, pj_id=auth.pj_id)
+    campaign_id = await _campaign_id_for_auth(db, auth)
+    pj = await logic.get_player_pj(
+        db, pj_id=auth.pj_id, campaign_id=campaign_id
+    )
     if pj is None:
         raise PjNotFoundError(detail=f"PJ {auth.pj_id} not found.")
     return MeOut(name=auth.name, pj=PjMini.model_validate(pj))
@@ -1412,7 +1479,10 @@ async def get_my_sessions(
 ) -> PlayerSessionListOut:
     if auth.pj_id is None:
         raise ForbiddenError(detail="Player key has no PJ bound.")
-    sessions = await logic.list_player_sessions(db, player_pj_id=auth.pj_id)
+    campaign_id = await _campaign_id_for_auth(db, auth)
+    sessions = await logic.list_player_sessions(
+        db, player_pj_id=auth.pj_id, campaign_id=campaign_id
+    )
     items = [
         PlayerSessionItem(
             session_id=s.id, title=s.title, recorded_at=s.recorded_at
@@ -1432,8 +1502,12 @@ async def get_my_narrative(
     auth: Annotated[AuthenticatedKey, Depends(require_player)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> NarrativeArtifactOut:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     await _ensure_player_can_read_session(
-        db, session_id=session_id, player_pj_id=auth.pj_id
+        db,
+        session_id=session_id,
+        player_pj_id=auth.pj_id,
+        campaign_id=campaign_id,
     )
     artifact = await ArtifactRepository(db).get(session_id, "narrative")
     if artifact is None:
@@ -1460,8 +1534,12 @@ async def get_my_narrative_md(
     auth: Annotated[AuthenticatedKey, Depends(require_player)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Response:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     await _ensure_player_can_read_session(
-        db, session_id=session_id, player_pj_id=auth.pj_id
+        db,
+        session_id=session_id,
+        player_pj_id=auth.pj_id,
+        campaign_id=campaign_id,
     )
     session = await db.scalar(
         select(SessionModel).where(SessionModel.id == session_id)
@@ -1485,8 +1563,12 @@ async def get_my_pov(
     auth: Annotated[AuthenticatedKey, Depends(require_player)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> PovArtifactOut:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     await _ensure_player_can_read_session(
-        db, session_id=session_id, player_pj_id=auth.pj_id
+        db,
+        session_id=session_id,
+        player_pj_id=auth.pj_id,
+        campaign_id=campaign_id,
     )
     artifact = await ArtifactRepository(db).get(session_id, f"pov:{auth.pj_id}")
     if artifact is None:
@@ -1517,13 +1599,19 @@ async def get_my_pov_md(
     auth: Annotated[AuthenticatedKey, Depends(require_player)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Response:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     await _ensure_player_can_read_session(
-        db, session_id=session_id, player_pj_id=auth.pj_id
+        db,
+        session_id=session_id,
+        player_pj_id=auth.pj_id,
+        campaign_id=campaign_id,
     )
     session = await db.scalar(
         select(SessionModel).where(SessionModel.id == session_id)
     )
-    pj = await logic.get_player_pj(db, pj_id=auth.pj_id)
+    pj = await logic.get_player_pj(
+        db, pj_id=auth.pj_id, campaign_id=campaign_id
+    )
     artifact = await ArtifactRepository(db).get(session_id, f"pov:{auth.pj_id}")
     if artifact is None or session is None or pj is None:
         raise ArtifactNotReadyError(
@@ -1587,8 +1675,9 @@ async def get_job(
         ) from exc
 
     # Cross-tenant guard: hide other MJ's jobs as if they didn't exist.
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session_row is None:
         raise JobNotFoundError(detail=f"Job {job_id} not found.")

@@ -57,3 +57,20 @@ class UserOut(BaseModel):
 
 class UserListOut(BaseModel):
     items: list[UserOut]
+
+
+class AuthMeUserOut(BaseModel):
+    id: UUID
+    username: str
+
+
+class AuthMeCampaignOut(BaseModel):
+    id: UUID
+    name: str
+    role: str
+    character_id: UUID | None = None
+
+
+class AuthMeOut(BaseModel):
+    user: AuthMeUserOut
+    active_campaign: AuthMeCampaignOut | None = None

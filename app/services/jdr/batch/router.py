@@ -17,6 +17,7 @@ from app.core.db import get_db_session
 from app.core.errors import AppError
 from app.core.redis_client import get_redis
 from app.services.jdr import logic
+from app.services.jdr.campaign_context import resolve_campaign_scope_for_auth
 from app.services.jdr.logic import (
     AudioAlreadyUploadedError,
     AudioPurgeBlockedError,
@@ -74,6 +75,14 @@ class AudioNotFound(AppError):
 router = APIRouter()
 
 
+async def _campaign_id_for_auth(
+    db: AsyncSession,
+    auth: AuthenticatedKey,
+) -> UUID | None:
+    scope = await resolve_campaign_scope_for_auth(db, auth)
+    return scope.campaign_id if scope is not None else None
+
+
 @router.post(
     "/sessions/{session_id}/audio",
     response_model=AudioUploadOut,
@@ -99,8 +108,9 @@ async def post_audio(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
 ) -> AudioUploadOut:
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -155,8 +165,9 @@ async def delete_audio(
     Refused (409) when ``state ∈ {transcribing, transcribed}``: see
     ``logic.purge_audio_for_session`` for the rationale.
     """
+    campaign_id = await _campaign_id_for_auth(db, auth)
     session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")

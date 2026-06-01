@@ -51,6 +51,11 @@ class Role(str, enum.Enum):
     PLAYER = "player"
 
 
+class CampaignRole(str, enum.Enum):
+    GM = "gm"
+    PLAYER = "player"
+
+
 class ApiKeyStatus(str, enum.Enum):
     ACTIVE = "active"
     REVOKED = "revoked"
@@ -109,6 +114,10 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _enum_values(enum_cls: type[enum.Enum]) -> list[str]:
+    return [member.value for member in enum_cls]
+
+
 # ---------------------------------------------------------------------------
 # Tables
 # ---------------------------------------------------------------------------
@@ -155,6 +164,67 @@ class ApiKey(Base):
     pj: Mapped[Pj | None] = relationship("Pj", foreign_keys=[pj_id])
 
 
+class Campaign(Base):
+    """JDR campaign container and visibility boundary."""
+
+    __tablename__ = "jdr_campaigns"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    owner_user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("core_users.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    members: Mapped[list[CampaignMember]] = relationship(
+        "CampaignMember", back_populates="campaign", cascade="all, delete-orphan"
+    )
+
+
+class CampaignMember(Base):
+    """Membership between a web user and a JDR campaign."""
+
+    __tablename__ = "jdr_campaign_members"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("core_users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("jdr_campaigns.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    role: Mapped[CampaignRole] = mapped_column(
+        Enum(
+            CampaignRole,
+            name="jdr_campaign_role",
+            native_enum=False,
+            length=16,
+            values_callable=_enum_values,
+        ),
+        nullable=False,
+    )
+    character_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("jdr_pjs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    joined_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    campaign: Mapped[Campaign] = relationship("Campaign", back_populates="members")
+    character: Mapped[Pj | None] = relationship("Pj", foreign_keys=[character_id])
+
+
 class Pj(Base):
     """A character (Personnage Joueur) — stable across sessions."""
 
@@ -171,11 +241,20 @@ class Pj(Base):
         nullable=False,
         index=True,
     )
+    campaign_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("jdr_campaigns.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
 
     owner: Mapped[ApiKey] = relationship("ApiKey", foreign_keys=[owner_gm_key_id])
+    campaign: Mapped[Campaign | None] = relationship(
+        "Campaign", foreign_keys=[campaign_id]
+    )
 
 
 class Session(Base):
@@ -192,6 +271,12 @@ class Session(Base):
         Uuid,
         ForeignKey("jdr_api_keys.id", ondelete="RESTRICT"),
         nullable=False,
+        index=True,
+    )
+    campaign_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("jdr_campaigns.id", ondelete="RESTRICT"),
+        nullable=True,
         index=True,
     )
     mode: Mapped[SessionMode] = mapped_column(
@@ -245,6 +330,9 @@ class Session(Base):
     )
 
     gm: Mapped[ApiKey] = relationship("ApiKey", foreign_keys=[gm_key_id])
+    campaign: Mapped[Campaign | None] = relationship(
+        "Campaign", foreign_keys=[campaign_id]
+    )
     audio_source: Mapped[AudioSource | None] = relationship(
         "AudioSource", back_populates="session", uselist=False, cascade="all, delete-orphan"
     )
