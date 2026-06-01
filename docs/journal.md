@@ -488,3 +488,27 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
 - Pas encore de switch de campagne active côté profil : le front peut sélectionner une campagne via les endpoints et passer `campaign_id` sur les sessions.
 - Les API keys GM restent supportées comme mode legacy ; le contrôle riche de membership est porté par les sessions web.
 - Pas d'ADR ajouté : les décisions appliquées étaient déjà cadrées par la spec BD-6 et ne dépassent pas le plan.
+
+---
+
+## 2026-06-01 — BD-7 : Identity refacto et scoping campagne des PJ
+
+### Ce qui a été fait
+
+- Remplacement du vocabulaire public `profile` par `system_role` sur les comptes web : `admin` pour l'administration globale, `user` pour les comptes standards.
+- Séparation explicite entre autorité portail et autorité campagne : `/services/jdr/users` est réservé aux admins, tandis qu'un utilisateur standard authentifié peut créer une campagne et en devient GM.
+- Renommage du rôle de membership campagne `player` en `pj` côté web, sans casser le rôle API-key legacy `player` utilisé par les tokens joueur `/me/*`.
+- Scoping des PJ par campagne : `campaign_id` obligatoire en sortie et en base, `user_id` optionnel pour lier un PJ à un compte, fallback V1 sur la campagne par défaut du GM web.
+- Ajout de la migration Alembic BD-7 et d'un ADR dédié : `docs/adr/0013-identity-refacto-pj-scoping.md`.
+
+### Ce que j'ai appris
+
+- **Un rôle global n'est pas un rôle métier local** : un admin portail ne doit pas être confondu avec un GM de campagne, et un GM de campagne ne doit pas automatiquement administrer les comptes.
+- **Le vocabulaire public compte autant que le schéma** : exposer `pj` au front évite de mélanger l'ancien token joueur avec le rôle de membre de campagne.
+- **Le scoping doit être serveur-side** : filtrer les PJ seulement côté front serait fragile ; la logique vérifie la membership campagne avant create/list/mapping.
+
+### Limitations acceptées
+
+- Pas de RBAC fin, invitation email, audit log ou transfert de propriété campagne dans BD-7.
+- La migration est pensée pour une purge local/staging : les environnements avec des PJ orphelins doivent être nettoyés ou reseed avant upgrade.
+- Les API keys GM/player restent un mode legacy supporté ; le contrôle riche de membership web passe par les sessions.

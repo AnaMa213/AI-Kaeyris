@@ -20,7 +20,7 @@ from app.core.config import settings
 from app.core.db import get_db_session
 from app.core.errors import AppError, PROBLEM_CONTENT_TYPE
 from app.core.logging import get_logger
-from app.core.models import Profile, User
+from app.core.models import SystemRole, User
 from app.core.user_schemas import (
     LoginRequest,
     AuthMeCampaignOut,
@@ -35,7 +35,7 @@ from app.core.user_schemas import (
 )
 from app.core.users import (
     DuplicateUserError,
-    LastActiveGmError,
+    LastActiveAdminError,
     SetupClosedError,
     UserNotFoundError,
     authenticate_user,
@@ -51,12 +51,13 @@ from app.core.users import (
 )
 from app.services.jdr.campaign_context import (
     CampaignScope,
-    campaign_role_for_profile,
+    campaign_role_for_system_role,
     ensure_default_campaign,
     ensure_user_membership,
     resolve_active_campaign_for_user,
     resolve_campaign_scope_for_auth,
 )
+from app.services.jdr.db.models import CampaignRole
 from app.services.jdr.db.repositories import CampaignRepository
 
 logger = get_logger(__name__)
@@ -82,10 +83,16 @@ class SetupClosedAppError(AppError):
     title = "Setup closed"
 
 
-class LastActiveGmAppError(AppError):
+class LastActiveAdminAppError(AppError):
     status_code = status.HTTP_409_CONFLICT
-    error_type = "last-active-gm"
-    title = "Last active GM"
+    error_type = "last-active-admin"
+    title = "Last active admin"
+
+
+class AdminRequiredAppError(AppError):
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "admin-required"
+    title = "Administrator privileges required"
 
 
 def _front_problem(status_code: int, title: str) -> JSONResponse:
@@ -136,11 +143,11 @@ async def _active_or_default_scope(
         db,
         user=owner,
         campaign=campaign,
-        role=campaign_role_for_profile(owner.profile),
+        role=campaign_role_for_system_role(owner.system_role),
     )
     return CampaignScope(
         campaign_id=campaign.id,
-        role=campaign_role_for_profile(owner.profile),
+        role=campaign_role_for_system_role(owner.system_role),
         user_id=owner.id,
     )
 
@@ -160,6 +167,18 @@ async def _ensure_user_in_active_campaign(
     if membership is None:
         raise UserNotFoundAppError("User not found.")
     return scope
+
+
+async def _require_admin_user(
+    db: AsyncSession,
+    auth: AuthenticatedKey,
+) -> User:
+    if auth.source != "web_session" or auth.user_id is None:
+        raise AdminRequiredAppError("A signed-in administrator is required.")
+    user = await db.get(User, auth.user_id)
+    if user is None or user.system_role != SystemRole.ADMIN:
+        raise AdminRequiredAppError("A signed-in administrator is required.")
+    return user
 
 
 @router.get(
@@ -214,22 +233,16 @@ async def post_login(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Response:
-    try:
-        profile = Profile(payload.profile)
-    except ValueError:
-        return _front_problem(status.HTTP_403_FORBIDDEN, "Forbidden")
-
     user = await authenticate_user(
         db,
         username=payload.username,
-        profile=profile,
         password=payload.password,
     )
     if user is None:
         logger.info(
             "jdr.auth.login_rejected",
             username=payload.username.strip().lower(),
-            profile=payload.profile,
+            system_role=getattr(payload, "system_role", None),
         )
         return _front_problem(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
 
@@ -287,7 +300,11 @@ async def get_me(
     active = await resolve_active_campaign_for_user(db, validated.user)
     response.headers["Cache-Control"] = "no-store"
     return AuthMeOut(
-        user=AuthMeUserOut(id=validated.user.id, username=validated.user.username),
+        user=AuthMeUserOut(
+            id=validated.user.id,
+            username=validated.user.username,
+            system_role=validated.user.system_role,
+        ),
         active_campaign=(
             AuthMeCampaignOut(
                 id=active.id,
@@ -311,34 +328,33 @@ async def post_user(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> UserOut:
+    await _require_admin_user(db, auth)
     try:
         user = await create_user(
             db,
             username=payload.username,
-            profile=payload.profile,
+            system_role=payload.system_role,
             password=payload.password,
         )
     except DuplicateUserError as exc:
         raise DuplicateUserAppError("Username already exists.") from exc
 
     scope = await _active_or_default_scope(db, auth)
-    if scope is None:
-        owner = user if user.profile == Profile.GM else None
-        if owner is not None:
-            campaign = await ensure_default_campaign(db, owner_user=owner)
-        else:
-            campaign = None
-    else:
+    if scope is not None:
         campaign = await CampaignRepository(db).get(scope.campaign_id)
-    if campaign is not None:
-        await ensure_user_membership(
-            db,
-            user=user,
-            campaign=campaign,
-            role=campaign_role_for_profile(user.profile),
-        )
+        if campaign is not None:
+            await ensure_user_membership(
+                db,
+                user=user,
+                campaign=campaign,
+                role=CampaignRole.PJ,
+            )
 
-    logger.info("jdr.users.created", username=user.username, profile=user.profile.value)
+    logger.info(
+        "jdr.users.created",
+        username=user.username,
+        system_role=user.system_role.value,
+    )
     return UserOut.model_validate(user)
 
 
@@ -347,14 +363,9 @@ async def get_users(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> UserListOut:
-    scope = await _active_or_default_scope(db, auth)
-    user_ids = (
-        set(await CampaignRepository(db).list_campaign_user_ids(scope.campaign_id))
-        if scope is not None
-        else set()
-    )
+    await _require_admin_user(db, auth)
     return UserListOut(
-        items=[UserOut.model_validate(user) for user in await list_users(db, user_ids)]
+        items=[UserOut.model_validate(user) for user in await list_users(db)]
     )
 
 
@@ -365,25 +376,21 @@ async def patch_user(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> UserOut:
-    scope = await _ensure_user_in_active_campaign(db, auth, user_id)
+    await _require_admin_user(db, auth)
     try:
         user = await update_user(
             db,
             user_id,
-            profile=payload.profile,
+            system_role=payload.system_role,
             password=payload.password,
             status=payload.status,
         )
     except UserNotFoundError as exc:
         raise UserNotFoundAppError("User not found.") from exc
-    except LastActiveGmError as exc:
-        raise LastActiveGmAppError("Cannot remove the last active GM.") from exc
-    membership = await CampaignRepository(db).get_membership(
-        user_id=user.id,
-        campaign_id=scope.campaign_id,
-    )
-    if membership is not None:
-        membership.role = campaign_role_for_profile(user.profile)
+    except LastActiveAdminError as exc:
+        raise LastActiveAdminAppError(
+            "Cannot remove the last active administrator."
+        ) from exc
     return UserOut.model_validate(user)
 
 
@@ -393,11 +400,13 @@ async def delete_user_route(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Response:
-    await _ensure_user_in_active_campaign(db, auth, user_id)
+    await _require_admin_user(db, auth)
     try:
         await delete_user(db, user_id)
     except UserNotFoundError as exc:
         raise UserNotFoundAppError("User not found.") from exc
-    except LastActiveGmError as exc:
-        raise LastActiveGmAppError("Cannot delete the last active GM.") from exc
+    except LastActiveAdminError as exc:
+        raise LastActiveAdminAppError(
+            "Cannot delete the last active administrator."
+        ) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)

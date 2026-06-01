@@ -18,12 +18,16 @@ from httpx import ASGITransport, AsyncClient
 from app.core.db import get_db_session
 from app.core.errors import register_exception_handlers
 from app.core.redis_client import get_redis
-from app.services.jdr.db.models import (
-    ApiKey,
-    ApiKeyStatus,
-    Role,
-)
+from app.core.config import settings
+from app.core.models import Profile
+from app.services.jdr.db.models import ApiKey, ApiKeyStatus, Role
 from app.services.jdr.router import router as jdr_router
+from tests.services.jdr.campaign_fixtures import (
+    make_campaign,
+    make_membership,
+    make_user,
+    make_web_session,
+)
 
 
 def _make_jdr_app(make_db_session_dep: Callable[..., Any]) -> FastAPI:
@@ -48,6 +52,15 @@ async def _seed_gm(db_session, plain_token: str) -> ApiKey:
     return gm
 
 
+async def _seed_web_gm(db_session, *, username: str = "gm"):
+    user = await make_user(db_session, username=username, profile=Profile.GM)
+    campaign = await make_campaign(db_session, owner=user, name=f"{username}-campaign")
+    await make_membership(db_session, user=user, campaign=campaign)
+    user.default_campaign_id = campaign.id
+    token = await make_web_session(db_session, user=user)
+    return user, campaign, token
+
+
 # ---------------------------------------------------------------------------
 # POST /pjs
 # ---------------------------------------------------------------------------
@@ -56,20 +69,21 @@ async def _seed_gm(db_session, plain_token: str) -> ApiKey:
 async def test_post_pj_returns_201_with_pj_payload(
     db_session, make_db_session_dep
 ):
-    plain = "gm-pj-token"
-    await _seed_gm(db_session, plain)
+    _user, campaign, token = await _seed_web_gm(db_session)
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token)
         response = await client.post(
             "/services/jdr/pjs",
             json={"name": "Aragorn"},
-            headers={"Authorization": f"Bearer {plain}"},
         )
 
     assert response.status_code == 201
     body = response.json()
     assert body["name"] == "Aragorn"
+    assert body["campaign_id"] == str(campaign.id)
+    assert body["user_id"] is None
     assert "id" in body
     assert "created_at" in body
 
@@ -78,21 +92,19 @@ async def test_post_pj_rejects_duplicate_name_for_same_gm(
     db_session, make_db_session_dep
 ):
     """``(owner_gm_key_id, name)`` is unique — second insert -> 409."""
-    plain = "gm-pj-dup"
-    await _seed_gm(db_session, plain)
+    _user, _campaign, token = await _seed_web_gm(db_session)
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token)
         first = await client.post(
             "/services/jdr/pjs",
             json={"name": "Galadriel"},
-            headers={"Authorization": f"Bearer {plain}"},
         )
         assert first.status_code == 201
         second = await client.post(
             "/services/jdr/pjs",
             json={"name": "Galadriel"},
-            headers={"Authorization": f"Bearer {plain}"},
         )
 
     assert second.status_code == 409
@@ -103,22 +115,20 @@ async def test_post_pj_allows_same_name_for_different_gms(
     db_session, make_db_session_dep
 ):
     """The uniqueness is *per MJ* — two MJs can both own a PJ named 'Frodon'."""
-    plain_a = "gm-a-token"
-    plain_b = "gm-b-token"
-    await _seed_gm(db_session, plain_a)
-    await _seed_gm(db_session, plain_b)
+    _user_a, _campaign_a, token_a = await _seed_web_gm(db_session, username="gm-a")
+    _user_b, _campaign_b, token_b = await _seed_web_gm(db_session, username="gm-b")
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token_a)
         a = await client.post(
             "/services/jdr/pjs",
             json={"name": "Frodon"},
-            headers={"Authorization": f"Bearer {plain_a}"},
         )
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token_b)
         b = await client.post(
             "/services/jdr/pjs",
             json={"name": "Frodon"},
-            headers={"Authorization": f"Bearer {plain_b}"},
         )
 
     assert a.status_code == 201
@@ -179,36 +189,33 @@ async def test_post_pj_rejects_player_role_with_403(
 async def test_get_pjs_lists_only_current_mj_pjs(
     db_session, make_db_session_dep
 ):
-    plain_a = "gm-list-a"
-    plain_b = "gm-list-b"
-    await _seed_gm(db_session, plain_a)
-    await _seed_gm(db_session, plain_b)
+    _user_a, _campaign_a, token_a = await _seed_web_gm(db_session, username="gm-list-a")
+    _user_b, _campaign_b, token_b = await _seed_web_gm(db_session, username="gm-list-b")
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token_a)
         await client.post(
             "/services/jdr/pjs",
             json={"name": "PJ-de-A-1"},
-            headers={"Authorization": f"Bearer {plain_a}"},
         )
         await client.post(
             "/services/jdr/pjs",
             json={"name": "PJ-de-A-2"},
-            headers={"Authorization": f"Bearer {plain_a}"},
         )
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token_b)
         await client.post(
             "/services/jdr/pjs",
             json={"name": "PJ-de-B"},
-            headers={"Authorization": f"Bearer {plain_b}"},
         )
 
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token_a)
         list_a = await client.get(
             "/services/jdr/pjs",
-            headers={"Authorization": f"Bearer {plain_a}"},
         )
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token_b)
         list_b = await client.get(
             "/services/jdr/pjs",
-            headers={"Authorization": f"Bearer {plain_b}"},
         )
 
     assert list_a.status_code == 200

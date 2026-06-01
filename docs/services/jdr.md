@@ -84,25 +84,31 @@ Au premier démarrage, l'app importe cette entrée dans `jdr_api_keys` avec `rol
 
 **Authentification web** :
 1. `GET /services/jdr/auth/setup/status` retourne `{"required": true}` tant que `core_users` est vide.
-2. `POST /services/jdr/auth/setup` crée le premier compte `gm` avec `username + password`, puis pose le cookie HTTP-only `session`.
-3. Un GM connecté crée ensuite les autres profils via `POST /services/jdr/users`.
-4. `POST /services/jdr/auth/login` accepte `username + profile + password` et pose un cookie `session` utilisable par les routes protégées.
-5. BD-4 ajoute `GET /services/jdr/auth/me` : le front relit le cookie `session` et reçoit l'identité publique plus la campagne active (`gm` ou `player`). Le premier setup crée aussi la campagne V1 par défaut et rattache le premier GM.
+2. `POST /services/jdr/auth/setup` crée le premier compte administrateur (`system_role="admin"`) avec `username + password`, puis pose le cookie HTTP-only `session`.
+3. Un administrateur connecté crée ensuite les autres comptes via `POST /services/jdr/users`. Les comptes exposent `system_role` (`admin` ou `user`) ; `profile` n'est plus un champ public.
+4. `POST /services/jdr/auth/login` accepte `username + password` et pose un cookie `session` utilisable par les routes protégées.
+5. `GET /services/jdr/auth/me` : le front relit le cookie `session` et reçoit l'identité publique (`id`, `username`, `system_role`) plus la campagne active (`gm` ou `pj`). Le premier setup crée aussi la campagne V1 par défaut et rattache le premier administrateur comme GM.
 
-Les API keys historiques restent supportées pour les clients machine. Pour compatibilité avec les tables JDR existantes, un compte web `gm` reçoit aussi une clé JDR interne non exposée : les ownership FKs continuent donc de pointer vers `jdr_api_keys`.
+Les API keys historiques restent supportées pour les clients machine. Pour compatibilité avec les tables JDR existantes, chaque compte web reçoit aussi une clé JDR interne non exposée : les ownership FKs continuent donc de pointer vers `jdr_api_keys`. Le rôle API-key legacy `player` reste réservé aux tokens joueur `/me/*` ; les memberships web de campagne utilisent `gm|pj`.
+
+**Reseed local/staging BD-7 après purge** :
+1. Purger la base locale/staging, puis appliquer `alembic upgrade head`.
+2. Appeler `POST /services/jdr/auth/setup` pour créer le premier administrateur.
+3. Vérifier `GET /services/jdr/auth/me` : l'utilisateur doit avoir `system_role="admin"`, une campagne active, et `role="gm"`.
+4. Ne jamais activer de credential universel ou silencieux en production ; le mot de passe est toujours choisi explicitement au setup.
 
 **Contrat datetime JSON** :
 - Tous les champs datetime publics (`recorded_at`, `created_at`, `updated_at`, `uploaded_at`, `generated_at`, etc.) sont sérialisés avec un fuseau explicite.
 - Le suffixe UTC peut être `+00:00` ou `Z`; une valeur sans suffixe timezone est une régression de contrat.
 - Les inputs datetime historiques restent acceptés : `Z`, offset numérique, ou valeur naïve interprétée comme UTC.
 
-**Campagnes BD-6** :
+**Campagnes BD-6/BD-7** :
 - `GET /services/jdr/campaigns` liste les campagnes dont l'utilisateur web connecté est membre, avec `role`, `session_count`, `last_session_at` et `created_at`.
-- `POST /services/jdr/campaigns` crée une campagne et rattache automatiquement le créateur avec le rôle `gm`.
+- `POST /services/jdr/campaigns` crée une campagne pour tout utilisateur web authentifié et rattache automatiquement le créateur avec le rôle `gm`.
 - `GET/PATCH/DELETE /services/jdr/campaigns/{campaign_id}` exigent l'appartenance à la campagne ; `PATCH` et `DELETE` exigent le rôle `gm`.
 - La suppression est volontairement prudente : une campagne contenant au moins une session retourne `409` et n'est pas supprimée.
 - `POST /services/jdr/sessions` exige maintenant `campaign_id`. `GET /services/jdr/sessions?campaign_id=...` filtre explicitement par campagne ; sans query param, la liste non filtrée reste disponible pour compatibilité.
-- Les PJ publics restent globaux au MJ dans BD-6 : `GET/POST /services/jdr/pjs` ne sont pas scoppés par campagne.
+- Les PJ sont scoppés par campagne depuis BD-7. `POST /services/jdr/pjs` accepte un `campaign_id` optionnel, retombe sur la campagne par défaut du GM web si absent, et accepte `user_id` optionnel pour lier le PJ à un compte. `GET /services/jdr/pjs?campaign_id=...` filtre une campagne après contrôle de membership ; sans filtre, il retourne les PJ des campagnes visibles par l'utilisateur.
 
 **Bascule transcription cloud → local** (sans modifier le code) :
 ```ini

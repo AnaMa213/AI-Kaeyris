@@ -58,7 +58,7 @@ async def test_create_session_requires_campaign_id_and_gm_membership(
         db_session,
         user=player,
         campaign=campaign,
-        role=CampaignRole.PLAYER,
+        role=CampaignRole.PJ,
     )
     gm_client = await _client_for(gm, db_session, make_db_session_dep)
     player_client = await _client_for(player, db_session, make_db_session_dep)

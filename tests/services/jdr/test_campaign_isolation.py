@@ -137,11 +137,11 @@ async def test_pjs_are_created_and_listed_in_active_campaign_only(
 
     visible_row = await db_session.get(Pj, UUID(created.json()["id"]))
     assert visible_row is not None
-    assert visible_row.campaign_id is None
-    assert [item["name"] for item in listed.json()["items"]] == ["Visible", "Hidden"]
+    assert visible_row.campaign_id == campaign_a.id
+    assert [item["name"] for item in listed.json()["items"]] == ["Visible"]
 
 
-async def test_mapping_accepts_global_pj_from_another_campaign(
+async def test_mapping_rejects_pj_from_another_campaign(
     db_session,
     make_db_session_dep,
 ):
@@ -180,8 +180,7 @@ async def test_mapping_accepts_global_pj_from_another_campaign(
             json={"mapping": {"speaker_1": str(foreign_pj.id)}},
         )
 
-    assert response.status_code == 200
-    assert response.json()["mapping"] == {"speaker_1": str(foreign_pj.id)}
+    assert response.status_code == 422
 
 
 async def test_player_session_list_is_bound_to_player_campaign(

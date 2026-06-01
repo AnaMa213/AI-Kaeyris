@@ -85,6 +85,18 @@ class DuplicatePjError(Exception):
     """
 
 
+class PjCampaignResolutionError(Exception):
+    """No explicit or default campaign could be resolved for PJ creation."""
+
+
+class PjForbiddenError(Exception):
+    """The current user is not GM/member of the requested PJ campaign."""
+
+
+class PjAssignmentError(Exception):
+    """The optional assigned user does not exist."""
+
+
 class InvalidMappingError(Exception):
     """At least one ``pj_id`` in the mapping is unknown or owned by another MJ.
 
@@ -189,6 +201,11 @@ async def create_campaign(
         campaign_id=campaign.id,
         role=CampaignRole.GM,
     )
+    from app.core.models import User
+
+    user = await db.get(User, owner_user_id)
+    if user is not None and user.default_campaign_id is None:
+        user.default_campaign_id = campaign.id
     await db.commit()
     summary = await repo.get_summary_for_user(
         user_id=owner_user_id,
@@ -311,6 +328,8 @@ async def set_session_players(
         stmt = select(Pj.id).where(
             Pj.id.in_(unique_ids), Pj.owner_gm_key_id == gm_key_id
         )
+        if campaign_id is not None:
+            stmt = stmt.where(Pj.campaign_id == campaign_id)
         found = set((await db.execute(stmt)).scalars().all())
         missing = unique_ids - found
         if missing:
@@ -466,7 +485,9 @@ async def create_pj(
     *,
     name: str,
     gm_key_id: UUID,
+    user_id: UUID | None = None,
     campaign_id: UUID | None = None,
+    requester_user_id: UUID | None = None,
 ) -> Pj:
     """Create a PJ scoped to the current MJ.
 
@@ -474,11 +495,41 @@ async def create_pj(
     same name (uniqueness ``(owner_gm_key_id, name)`` on
     :class:`Pj`).
     """
+    resolved_campaign_id = campaign_id
+    if requester_user_id is not None:
+        from app.core.models import User
+        from app.services.jdr.campaign_context import require_campaign_gm
+
+        requester = await db.get(User, requester_user_id)
+        if requester is None:
+            raise PjForbiddenError("A web user is required to create a PJ.")
+        resolved_campaign_id = resolved_campaign_id or requester.default_campaign_id
+        if resolved_campaign_id is None:
+            raise PjCampaignResolutionError(
+                "No campaign_id was provided and the user has no default campaign."
+            )
+        await require_campaign_gm(
+            db,
+            user_id=requester_user_id,
+            campaign_id=resolved_campaign_id,
+        )
+
+    if resolved_campaign_id is None:
+        raise PjCampaignResolutionError("A campaign_id is required to create a PJ.")
+
+    if user_id is not None:
+        from app.core.models import User
+
+        assigned_user = await db.get(User, user_id)
+        if assigned_user is None:
+            raise PjAssignmentError(f"User {user_id} not found.")
+
     try:
         pj = await PjRepository(db).create(
             name=name,
             owner_gm_key_id=gm_key_id,
-            campaign_id=campaign_id,
+            campaign_id=resolved_campaign_id,
+            user_id=user_id,
         )
     except DuplicatePjNameError as exc:
         raise DuplicatePjError(str(exc)) from exc
@@ -620,14 +671,32 @@ async def get_player_pj(
     db: AsyncSession, *, pj_id: UUID, campaign_id: UUID | None = None
 ) -> Pj | None:
     """Load the PJ row referenced by a player key (for GET /me)."""
-    _ = campaign_id
     stmt = select(Pj).where(Pj.id == pj_id)
+    if campaign_id is not None:
+        stmt = stmt.where(Pj.campaign_id == campaign_id)
     return await db.scalar(stmt)
 
 
 async def list_pjs(
-    db: AsyncSession, *, gm_key_id: UUID, campaign_id: UUID | None = None
+    db: AsyncSession,
+    *,
+    gm_key_id: UUID,
+    campaign_id: UUID | None = None,
+    requester_user_id: UUID | None = None,
 ) -> list[Pj]:
+    if requester_user_id is not None:
+        from app.services.jdr.campaign_context import require_campaign_membership
+
+        if campaign_id is not None:
+            await require_campaign_membership(
+                db,
+                user_id=requester_user_id,
+                campaign_id=campaign_id,
+            )
+        return await PjRepository(db).list_for_member(
+            user_id=requester_user_id,
+            campaign_id=campaign_id,
+        )
     return await PjRepository(db).list_for_gm(gm_key_id, campaign_id)
 
 
@@ -676,6 +745,8 @@ async def set_session_mapping(
             Pj.id.in_(unique_pj_ids),
             Pj.owner_gm_key_id == gm_key_id,
         )
+        if campaign_id is not None:
+            stmt = stmt.where(Pj.campaign_id == campaign_id)
         found_ids = set((await db.execute(stmt)).scalars().all())
         missing = unique_pj_ids - found_ids
         if missing:

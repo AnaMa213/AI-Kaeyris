@@ -18,6 +18,7 @@ import pytest_asyncio
 from argon2 import PasswordHasher
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from app.core.db import get_db_session
@@ -28,6 +29,7 @@ from app.jobs.jdr import generate_narrative_job, transcribe_session_job
 from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
+    Campaign,
     Role,
     Session,
     SessionState,
@@ -65,12 +67,16 @@ async def ctx(db_engine: AsyncEngine, monkeypatch) -> JobsTestContext:
         )
         setup.add(gm)
         await setup.flush()
+        campaign = Campaign(name="Jobs route campaign", owner_user_id=uuid4())
+        setup.add(campaign)
+        await setup.flush()
         setup.add(
             Session(
                 id=session_id,
                 title="Jobs route test",
                 recorded_at=datetime.now(UTC),
                 gm_key_id=gm.id,
+                campaign_id=campaign.id,
                 state=SessionState.TRANSCRIBED,
             )
         )
@@ -220,7 +226,13 @@ async def test_get_job_rejects_player_role(ctx, make_db_session_dep):
     async with ctx.sessionmaker() as db:
         from app.services.jdr.db.models import Pj
 
-        pj = Pj(name="Aragorn", owner_gm_key_id=ctx.gm_key_id)
+        campaign = await db.scalar(select(Campaign).limit(1))
+        assert campaign is not None
+        pj = Pj(
+            name="Aragorn",
+            owner_gm_key_id=ctx.gm_key_id,
+            campaign_id=campaign.id,
+        )
         db.add(pj)
         await db.flush()
         db.add(

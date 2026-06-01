@@ -10,7 +10,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import AuthenticatedKey
-from app.core.models import Profile, User, UserStatus
+from app.core.models import SystemRole, User, UserStatus
 from app.services.jdr.db.models import Campaign, CampaignMember, CampaignRole, Pj, Role, Session
 
 DEFAULT_CAMPAIGN_NAME = "Campagne par defaut"
@@ -44,10 +44,20 @@ class CampaignScope:
     character_id: UUID | None = None
 
 
-def campaign_role_for_profile(profile: Profile) -> CampaignRole:
-    if profile == Profile.GM:
+def campaign_role_for_system_role(system_role: SystemRole) -> CampaignRole:
+    if system_role == SystemRole.ADMIN:
         return CampaignRole.GM
-    return CampaignRole.PLAYER
+    return CampaignRole.PJ
+
+
+def campaign_role_for_profile(profile) -> CampaignRole:
+    """Compatibility wrapper for pre-BD-7 callers."""
+    raw = profile.value if hasattr(profile, "value") else profile
+    return (
+        CampaignRole.GM
+        if raw in {SystemRole.ADMIN.value, "gm"}
+        else CampaignRole.PJ
+    )
 
 
 async def get_default_campaign(session: AsyncSession) -> Campaign | None:
@@ -91,7 +101,7 @@ async def ensure_user_membership(
         membership = CampaignMember(
             user_id=user.id,
             campaign_id=campaign.id,
-            role=role or campaign_role_for_profile(user.profile),
+            role=role or campaign_role_for_system_role(user.system_role),
             character_id=character_id,
             joined_at=datetime.now(UTC),
         )
@@ -205,7 +215,7 @@ async def resolve_campaign_scope_for_auth(
             return None
         return CampaignScope(
             campaign_id=pj.campaign_id,
-            role=CampaignRole.PLAYER,
+            role=CampaignRole.PJ,
             character_id=pj.id,
         )
 
@@ -220,7 +230,7 @@ async def adopt_existing_users_into_default_campaign(
 ) -> Campaign | None:
     owner = await session.scalar(
         select(User)
-        .where(User.status == UserStatus.ACTIVE, User.profile == Profile.GM)
+        .where(User.status == UserStatus.ACTIVE, User.system_role == SystemRole.ADMIN)
         .order_by(User.created_at, User.id)
         .limit(1)
     )
@@ -240,7 +250,7 @@ async def adopt_existing_users_into_default_campaign(
             session,
             user=user,
             campaign=campaign,
-            role=campaign_role_for_profile(user.profile),
+            role=campaign_role_for_system_role(user.system_role),
         )
         if user.default_campaign_id is None:
             user.default_campaign_id = campaign.id

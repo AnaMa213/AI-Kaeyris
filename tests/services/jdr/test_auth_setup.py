@@ -49,7 +49,8 @@ async def test_setup_creates_first_gm_and_then_closes(make_db_session_dep):
 
     assert created.status_code == 201
     assert created.json()["username"] == "admin"
-    assert created.json()["profile"] == "gm"
+    assert created.json()["system_role"] == "admin"
+    assert "profile" not in created.json()
     assert "password_hash" not in created.text
     assert "session=" in created.headers["set-cookie"]
     assert status_after.json() == {"required": False}

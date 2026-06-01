@@ -162,7 +162,7 @@ class CampaignRepository(_BaseRepository):
             .join(CampaignMember, CampaignMember.campaign_id == Campaign.id)
             .outerjoin(stats, stats.c.campaign_id == Campaign.id)
             .where(CampaignMember.user_id == user_id)
-            .order_by(Campaign.created_at, Campaign.id)
+            .order_by(Campaign.created_at, Campaign.name, Campaign.id)
         )
         rows = (await self._session.execute(stmt)).all()
         return [
@@ -308,12 +308,14 @@ class PjRepository(_BaseRepository):
         *,
         name: str,
         owner_gm_key_id: UUID,
-        campaign_id: UUID | None = None,
+        campaign_id: UUID,
+        user_id: UUID | None = None,
     ) -> Pj:
         row = Pj(
             name=name,
             owner_gm_key_id=owner_gm_key_id,
             campaign_id=campaign_id,
+            user_id=user_id,
         )
         self._session.add(row)
         try:
@@ -332,22 +334,38 @@ class PjRepository(_BaseRepository):
     async def list_for_gm(
         self, gm_key_id: UUID, campaign_id: UUID | None = None
     ) -> list[Pj]:
-        _ = campaign_id
         stmt = (
             select(Pj)
             .where(Pj.owner_gm_key_id == gm_key_id)
             .order_by(Pj.created_at)
         )
+        if campaign_id is not None:
+            stmt = stmt.where(Pj.campaign_id == campaign_id)
+        result = await self._session.scalars(stmt)
+        return list(result.all())
+
+    async def list_for_member(
+        self, *, user_id: UUID, campaign_id: UUID | None = None
+    ) -> list[Pj]:
+        stmt = (
+            select(Pj)
+            .join(CampaignMember, CampaignMember.campaign_id == Pj.campaign_id)
+            .where(CampaignMember.user_id == user_id)
+            .order_by(Pj.created_at, Pj.id)
+        )
+        if campaign_id is not None:
+            stmt = stmt.where(Pj.campaign_id == campaign_id)
         result = await self._session.scalars(stmt)
         return list(result.all())
 
     async def find_by_id_owned_by(
         self, pj_id: UUID, gm_key_id: UUID, campaign_id: UUID | None = None
     ) -> Pj | None:
-        _ = campaign_id
         stmt = select(Pj).where(
             Pj.id == pj_id, Pj.owner_gm_key_id == gm_key_id
         )
+        if campaign_id is not None:
+            stmt = stmt.where(Pj.campaign_id == campaign_id)
         return await self._session.scalar(stmt)
 
 

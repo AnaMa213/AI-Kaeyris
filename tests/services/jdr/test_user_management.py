@@ -1,4 +1,4 @@
-"""GM user-management endpoint tests."""
+"""Admin user-management endpoint tests."""
 
 from collections.abc import Callable
 
@@ -26,7 +26,7 @@ async def _setup_admin(client: AsyncClient) -> None:
     assert response.status_code == 201
 
 
-async def test_gm_can_list_users_without_secrets(make_db_session_dep):
+async def test_admin_can_list_users_without_secrets(make_db_session_dep):
     app = _make_app(make_db_session_dep)
     transport = ASGITransport(app=app)
 
@@ -34,7 +34,7 @@ async def test_gm_can_list_users_without_secrets(make_db_session_dep):
         await _setup_admin(client)
         await client.post(
             "/services/jdr/users",
-            json={"username": "alice", "profile": "user", "password": "secret"},
+            json={"username": "alice", "system_role": "user", "password": "secret"},
         )
         response = await client.get("/services/jdr/users")
 
@@ -44,9 +44,12 @@ async def test_gm_can_list_users_without_secrets(make_db_session_dep):
         "alice",
     ]
     assert "password_hash" not in response.text
+    assert "profile" not in response.text
+    assert response.json()["items"][0]["system_role"] == "admin"
+    assert response.json()["items"][1]["system_role"] == "user"
 
 
-async def test_gm_can_rotate_password(make_db_session_dep):
+async def test_admin_can_rotate_password(make_db_session_dep):
     app = _make_app(make_db_session_dep)
     transport = ASGITransport(app=app)
 
@@ -54,7 +57,7 @@ async def test_gm_can_rotate_password(make_db_session_dep):
         await _setup_admin(client)
         created = await client.post(
             "/services/jdr/users",
-            json={"username": "alice", "profile": "user", "password": "old"},
+            json={"username": "alice", "system_role": "user", "password": "old"},
         )
         user_id = created.json()["id"]
         patched = await client.patch(
@@ -63,11 +66,11 @@ async def test_gm_can_rotate_password(make_db_session_dep):
         )
         old_login = await client.post(
             "/services/jdr/auth/login",
-            json={"username": "alice", "profile": "user", "password": "old"},
+            json={"username": "alice", "password": "old"},
         )
         new_login = await client.post(
             "/services/jdr/auth/login",
-            json={"username": "alice", "profile": "user", "password": "new"},
+            json={"username": "alice", "password": "new"},
         )
 
     assert patched.status_code == 200
@@ -83,13 +86,13 @@ async def test_delete_is_logical_and_blocks_future_login(make_db_session_dep):
         await _setup_admin(client)
         created = await client.post(
             "/services/jdr/users",
-            json={"username": "alice", "profile": "user", "password": "secret"},
+            json={"username": "alice", "system_role": "user", "password": "secret"},
         )
         user_id = created.json()["id"]
         deleted = await client.delete(f"/services/jdr/users/{user_id}")
         login = await client.post(
             "/services/jdr/auth/login",
-            json={"username": "alice", "profile": "user", "password": "secret"},
+            json={"username": "alice", "password": "secret"},
         )
         listed = await client.get("/services/jdr/users")
 
@@ -99,7 +102,7 @@ async def test_delete_is_logical_and_blocks_future_login(make_db_session_dep):
     assert alice["status"] == "deleted"
 
 
-async def test_non_gm_user_cannot_manage_users(make_db_session_dep):
+async def test_non_admin_user_cannot_manage_users(make_db_session_dep):
     app = _make_app(make_db_session_dep)
     transport = ASGITransport(app=app)
 
@@ -107,11 +110,11 @@ async def test_non_gm_user_cannot_manage_users(make_db_session_dep):
         await _setup_admin(client)
         await client.post(
             "/services/jdr/users",
-            json={"username": "alice", "profile": "user", "password": "secret"},
+            json={"username": "alice", "system_role": "user", "password": "secret"},
         )
         await client.post(
             "/services/jdr/auth/login",
-            json={"username": "alice", "profile": "user", "password": "secret"},
+            json={"username": "alice", "password": "secret"},
         )
         response = await client.get("/services/jdr/users")
 

@@ -136,11 +136,13 @@ Les routes protégées acceptent deux modes d'authentification :
 - un header `Authorization: Bearer <api_key>` pour les usages machine existants (cf. [ADR 0003](./docs/adr/0003-authentication-strategy.md)) ;
 - un cookie HTTP-only `session` posé après login web `username + password`.
 
-Sur une base vide, aucun compte par défaut n'existe. Le front doit appeler `GET /services/jdr/auth/setup/status`, afficher un écran de création du premier GM si `required=true`, puis appeler `POST /services/jdr/auth/setup` avec le `username` et le mot de passe choisis. Dès qu'un utilisateur existe, l'endpoint de setup est fermé.
+Sur une base vide, aucun compte par défaut n'existe. Le front doit appeler `GET /services/jdr/auth/setup/status`, afficher un écran de création du premier administrateur si `required=true`, puis appeler `POST /services/jdr/auth/setup` avec le `username` et le mot de passe choisis. Dès qu'un utilisateur existe, l'endpoint de setup est fermé.
 
 Le login front utilise `POST /services/jdr/auth/login` et reçoit un cookie `session` HTTP-only en cas de succès. Les requêtes navigateur doivent envoyer les cookies avec `credentials: "include"`.
 
-Après setup ou login, le front peut appeler `GET /services/jdr/auth/me` avec le cookie `session`. La réponse contient uniquement l'identité publique (`id`, `username`) et la campagne JDR active (`id`, `name`, `role`, `character_id`). Le setup crée automatiquement la campagne V1 par défaut et rattache le premier GM ; les utilisateurs créés via `POST /services/jdr/users` sont rattachés à la campagne active du créateur.
+Après setup ou login, le front peut appeler `GET /services/jdr/auth/me` avec le cookie `session`. La réponse contient l'identité publique (`id`, `username`, `system_role`) et la campagne JDR active (`id`, `name`, `role`, `character_id`). `system_role` vaut `admin` ou `user`; le rôle de campagne vaut `gm` ou `pj`. Le setup crée automatiquement la campagne V1 par défaut et rattache le premier administrateur comme GM ; les utilisateurs créés via `POST /services/jdr/users` sont rattachés à la campagne active du créateur comme PJ.
+
+Depuis BD-7, la gestion des comptes `POST/GET/PATCH/DELETE /services/jdr/users` est réservée aux administrateurs globaux. Un utilisateur standard peut quand même créer une campagne via `POST /services/jdr/campaigns` et devient alors GM de cette campagne.
 
 Les clés API restent disponibles pour l'automatisation :
 
@@ -233,14 +235,16 @@ rq worker default --url redis://localhost:6379/0
 Scénario E2E (résumé — la procédure complète est dans [`specs/001-kaeyris-jdr/quickstart.md`](./specs/001-kaeyris-jdr/quickstart.md)) :
 
 1. MJ : `POST /services/jdr/sessions` avec `campaign_id` puis `POST /sessions/{id}/audio` (M4A) → job de transcription.
-2. MJ : `POST /pjs`, `PUT /sessions/{id}/mapping` pour relier `speaker_X` à chaque PJ.
+2. MJ : `POST /pjs`, `PUT /sessions/{id}/mapping` pour relier `speaker_X` à chaque PJ de la campagne.
 3. MJ : `POST /sessions/{id}/artifacts/{narrative|elements|povs}` puis polling `GET /jobs/{id}`.
 4. MJ : `POST /players` pour enrôler un joueur (token plaintext renvoyé **une seule fois**).
 5. Joueur : `GET /me`, `GET /me/sessions`, `GET /me/sessions/{id}/{narrative|pov}[.md]` — strictement scoppé à son PJ (FR-014).
 
 Depuis BD-6, les campagnes ont un CRUD dédié pour le front web : `GET/POST /services/jdr/campaigns`, puis `GET/PATCH/DELETE /services/jdr/campaigns/{campaign_id}`. Les réponses exposent `role`, `session_count`, `last_session_at` et des datetimes avec timezone explicite.
 
-La création de session exige maintenant un `campaign_id` explicite. La liste des sessions accepte `GET /services/jdr/sessions?campaign_id=<uuid>` pour filtrer une campagne ; sans query param, la liste non filtrée reste disponible pour compatibilité. Les PJ publics restent globaux au MJ sur BD-6.
+La création de session exige maintenant un `campaign_id` explicite. La liste des sessions accepte `GET /services/jdr/sessions?campaign_id=<uuid>` pour filtrer une campagne ; sans query param, la liste non filtrée reste disponible pour compatibilité.
+
+Depuis BD-7, les PJ sont scoppés par campagne : `POST /services/jdr/pjs` accepte `campaign_id` et `user_id` optionnels, retombe sur la campagne par défaut du GM web si `campaign_id` est omis, et répond toujours avec `campaign_id` plus `user_id`. `GET /services/jdr/pjs?campaign_id=<uuid>` filtre une campagne après contrôle de membership ; sans filtre, la route retourne les PJ des campagnes où l'utilisateur web est membre.
 
 ```json
 {

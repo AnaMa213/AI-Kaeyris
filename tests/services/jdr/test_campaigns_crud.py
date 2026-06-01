@@ -77,7 +77,7 @@ async def test_list_campaigns_returns_memberships_with_aggregates(
         db_session,
         user=gm,
         campaign=campaign_b,
-        role=CampaignRole.PLAYER,
+        role=CampaignRole.PJ,
     )
     latest = datetime(2026, 5, 29, 18, 30, tzinfo=UTC)
     await make_session(db_session, owner=gm, campaign=campaign_a, recorded_at=latest)
@@ -96,7 +96,7 @@ async def test_list_campaigns_returns_memberships_with_aggregates(
     assert items[0]["role"] == "gm"
     assert items[0]["session_count"] == 1
     assert items[0]["last_session_at"].endswith(("Z", "+00:00"))
-    assert items[1]["role"] == "player"
+    assert items[1]["role"] == "pj"
     assert items[1]["session_count"] == 0
     assert items[1]["last_session_at"] is None
 
@@ -162,7 +162,7 @@ async def test_patch_campaign_requires_gm_membership(db_session, make_db_session
         db_session,
         user=player,
         campaign=campaign,
-        role=CampaignRole.PLAYER,
+        role=CampaignRole.PJ,
     )
     await db_session.commit()
 

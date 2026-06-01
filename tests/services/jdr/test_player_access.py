@@ -24,6 +24,7 @@ from app.core.redis_client import get_redis
 from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
+    Campaign,
     Artifact,
     Pj,
     Role,
@@ -60,8 +61,12 @@ async def _seed_two_players(db_session):
     await db_session.commit()
     await db_session.refresh(gm)
 
-    pj_a = Pj(name="PjA", owner_gm_key_id=gm.id)
-    pj_b = Pj(name="PjB", owner_gm_key_id=gm.id)
+    campaign = Campaign(name="Access campaign", owner_user_id=uuid4())
+    db_session.add(campaign)
+    await db_session.flush()
+
+    pj_a = Pj(name="PjA", owner_gm_key_id=gm.id, campaign_id=campaign.id)
+    pj_b = Pj(name="PjB", owner_gm_key_id=gm.id, campaign_id=campaign.id)
     db_session.add(pj_a)
     db_session.add(pj_b)
     await db_session.commit()
@@ -90,6 +95,7 @@ async def _seed_two_players(db_session):
         title="Access-iso session",
         recorded_at=datetime.now(UTC),
         gm_key_id=gm.id,
+        campaign_id=campaign.id,
         state=SessionState.TRANSCRIBED,
     )
     db_session.add(session)
