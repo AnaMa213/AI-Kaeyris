@@ -443,3 +443,24 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
 - Pas de CRUD campagne ni de switch campagne dans BD-4.
 - Les colonnes `campaign_id` restent tolérantes côté ORM pendant la transition ; les chemins applicatifs nouveaux les renseignent systématiquement.
 - Les API keys GM sans utilisateur web associé restent un mode legacy à surveiller si on ajoute du multi-campagne réel.
+
+---
+
+## 2026-06-01 — BD-5 : Datetime JSON avec timezone explicite
+
+### Ce qui a été fait
+
+- Ajout d'un helper transversal `app/core/datetime_serialization.py` pour interpréter les datetimes naïves comme UTC, convertir les datetimes aware en UTC, et sérialiser avec suffixe explicite.
+- Branchement de ce helper dans les schémas Pydantic JDR et user/auth plutôt que dans les handlers HTTP.
+- Tests de contrat sur les réponses session, liste session, PJ, users, et sur les variantes d'input `Z`, offset numérique, et naïf.
+
+### Ce que j'ai appris
+
+- `DateTime(timezone=True)` ne garantit pas à lui seul que toutes les valeurs ressortent aware dans tous les environnements, notamment avec SQLite en dev. Le contrat public doit donc être testé au niveau HTTP.
+- Une correction de sérialisation est moins risquée qu'une migration globale quand les colonnes sont déjà déclarées timezone-aware et que le bug visible est le JSON de sortie.
+- Les tests doivent viser le symptôme client (`"2026-05-31T18:00:00"` sans suffixe) plutôt que seulement le type Python interne.
+
+### Limitations acceptées
+
+- Pas de migration DB ajoutée tant qu'aucun test ne prouve un problème de stockage non normalisable à la sortie.
+- `/services/jdr/auth/me` n'expose pas de datetime aujourd'hui ; le test associé reste un garde souple pour valider ses datetimes si le payload évolue.

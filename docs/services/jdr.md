@@ -91,6 +91,11 @@ Au premier démarrage, l'app importe cette entrée dans `jdr_api_keys` avec `rol
 
 Les API keys historiques restent supportées pour les clients machine. Pour compatibilité avec les tables JDR existantes, un compte web `gm` reçoit aussi une clé JDR interne non exposée : les ownership FKs continuent donc de pointer vers `jdr_api_keys`.
 
+**Contrat datetime JSON** :
+- Tous les champs datetime publics (`recorded_at`, `created_at`, `updated_at`, `uploaded_at`, `generated_at`, etc.) sont sérialisés avec un fuseau explicite.
+- Le suffixe UTC peut être `+00:00` ou `Z`; une valeur sans suffixe timezone est une régression de contrat.
+- Les inputs datetime historiques restent acceptés : `Z`, offset numérique, ou valeur naïve interprétée comme UTC.
+
 **Bascule transcription cloud → local** (sans modifier le code) :
 ```ini
 TRANSCRIPTION_PROVIDER=local

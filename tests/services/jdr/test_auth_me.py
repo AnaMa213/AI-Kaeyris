@@ -19,6 +19,9 @@ from tests.services.jdr.campaign_fixtures import (
     make_user,
     make_web_session,
 )
+from tests.services.jdr.test_datetime_serialization import (
+    assert_datetime_fields_have_explicit_timezone,
+)
 
 
 def _make_app(make_db_session_dep: Callable[..., object]) -> FastAPI:
@@ -46,6 +49,7 @@ async def test_auth_me_returns_gm_identity_and_active_campaign(
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
+    assert_datetime_fields_have_explicit_timezone(response.json())
     assert response.json() == {
         "user": {"id": str(gm.id), "username": "admin"},
         "active_campaign": {
