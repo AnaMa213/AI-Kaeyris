@@ -114,17 +114,19 @@ alembic history                     # historique des migrations
 | `POST /sessions/{id}/artifacts/summary` | Déclenche le map-reduce LLM (non_diarised) |
 | `GET  /sessions/{id}/artifacts/summary[.md]` | Lit le résumé global (non_diarised) |
 
-### Campagnes JDR BD-6
+### Campagnes et PJ JDR BD-6/BD-7
 
 | Endpoint | Action |
 |---|---|
 | `GET /services/jdr/campaigns` | Liste les campagnes du user connecté avec rôle, compte sessions, dernière session et création |
-| `POST /services/jdr/campaigns` | Crée une campagne et rattache le créateur en `gm` |
+| `POST /services/jdr/campaigns` | Crée une campagne pour tout user web authentifié et rattache le créateur en `gm` |
 | `GET /services/jdr/campaigns/{campaign_id}` | Lit une campagne si le user en est membre |
 | `PATCH /services/jdr/campaigns/{campaign_id}` | Modifie `name` / `description` si le user est `gm` de la campagne |
 | `DELETE /services/jdr/campaigns/{campaign_id}` | Supprime seulement une campagne vide ; `409` si elle contient des sessions |
 | `POST /services/jdr/sessions` | Exige `campaign_id` dans le body |
 | `GET /services/jdr/sessions?campaign_id=<uuid>` | Filtre les sessions d'une campagne après vérification de membership |
+| `POST /services/jdr/pjs` | Crée un PJ scoppé campagne ; `campaign_id` et `user_id` sont optionnels |
+| `GET /services/jdr/pjs?campaign_id=<uuid>` | Liste les PJ d'une campagne ou, sans filtre, ceux des campagnes visibles |
 
 ```powershell
 curl -X POST http://localhost:8000/services/jdr/campaigns `
@@ -299,16 +301,16 @@ Puis dans le nouveau dossier :
 
 ---
 
-## Authentification web (feature 003)
+## Authentification web (BD-7)
 
 | Endpoint | Rôle |
 |---|---|
-| `GET /services/jdr/auth/setup/status` | Indique si la base vide exige la création du premier GM |
-| `POST /services/jdr/auth/setup` | Crée le premier GM (`username` + `password`) et pose `session` |
-| `POST /services/jdr/auth/login` | Login web `username` + `profile` + `password`, pose un cookie HTTP-only |
-| `GET /services/jdr/auth/me` | Retourne l'utilisateur web courant + sa campagne JDR active (`gm`/`player`) |
+| `GET /services/jdr/auth/setup/status` | Indique si la base vide exige la création du premier administrateur |
+| `POST /services/jdr/auth/setup` | Crée le premier admin (`username` + `password`) et pose `session` |
+| `POST /services/jdr/auth/login` | Login web `username` + `password`, pose un cookie HTTP-only |
+| `GET /services/jdr/auth/me` | Retourne l'utilisateur web courant (`system_role`) + sa campagne active (`gm`/`pj`) |
 | `POST /services/jdr/auth/logout` | Révoque la session courante et expire le cookie |
-| `POST/GET/PATCH/DELETE /services/jdr/users` | Gestion GM des comptes applicatifs |
+| `POST/GET/PATCH/DELETE /services/jdr/users` | Gestion des comptes réservée aux admins globaux |
 
 | Var env | Default | Rôle |
 |---|---|---|
@@ -326,6 +328,13 @@ curl -X POST http://localhost:8000/services/jdr/auth/setup `
 curl http://localhost:8000/services/jdr/auth/me `
   -H "Cookie: session=<cookie_session>"
 ```
+
+| Geste BD-7 local/staging | Pourquoi |
+|---|---|
+| Purger la DB puis `alembic upgrade head` | Repartir d'un schéma sans PJ orphelin avant `campaign_id NOT NULL` |
+| `POST /services/jdr/auth/setup` | Créer explicitement le premier admin et sa campagne GM par défaut |
+| `GET /services/jdr/auth/me` | Vérifier `system_role=admin`, `active_campaign.role=gm` et absence de `profile` |
+| Aucun mot de passe par défaut | Eviter un credential hardcodé hors choix explicite opérateur |
 
 ## Authentification API key (Jalon 2 — ADR 0003)
 
