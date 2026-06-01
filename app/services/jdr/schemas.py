@@ -16,7 +16,9 @@ from datetime import datetime
 from typing import Generic, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+
+from app.core.datetime_serialization import ensure_aware_utc, serialize_datetime_utc
 
 from app.services.jdr.db.models import (
     JobKind,
@@ -29,12 +31,22 @@ from app.services.jdr.db.models import (
 T = TypeVar("T")
 
 
+class JdrSchema(BaseModel):
+    """Base schema for JDR JSON output conventions."""
+
+    @field_serializer("*", when_used="json", check_fields=False)
+    def serialize_datetimes(self, value):
+        if isinstance(value, datetime):
+            return serialize_datetime_utc(value)
+        return value
+
+
 # ---------------------------------------------------------------------------
 # Sessions (US1)
 # ---------------------------------------------------------------------------
 
 
-class SessionCreate(BaseModel):
+class SessionCreate(JdrSchema):
     """Payload accepted by ``POST /services/jdr/sessions``."""
 
     title: str = Field(..., min_length=1, max_length=500)
@@ -65,8 +77,13 @@ class SessionCreate(BaseModel):
         ),
     )
 
+    @field_validator("recorded_at")
+    @classmethod
+    def normalize_recorded_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
 
-class SessionUpdate(BaseModel):
+
+class SessionUpdate(JdrSchema):
     """Payload accepted by ``PATCH /services/jdr/sessions/{id}``.
 
     Every field is optional — the route applies only the keys that are
@@ -79,7 +96,7 @@ class SessionUpdate(BaseModel):
     campaign_context: str | None = Field(default=None, max_length=8000)
 
 
-class SessionOut(BaseModel):
+class SessionOut(JdrSchema):
     """Public projection of ``jdr_sessions`` rows."""
 
     model_config = ConfigDict(from_attributes=True)
@@ -95,7 +112,7 @@ class SessionOut(BaseModel):
     updated_at: datetime
 
 
-class AudioUploadOut(BaseModel):
+class AudioUploadOut(JdrSchema):
     """Response of ``POST /sessions/{id}/audio``."""
 
     model_config = ConfigDict(from_attributes=True)
@@ -124,7 +141,7 @@ class AudioUploadOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class TranscriptionSegmentOut(BaseModel):
+class TranscriptionSegmentOut(JdrSchema):
     """One diarised utterance in a transcription."""
 
     speaker_label: str = Field(
@@ -140,7 +157,7 @@ class TranscriptionSegmentOut(BaseModel):
     text: str
 
 
-class TranscriptionOut(BaseModel):
+class TranscriptionOut(JdrSchema):
     """Public projection of ``jdr_transcriptions`` rows."""
 
     session_id: UUID
@@ -156,13 +173,13 @@ class TranscriptionOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class PjCreate(BaseModel):
+class PjCreate(JdrSchema):
     """Payload accepted by ``POST /services/jdr/pjs``."""
 
     name: str = Field(..., min_length=1, max_length=255)
 
 
-class PjOut(BaseModel):
+class PjOut(JdrSchema):
     """Public projection of ``jdr_pjs`` rows."""
 
     model_config = ConfigDict(from_attributes=True)
@@ -177,7 +194,7 @@ class PjOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class MappingPut(BaseModel):
+class MappingPut(JdrSchema):
     """Body for ``PUT /services/jdr/sessions/{session_id}/mapping``.
 
     Shape ``{speaker_label: pj_id}`` per ``contracts/rest-api.md``
@@ -190,7 +207,7 @@ class MappingPut(BaseModel):
     )
 
 
-class MappingOut(BaseModel):
+class MappingOut(JdrSchema):
     """Response for both PUT and GET ``/mapping``.
 
     ``updated_at`` is the most recent ``updated_at`` across the rows,
@@ -207,7 +224,7 @@ class MappingOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class NarrativeArtifactOut(BaseModel):
+class NarrativeArtifactOut(JdrSchema):
     """Public projection of an ``Artifact(kind='narrative')`` row."""
 
     session_id: UUID
@@ -221,7 +238,7 @@ class NarrativeArtifactOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class PovArtifactOut(BaseModel):
+class PovArtifactOut(JdrSchema):
     """Public projection of an ``Artifact(kind='pov:<pj_id>')`` row.
 
     ``pj_id`` is exposed at the top level for clients that don't want to
@@ -240,14 +257,14 @@ class PovArtifactOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class PlayerCreate(BaseModel):
+class PlayerCreate(JdrSchema):
     """Body for ``POST /services/jdr/players``."""
 
     name: str = Field(..., min_length=1, max_length=255)
     pj_id: UUID
 
 
-class PlayerOut(BaseModel):
+class PlayerOut(JdrSchema):
     """Response of ``POST /services/jdr/players``.
 
     ``token`` is the *plaintext* Bearer token; it is returned **once** at
@@ -269,7 +286,7 @@ class PlayerOut(BaseModel):
     created_at: datetime
 
 
-class PjMini(BaseModel):
+class PjMini(JdrSchema):
     """Compact PJ projection used inside ``MeOut``."""
 
     model_config = ConfigDict(from_attributes=True)
@@ -278,14 +295,14 @@ class PjMini(BaseModel):
     name: str
 
 
-class MeOut(BaseModel):
+class MeOut(JdrSchema):
     """Response of ``GET /services/jdr/me``."""
 
     name: str
     pj: PjMini
 
 
-class PlayerSessionItem(BaseModel):
+class PlayerSessionItem(JdrSchema):
     """One row of ``GET /services/jdr/me/sessions``."""
 
     session_id: UUID
@@ -293,7 +310,7 @@ class PlayerSessionItem(BaseModel):
     recorded_at: datetime
 
 
-class PlayerSessionListOut(BaseModel):
+class PlayerSessionListOut(JdrSchema):
     """Envelope for ``GET /services/jdr/me/sessions``."""
 
     items: list[PlayerSessionItem]
@@ -304,7 +321,7 @@ class PlayerSessionListOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class Element(BaseModel):
+class Element(JdrSchema):
     """One row of the four-category elements card.
 
     The LLM may return arbitrary keys; we surface only ``name`` and
@@ -317,7 +334,7 @@ class Element(BaseModel):
     )
 
 
-class ElementsArtifactOut(BaseModel):
+class ElementsArtifactOut(JdrSchema):
     """Public projection of an ``Artifact(kind='elements')`` row.
 
     The four lists are *always* present, even when empty (``[]``). See
@@ -333,7 +350,7 @@ class ElementsArtifactOut(BaseModel):
     generated_at: datetime
 
 
-class JobQueuedOut(BaseModel):
+class JobQueuedOut(JdrSchema):
     """Reply to an artefact-trigger POST: a freshly enqueued RQ job.
 
     Status starts at ``queued``; the worker updates it as it processes.
@@ -348,7 +365,7 @@ class JobQueuedOut(BaseModel):
     queued_at: datetime
 
 
-class JobOut(BaseModel):
+class JobOut(JdrSchema):
     """Job status projection — see ``data-model.md`` §8."""
 
     model_config = ConfigDict(from_attributes=True)
@@ -363,7 +380,7 @@ class JobOut(BaseModel):
     ended_at: datetime | None = None
 
 
-class Page(BaseModel, Generic[T]):
+class Page(JdrSchema, Generic[T]):
     """Generic paginated envelope.
 
     Conventions:
@@ -383,7 +400,7 @@ class Page(BaseModel, Generic[T]):
 # ---------------------------------------------------------------------------
 
 
-class ChunkOut(BaseModel):
+class ChunkOut(JdrSchema):
     """One row of `jdr_chunks` as exposed by `GET /sessions/{id}/chunks`.
 
     `summary_text` is intentionally NOT exposed — it is internal to the
@@ -397,14 +414,14 @@ class ChunkOut(BaseModel):
     text: str
 
 
-class ChunkListOut(BaseModel):
+class ChunkListOut(JdrSchema):
     """Response of `GET /services/jdr/sessions/{session_id}/chunks`."""
 
     session_id: UUID
     items: list[ChunkOut]
 
 
-class SummaryArtifactOut(BaseModel):
+class SummaryArtifactOut(JdrSchema):
     """Public projection of an ``Artifact(kind='summary')`` row."""
 
     session_id: UUID
@@ -413,7 +430,7 @@ class SummaryArtifactOut(BaseModel):
     generated_at: datetime
 
 
-class SessionPlayersIn(BaseModel):
+class SessionPlayersIn(JdrSchema):
     """Body of `POST /services/jdr/sessions/{session_id}/players`.
 
     Replaces the player list integrally (PUT-like semantics).
@@ -422,7 +439,7 @@ class SessionPlayersIn(BaseModel):
     pj_ids: list[UUID] = Field(..., min_length=1, max_length=50)
 
 
-class SessionPlayersOut(BaseModel):
+class SessionPlayersOut(JdrSchema):
     """Response of `POST` and `GET /sessions/{session_id}/players`."""
 
     session_id: UUID

@@ -44,6 +44,7 @@
 | **Caddy v2** (Jalon 8) | reverse proxy HTTP LAN (HTTPS triviale à activer), `basic_auth` sur `/metrics` |
 | **Prometheus** (Jalon 8) | TSDB pull-based, scrape `api:8000/metrics`, rétention 15j sur volume |
 | **Grafana 11.3** (Jalon 8) | UI métriques, provisioning automatique (datasource + dashboards) depuis le repo |
+| **Helper datetime UTC-aware** | contrat JSON stable : toute datetime publique sort avec timezone explicite, sans dépendance externe |
 
 ---
 
@@ -86,6 +87,7 @@ pytest -v                           # verbeux (1 ligne par test)
 pytest tests/test_health.py         # un fichier précis
 pytest -k "health"                  # tests dont le nom matche
 pytest --cov=app                    # couverture (nécessite pytest-cov)
+pytest tests/core/test_datetime_serialization.py tests/services/jdr/test_datetime_serialization.py -q  # contrat timezone JSON
 ```
 
 ### Persistance + migrations (Jalon 5+)

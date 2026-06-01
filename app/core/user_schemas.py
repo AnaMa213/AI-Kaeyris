@@ -5,33 +5,44 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
+from app.core.datetime_serialization import serialize_datetime_utc
 from app.core.models import Profile, UserStatus
 
 
-class SetupStatusOut(BaseModel):
+class UserSchema(BaseModel):
+    """Base schema for browser-auth JSON output conventions."""
+
+    @field_serializer("*", when_used="json", check_fields=False)
+    def serialize_datetimes(self, value):
+        if isinstance(value, datetime):
+            return serialize_datetime_utc(value)
+        return value
+
+
+class SetupStatusOut(UserSchema):
     required: bool
 
 
-class SetupRequest(BaseModel):
+class SetupRequest(UserSchema):
     username: str = Field(min_length=1, max_length=150)
     password: str = Field(min_length=1, max_length=256)
 
 
-class LoginRequest(BaseModel):
+class LoginRequest(UserSchema):
     username: str = Field(min_length=1, max_length=150)
     profile: str = Field(min_length=1, max_length=32)
     password: str = Field(min_length=1, max_length=256)
 
 
-class UserCreate(BaseModel):
+class UserCreate(UserSchema):
     username: str = Field(min_length=1, max_length=150)
     profile: Profile
     password: str = Field(min_length=1, max_length=256)
 
 
-class UserUpdate(BaseModel):
+class UserUpdate(UserSchema):
     profile: Profile | None = None
     password: str | None = Field(default=None, min_length=1, max_length=256)
     status: UserStatus | None = None
@@ -43,7 +54,7 @@ class UserUpdate(BaseModel):
         return self
 
 
-class UserOut(BaseModel):
+class UserOut(UserSchema):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
@@ -55,22 +66,22 @@ class UserOut(BaseModel):
     last_login_at: datetime | None = None
 
 
-class UserListOut(BaseModel):
+class UserListOut(UserSchema):
     items: list[UserOut]
 
 
-class AuthMeUserOut(BaseModel):
+class AuthMeUserOut(UserSchema):
     id: UUID
     username: str
 
 
-class AuthMeCampaignOut(BaseModel):
+class AuthMeCampaignOut(UserSchema):
     id: UUID
     name: str
     role: str
     character_id: UUID | None = None
 
 
-class AuthMeOut(BaseModel):
+class AuthMeOut(UserSchema):
     user: AuthMeUserOut
     active_campaign: AuthMeCampaignOut | None = None
