@@ -263,8 +263,15 @@ async def revoke_user_sessions(session: AsyncSession, user_id: UUID) -> None:
         web_session.revoked_at = now
 
 
-async def list_users(session: AsyncSession) -> list[User]:
-    result = await session.scalars(select(User).order_by(User.username.asc()))
+async def list_users(
+    session: AsyncSession, user_ids: set[UUID] | None = None
+) -> list[User]:
+    stmt = select(User).order_by(User.username.asc())
+    if user_ids is not None:
+        if not user_ids:
+            return []
+        stmt = stmt.where(User.id.in_(user_ids))
+    result = await session.scalars(stmt)
     return list(result.all())
 
 

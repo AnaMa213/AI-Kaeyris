@@ -134,6 +134,7 @@ async def create_session(
     title: str,
     recorded_at: datetime,
     gm_key_id: UUID,
+    campaign_id: UUID | None = None,
     campaign_context: str | None = None,
     transcription_mode: TranscriptionMode = TranscriptionMode.DIARISED,
 ) -> Session:
@@ -141,6 +142,7 @@ async def create_session(
         title=title,
         recorded_at=recorded_at,
         gm_key_id=gm_key_id,
+        campaign_id=campaign_id,
         campaign_context=campaign_context,
         transcription_mode=transcription_mode,
     )
@@ -168,6 +170,7 @@ async def set_session_players(
     session: Session,
     pj_ids: list[UUID],
     gm_key_id: UUID,
+    campaign_id: UUID | None = None,
 ) -> list[UUID]:
     """Remplace la liste des PJ présents pour une session non_diarised.
 
@@ -181,6 +184,8 @@ async def set_session_players(
         stmt = select(Pj.id).where(
             Pj.id.in_(unique_ids), Pj.owner_gm_key_id == gm_key_id
         )
+        if campaign_id is not None:
+            stmt = stmt.where(Pj.campaign_id == campaign_id)
         found = set((await db.execute(stmt)).scalars().all())
         missing = unique_ids - found
         if missing:
@@ -230,15 +235,21 @@ async def update_session(
 
 
 async def list_sessions(
-    db: AsyncSession, *, gm_key_id: UUID
+    db: AsyncSession, *, gm_key_id: UUID, campaign_id: UUID | None = None
 ) -> list[Session]:
-    return await SessionRepository(db).list_for_gm(gm_key_id)
+    return await SessionRepository(db).list_for_gm(gm_key_id, campaign_id)
 
 
 async def get_session(
-    db: AsyncSession, *, session_id: UUID, gm_key_id: UUID
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    gm_key_id: UUID,
+    campaign_id: UUID | None = None,
 ) -> Session | None:
-    return await SessionRepository(db).get_for_gm(session_id, gm_key_id)
+    return await SessionRepository(db).get_for_gm(
+        session_id, gm_key_id, campaign_id
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +337,11 @@ async def store_audio_source_for_session(
 
 
 async def create_pj(
-    db: AsyncSession, *, name: str, gm_key_id: UUID
+    db: AsyncSession,
+    *,
+    name: str,
+    gm_key_id: UUID,
+    campaign_id: UUID | None = None,
 ) -> Pj:
     """Create a PJ scoped to the current MJ.
 
@@ -336,7 +351,9 @@ async def create_pj(
     """
     try:
         pj = await PjRepository(db).create(
-            name=name, owner_gm_key_id=gm_key_id
+            name=name,
+            owner_gm_key_id=gm_key_id,
+            campaign_id=campaign_id,
         )
     except DuplicatePjNameError as exc:
         raise DuplicatePjError(str(exc)) from exc
@@ -364,7 +381,12 @@ class EnrollPlayerResult:
 
 
 async def enroll_player(
-    db: AsyncSession, *, name: str, pj_id: UUID, gm_key_id: UUID
+    db: AsyncSession,
+    *,
+    name: str,
+    pj_id: UUID,
+    gm_key_id: UUID,
+    campaign_id: UUID | None = None,
 ) -> EnrollPlayerResult:
     """Create a player API key bound to one of the GM's PJs.
 
@@ -373,7 +395,9 @@ async def enroll_player(
     random token (≥ 32 bytes of entropy), hashes it with Argon2, and
     inserts a ``role='player'`` row.
     """
-    pj = await PjRepository(db).find_by_id_owned_by(pj_id, gm_key_id)
+    pj = await PjRepository(db).find_by_id_owned_by(
+        pj_id, gm_key_id, campaign_id
+    )
     if pj is None:
         raise InvalidPlayerError(
             f"PJ {pj_id} is unknown or owned by another MJ."
@@ -394,7 +418,11 @@ async def enroll_player(
 
 
 async def revoke_player(
-    db: AsyncSession, *, player_id: UUID, gm_key_id: UUID
+    db: AsyncSession,
+    *,
+    player_id: UUID,
+    gm_key_id: UUID,
+    campaign_id: UUID | None = None,
 ) -> bool:
     """Revoke a player key.
 
@@ -411,6 +439,8 @@ async def revoke_player(
             Pj.owner_gm_key_id == gm_key_id,
         )
     )
+    if campaign_id is not None:
+        stmt = stmt.where(Pj.campaign_id == campaign_id)
     row = await db.scalar(stmt)
     if row is None:
         return False
@@ -421,7 +451,7 @@ async def revoke_player(
 
 
 async def list_player_sessions(
-    db: AsyncSession, *, player_pj_id: UUID
+    db: AsyncSession, *, player_pj_id: UUID, campaign_id: UUID | None = None
 ) -> list[Session]:
     """Return the sessions where the player's PJ is mapped (FR-014).
 
@@ -434,32 +464,48 @@ async def list_player_sessions(
         .order_by(Session.created_at)
         .distinct()
     )
+    if campaign_id is not None:
+        stmt = stmt.where(Session.campaign_id == campaign_id)
     rows = await db.scalars(stmt)
     return list(rows.all())
 
 
 async def is_pj_mapped_on_session(
-    db: AsyncSession, *, session_id: UUID, pj_id: UUID
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    pj_id: UUID,
+    campaign_id: UUID | None = None,
 ) -> bool:
     """True iff the (session_id, *, pj_id) row exists in the mapping."""
     stmt = (
         select(SessionPjMapping.session_id)
+        .join(Session, Session.id == SessionPjMapping.session_id)
         .where(
             SessionPjMapping.session_id == session_id,
             SessionPjMapping.pj_id == pj_id,
         )
         .limit(1)
     )
+    if campaign_id is not None:
+        stmt = stmt.where(Session.campaign_id == campaign_id)
     return (await db.scalar(stmt)) is not None
 
 
-async def get_player_pj(db: AsyncSession, *, pj_id: UUID) -> Pj | None:
+async def get_player_pj(
+    db: AsyncSession, *, pj_id: UUID, campaign_id: UUID | None = None
+) -> Pj | None:
     """Load the PJ row referenced by a player key (for GET /me)."""
-    return await db.scalar(select(Pj).where(Pj.id == pj_id))
+    stmt = select(Pj).where(Pj.id == pj_id)
+    if campaign_id is not None:
+        stmt = stmt.where(Pj.campaign_id == campaign_id)
+    return await db.scalar(stmt)
 
 
-async def list_pjs(db: AsyncSession, *, gm_key_id: UUID) -> list[Pj]:
-    return await PjRepository(db).list_for_gm(gm_key_id)
+async def list_pjs(
+    db: AsyncSession, *, gm_key_id: UUID, campaign_id: UUID | None = None
+) -> list[Pj]:
+    return await PjRepository(db).list_for_gm(gm_key_id, campaign_id)
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +537,7 @@ async def set_session_mapping(
     session: Session,
     mapping: dict[str, UUID],
     gm_key_id: UUID,
+    campaign_id: UUID | None = None,
 ) -> MappingResult:
     """Replace the session's speaker→PJ mapping atomically.
 
@@ -506,6 +553,8 @@ async def set_session_mapping(
             Pj.id.in_(unique_pj_ids),
             Pj.owner_gm_key_id == gm_key_id,
         )
+        if campaign_id is not None:
+            stmt = stmt.where(Pj.campaign_id == campaign_id)
         found_ids = set((await db.execute(stmt)).scalars().all())
         missing = unique_pj_ids - found_ids
         if missing:

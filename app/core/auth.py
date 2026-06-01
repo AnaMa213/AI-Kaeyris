@@ -106,6 +106,7 @@ class AuthenticatedKey:
     role: Role | Profile
     pj_id: UUID | None
     source: str = "api_key"
+    user_id: UUID | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +289,7 @@ async def require_api_key(
                 role=user.profile,
                 pj_id=None,
                 source="web_session",
+                user_id=user.id,
             )
 
     raise UnauthorizedError(detail="Missing or malformed credentials.")

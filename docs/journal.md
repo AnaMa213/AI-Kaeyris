@@ -419,3 +419,27 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
 - Pas d'OAuth/OIDC, invitation email, reset email ou self-service signup public.
 - Les profils web sont limités à `gm` et `user`; `user` n'est pas encore mappé au rôle JDR `player`.
 - La garantie anti double-setup est verrouillée par process applicatif ; en multi-process strict, il faudra renforcer avec contrainte/lock DB.
+
+---
+
+## 2026-05-31 — Feature 004 : Campaign auth context BD-4
+
+### Ce qui a été fait
+
+- Ajout de `GET /services/jdr/auth/me` pour le front web : cookie `session` obligatoire, réponse publique `user` + `active_campaign`, `Cache-Control: no-store`.
+- Ajout des tables `jdr_campaigns` et `jdr_campaign_members`, de `core_users.default_campaign_id`, et de `campaign_id` sur `jdr_sessions` / `jdr_pjs`.
+- First-run setup et création d'utilisateurs rattachent automatiquement les comptes à la campagne V1 par défaut.
+- Les listes et accès JDR principaux filtrent maintenant par campagne active dérivée côté serveur.
+- Tests ciblés ajoutés pour `/auth/me`, memberships, adoption/backfill, isolation campagne, et régressions auth existantes.
+
+### Ce que j'ai appris
+
+- **Le commit 003 n'était pas BD-4** : login/setup/users peut fonctionner tout en laissant `/auth/me` non implémenté. Une feature d'auth web et une feature de contexte runtime ne sont pas le même contrat.
+- **Le scope ne doit pas venir du client** : ne pas accepter `campaign_id` dans les bodies évite un contournement d'autorisation classique. La campagne active vient de la session ou du PJ lié à une clé joueur.
+- **Compatibilité progressive** : garder les API keys Bearer prioritaires permet aux clients machine existants de continuer, tout en ajoutant le contexte riche nécessaire au front.
+
+### Limitations acceptées
+
+- Pas de CRUD campagne ni de switch campagne dans BD-4.
+- Les colonnes `campaign_id` restent tolérantes côté ORM pendant la transition ; les chemins applicatifs nouveaux les renseignent systématiquement.
+- Les API keys GM sans utilisateur web associé restent un mode legacy à surveiller si on ajoute du multi-campagne réel.

@@ -76,6 +76,12 @@ class User(Base):
         nullable=True,
         index=True,
     )
+    default_campaign_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("jdr_campaigns.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

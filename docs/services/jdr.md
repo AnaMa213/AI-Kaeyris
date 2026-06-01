@@ -87,6 +87,7 @@ Au premier démarrage, l'app importe cette entrée dans `jdr_api_keys` avec `rol
 2. `POST /services/jdr/auth/setup` crée le premier compte `gm` avec `username + password`, puis pose le cookie HTTP-only `session`.
 3. Un GM connecté crée ensuite les autres profils via `POST /services/jdr/users`.
 4. `POST /services/jdr/auth/login` accepte `username + profile + password` et pose un cookie `session` utilisable par les routes protégées.
+5. BD-4 ajoute `GET /services/jdr/auth/me` : le front relit le cookie `session` et reçoit l'identité publique plus la campagne active (`gm` ou `player`). Le premier setup crée aussi la campagne V1 par défaut et rattache le premier GM.
 
 Les API keys historiques restent supportées pour les clients machine. Pour compatibilité avec les tables JDR existantes, un compte web `gm` reçoit aussi une clé JDR interne non exposée : les ownership FKs continuent donc de pointer vers `jdr_api_keys`.
 

@@ -140,6 +140,8 @@ Sur une base vide, aucun compte par défaut n'existe. Le front doit appeler `GET
 
 Le login front utilise `POST /services/jdr/auth/login` et reçoit un cookie `session` HTTP-only en cas de succès. Les requêtes navigateur doivent envoyer les cookies avec `credentials: "include"`.
 
+Après setup ou login, le front peut appeler `GET /services/jdr/auth/me` avec le cookie `session`. La réponse contient uniquement l'identité publique (`id`, `username`) et la campagne JDR active (`id`, `name`, `role`, `character_id`). Le setup crée automatiquement la campagne V1 par défaut et rattache le premier GM ; les utilisateurs créés via `POST /services/jdr/users` sont rattachés à la campagne active du créateur.
+
 Les clés API restent disponibles pour l'automatisation :
 
 ```powershell
@@ -235,6 +237,8 @@ Scénario E2E (résumé — la procédure complète est dans [`specs/001-kaeyris
 3. MJ : `POST /sessions/{id}/artifacts/{narrative|elements|povs}` puis polling `GET /jobs/{id}`.
 4. MJ : `POST /players` pour enrôler un joueur (token plaintext renvoyé **une seule fois**).
 5. Joueur : `GET /me`, `GET /me/sessions`, `GET /me/sessions/{id}/{narrative|pov}[.md]` — strictement scoppé à son PJ (FR-014).
+
+Depuis BD-4, les sessions et PJs JDR sont aussi scoppés par campagne active. Aucun body public ne prend `campaign_id` : le backend le déduit de la session web ou, pour les clés joueur, du PJ lié.
 
 Variables d'environnement spécifiques (voir [`.env.example`](./.env.example) pour le détail) : `DATABASE_URL`, `KAEYRIS_DATA_DIR`, `TRANSCRIPTION_PROVIDER` (`cloud` par défaut, `local` pour l'hôte GPU LAN), `TRANSCRIPTION_BASE_URL`, `TRANSCRIPTION_API_KEY`, `TRANSCRIPTION_MODEL`, `TRANSCRIPTION_LANGUAGE_HINT`, `TRANSCRIPTION_CHUNK_DURATION_SECONDS`.
 

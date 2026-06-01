@@ -280,6 +280,7 @@ Puis dans le nouveau dossier :
 | `GET /services/jdr/auth/setup/status` | Indique si la base vide exige la création du premier GM |
 | `POST /services/jdr/auth/setup` | Crée le premier GM (`username` + `password`) et pose `session` |
 | `POST /services/jdr/auth/login` | Login web `username` + `profile` + `password`, pose un cookie HTTP-only |
+| `GET /services/jdr/auth/me` | Retourne l'utilisateur web courant + sa campagne JDR active (`gm`/`player`) |
 | `POST /services/jdr/auth/logout` | Révoque la session courante et expire le cookie |
 | `POST/GET/PATCH/DELETE /services/jdr/users` | Gestion GM des comptes applicatifs |
 
@@ -296,6 +297,8 @@ curl http://localhost:8000/services/jdr/auth/setup/status
 curl -X POST http://localhost:8000/services/jdr/auth/setup `
   -H "Content-Type: application/json" `
   -d '{"username":"admin","password":"mot-de-passe-choisi"}'
+curl http://localhost:8000/services/jdr/auth/me `
+  -H "Cookie: session=<cookie_session>"
 ```
 
 ## Authentification API key (Jalon 2 — ADR 0003)

@@ -20,7 +20,13 @@ from app.core.auth import (
 )
 from app.core.db import get_db_session
 from app.core.errors import register_exception_handlers
-from app.services.jdr.db.models import ApiKey, ApiKeyStatus, Pj, Role
+from app.core.models import Profile, User, UserStatus
+from app.core.users import hash_password
+from app.services.jdr.campaign_context import (
+    ensure_default_campaign,
+    resolve_campaign_scope_for_auth,
+)
+from app.services.jdr.db.models import ApiKey, ApiKeyStatus, CampaignRole, Pj, Role
 
 
 # ---------------------------------------------------------------------------
@@ -290,3 +296,39 @@ async def test_player_only_route_allows_player(
 
     assert response.status_code == 200
     assert response.json() == {"area": "player"}
+
+
+async def test_api_key_gm_resolves_existing_default_campaign(db_session):
+    api_key = ApiKey(
+        name="legacy-gm",
+        hash=PasswordHasher().hash("legacy-token"),
+        role=Role.GM,
+        status=ApiKeyStatus.ACTIVE,
+    )
+    db_session.add(api_key)
+    await db_session.flush()
+    user = User(
+        username="admin",
+        profile=Profile.GM,
+        password_hash=hash_password("admin-password"),
+        status=UserStatus.ACTIVE,
+        api_key_id=api_key.id,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    campaign = await ensure_default_campaign(db_session, owner_user=user)
+    await db_session.commit()
+
+    scope = await resolve_campaign_scope_for_auth(
+        db_session,
+        AuthenticatedKey(
+            id=api_key.id,
+            name=api_key.name,
+            role=api_key.role,
+            pj_id=None,
+        ),
+    )
+
+    assert scope is not None
+    assert scope.campaign_id == campaign.id
+    assert scope.role == CampaignRole.GM

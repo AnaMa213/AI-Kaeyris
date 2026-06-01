@@ -155,3 +155,15 @@ async def test_api_key_token_is_not_accepted_as_web_password(
         )
 
     assert response.status_code == 401
+
+
+async def test_auth_request_bodies_remain_campaign_free(make_db_session_dep):
+    app = _make_app(make_db_session_dep, fakeredis.FakeStrictRedis())
+
+    schema = app.openapi()
+    components = schema["components"]["schemas"]
+
+    assert "campaign_id" not in components["SetupRequest"]["properties"]
+    assert "campaign_id" not in components["LoginRequest"]["properties"]
+    assert "campaign_id" not in components["UserCreate"]["properties"]
+    assert "campaign_id" not in components["UserUpdate"]["properties"]
