@@ -171,6 +171,7 @@ class Campaign(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(4000), nullable=True)
     owner_user_id: Mapped[uuid.UUID] = mapped_column(
         Uuid,
         ForeignKey("core_users.id", ondelete="RESTRICT"),

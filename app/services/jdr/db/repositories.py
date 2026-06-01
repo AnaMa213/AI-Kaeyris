@@ -17,15 +17,17 @@ as a clear runtime error rather than a silent no-op.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy.exc import IntegrityError
 
+from app.core.datetime_serialization import ensure_aware_utc
 from app.services.jdr.db.models import (
     Artifact,
     AudioSource,
@@ -58,6 +60,18 @@ class DuplicatePjNameError(Exception):
     """
 
 
+class DuplicateCampaignNameError(Exception):
+    """A campaign with this normalized name already exists for this user."""
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignSummary:
+    campaign: Campaign
+    role: CampaignRole
+    session_count: int
+    last_session_at: datetime | None
+
+
 class _BaseRepository:
     """Carries the ``AsyncSession``; subclasses inherit it."""
 
@@ -85,8 +99,38 @@ class ApiKeyRepository(_BaseRepository):
 class CampaignRepository(_BaseRepository):
     """Campaign and membership access for BD-4 auth context."""
 
-    async def create(self, *, name: str, owner_user_id: UUID) -> Campaign:
-        row = Campaign(name=name, owner_user_id=owner_user_id)
+    async def user_has_campaign_named(
+        self,
+        *,
+        user_id: UUID,
+        name: str,
+        exclude_campaign_id: UUID | None = None,
+    ) -> bool:
+        normalized = name.strip().lower()
+        stmt = select(Campaign.id).where(
+            Campaign.owner_user_id == user_id,
+            func.lower(func.trim(Campaign.name)) == normalized,
+        )
+        if exclude_campaign_id is not None:
+            stmt = stmt.where(Campaign.id != exclude_campaign_id)
+        return (await self._session.scalar(stmt.limit(1))) is not None
+
+    async def create(
+        self,
+        *,
+        name: str,
+        owner_user_id: UUID,
+        description: str | None = None,
+    ) -> Campaign:
+        if await self.user_has_campaign_named(user_id=owner_user_id, name=name):
+            raise DuplicateCampaignNameError(
+                f"User already has a campaign named {name.strip()!r}."
+            )
+        row = Campaign(
+            name=name.strip(),
+            description=description,
+            owner_user_id=owner_user_id,
+        )
         self._session.add(row)
         await self._session.flush()
         await self._session.refresh(row)
@@ -94,6 +138,119 @@ class CampaignRepository(_BaseRepository):
 
     async def get(self, campaign_id: UUID) -> Campaign | None:
         return await self._session.get(Campaign, campaign_id)
+
+    def _summary_stats_subquery(self):
+        return (
+            select(
+                Session.campaign_id.label("campaign_id"),
+                func.count(Session.id).label("session_count"),
+                func.max(Session.recorded_at).label("last_session_at"),
+            )
+            .group_by(Session.campaign_id)
+            .subquery()
+        )
+
+    async def list_for_user(self, user_id: UUID) -> list[CampaignSummary]:
+        stats = self._summary_stats_subquery()
+        stmt = (
+            select(
+                Campaign,
+                CampaignMember.role,
+                func.coalesce(stats.c.session_count, 0),
+                stats.c.last_session_at,
+            )
+            .join(CampaignMember, CampaignMember.campaign_id == Campaign.id)
+            .outerjoin(stats, stats.c.campaign_id == Campaign.id)
+            .where(CampaignMember.user_id == user_id)
+            .order_by(Campaign.created_at, Campaign.id)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            CampaignSummary(
+                campaign=campaign,
+                role=role,
+                session_count=int(session_count),
+                last_session_at=(
+                    ensure_aware_utc(last_session_at)
+                    if last_session_at is not None
+                    else None
+                ),
+            )
+            for campaign, role, session_count, last_session_at in rows
+        ]
+
+    async def get_summary_for_user(
+        self,
+        *,
+        user_id: UUID,
+        campaign_id: UUID,
+    ) -> CampaignSummary | None:
+        stats = self._summary_stats_subquery()
+        stmt = (
+            select(
+                Campaign,
+                CampaignMember.role,
+                func.coalesce(stats.c.session_count, 0),
+                stats.c.last_session_at,
+            )
+            .join(CampaignMember, CampaignMember.campaign_id == Campaign.id)
+            .outerjoin(stats, stats.c.campaign_id == Campaign.id)
+            .where(
+                Campaign.id == campaign_id,
+                CampaignMember.user_id == user_id,
+            )
+            .limit(1)
+        )
+        row = (await self._session.execute(stmt)).first()
+        if row is None:
+            return None
+        campaign, role, session_count, last_session_at = row
+        return CampaignSummary(
+            campaign=campaign,
+            role=role,
+            session_count=int(session_count),
+            last_session_at=(
+                ensure_aware_utc(last_session_at)
+                if last_session_at is not None
+                else None
+            ),
+        )
+
+    async def update_campaign(
+        self,
+        *,
+        campaign: Campaign,
+        name: str | None = None,
+        description: str | None = None,
+        set_description: bool = False,
+    ) -> Campaign:
+        if name is not None:
+            if await self.user_has_campaign_named(
+                user_id=campaign.owner_user_id,
+                name=name,
+                exclude_campaign_id=campaign.id,
+            ):
+                raise DuplicateCampaignNameError(
+                    f"User already has a campaign named {name.strip()!r}."
+                )
+            campaign.name = name.strip()
+        if set_description:
+            campaign.description = description
+        await self._session.flush()
+        await self._session.refresh(campaign)
+        return campaign
+
+    async def count_sessions(self, campaign_id: UUID) -> int:
+        return int(
+            await self._session.scalar(
+                select(func.count(Session.id)).where(Session.campaign_id == campaign_id)
+            )
+            or 0
+        )
+
+    async def delete_campaign(self, campaign: Campaign) -> None:
+        await self._session.delete(campaign)
+        await self._session.flush()
 
     async def first(self) -> Campaign | None:
         return await self._session.scalar(
@@ -175,24 +332,22 @@ class PjRepository(_BaseRepository):
     async def list_for_gm(
         self, gm_key_id: UUID, campaign_id: UUID | None = None
     ) -> list[Pj]:
+        _ = campaign_id
         stmt = (
             select(Pj)
             .where(Pj.owner_gm_key_id == gm_key_id)
             .order_by(Pj.created_at)
         )
-        if campaign_id is not None:
-            stmt = stmt.where(Pj.campaign_id == campaign_id)
         result = await self._session.scalars(stmt)
         return list(result.all())
 
     async def find_by_id_owned_by(
         self, pj_id: UUID, gm_key_id: UUID, campaign_id: UUID | None = None
     ) -> Pj | None:
+        _ = campaign_id
         stmt = select(Pj).where(
             Pj.id == pj_id, Pj.owner_gm_key_id == gm_key_id
         )
-        if campaign_id is not None:
-            stmt = stmt.where(Pj.campaign_id == campaign_id)
         return await self._session.scalar(stmt)
 
 

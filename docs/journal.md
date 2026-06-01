@@ -464,3 +464,27 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
 
 - Pas de migration DB ajoutée tant qu'aucun test ne prouve un problème de stockage non normalisable à la sortie.
 - `/services/jdr/auth/me` n'expose pas de datetime aujourd'hui ; le test associé reste un garde souple pour valider ses datetimes si le payload évolue.
+
+---
+
+## 2026-06-01 — BD-6 : CRUD campagnes et filtre sessions
+
+### Ce qui a été fait
+
+- Ajout du CRUD campagne web : liste, détail, création, modification, suppression prudente des campagnes vides.
+- Ajout de `description` sur `jdr_campaigns` et des agrégats front `session_count` / `last_session_at`.
+- `POST /services/jdr/sessions` exige désormais un `campaign_id` explicite ; `GET /services/jdr/sessions?campaign_id=...` filtre par campagne après contrôle de membership.
+- Les PJ publics restent globaux au MJ pour BD-6, afin de ne pas mélanger CRUD campagne et refonte du modèle de personnages.
+- Les nouveaux champs datetime de campagne utilisent le même contrat BD-5 : sortie avec suffixe timezone explicite.
+
+### Ce que j'ai appris
+
+- **Un changement de contrat doit faire rougir les anciens tests** : les tests historiques qui créaient une session sans `campaign_id` ont cassé, ce qui a forcé une migration explicite des scénarios et évité une compatibilité fantôme.
+- **Supprimer est une décision métier, pas juste SQL** : refuser la suppression d'une campagne avec sessions protège l'historique et évite un cascade delete dangereux pour un journal de partie.
+- **Ne pas étendre le scope PJ trop tôt** : garder les PJ globaux au MJ respecte BD-6 et évite de transformer une feature de navigation campagne en refonte de gestion des personnages.
+
+### Limitations acceptées
+
+- Pas encore de switch de campagne active côté profil : le front peut sélectionner une campagne via les endpoints et passer `campaign_id` sur les sessions.
+- Les API keys GM restent supportées comme mode legacy ; le contrôle riche de membership est porté par les sessions web.
+- Pas d'ADR ajouté : les décisions appliquées étaient déjà cadrées par la spec BD-6 et ne dépassent pas le plan.

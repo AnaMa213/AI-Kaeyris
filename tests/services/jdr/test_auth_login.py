@@ -70,11 +70,16 @@ async def test_setup_create_user_login_and_cookie_authenticates_protected_route(
         assert "path=/" in cookie.lower()
         assert "samesite=lax" in cookie.lower()
 
+        me = await client.get("/services/jdr/auth/me")
+        assert me.status_code == 200
+        campaign_id = me.json()["active_campaign"]["id"]
+
         protected = await client.post(
             "/services/jdr/sessions",
             json={
                 "title": "Session via cookie",
                 "recorded_at": "2026-05-27T20:30:00+00:00",
+                "campaign_id": campaign_id,
             },
         )
 

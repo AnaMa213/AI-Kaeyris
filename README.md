@@ -232,13 +232,24 @@ rq worker default --url redis://localhost:6379/0
 
 Scénario E2E (résumé — la procédure complète est dans [`specs/001-kaeyris-jdr/quickstart.md`](./specs/001-kaeyris-jdr/quickstart.md)) :
 
-1. MJ : `POST /services/jdr/sessions` puis `POST /sessions/{id}/audio` (M4A) → job de transcription.
+1. MJ : `POST /services/jdr/sessions` avec `campaign_id` puis `POST /sessions/{id}/audio` (M4A) → job de transcription.
 2. MJ : `POST /pjs`, `PUT /sessions/{id}/mapping` pour relier `speaker_X` à chaque PJ.
 3. MJ : `POST /sessions/{id}/artifacts/{narrative|elements|povs}` puis polling `GET /jobs/{id}`.
 4. MJ : `POST /players` pour enrôler un joueur (token plaintext renvoyé **une seule fois**).
 5. Joueur : `GET /me`, `GET /me/sessions`, `GET /me/sessions/{id}/{narrative|pov}[.md]` — strictement scoppé à son PJ (FR-014).
 
-Depuis BD-4, les sessions et PJs JDR sont aussi scoppés par campagne active. Aucun body public ne prend `campaign_id` : le backend le déduit de la session web ou, pour les clés joueur, du PJ lié.
+Depuis BD-6, les campagnes ont un CRUD dédié pour le front web : `GET/POST /services/jdr/campaigns`, puis `GET/PATCH/DELETE /services/jdr/campaigns/{campaign_id}`. Les réponses exposent `role`, `session_count`, `last_session_at` et des datetimes avec timezone explicite.
+
+La création de session exige maintenant un `campaign_id` explicite. La liste des sessions accepte `GET /services/jdr/sessions?campaign_id=<uuid>` pour filtrer une campagne ; sans query param, la liste non filtrée reste disponible pour compatibilité. Les PJ publics restent globaux au MJ sur BD-6.
+
+```json
+{
+  "title": "Session 13 - La crypte oubliee",
+  "recorded_at": "2026-05-31T18:00:00Z",
+  "campaign_id": "11111111-1111-1111-1111-111111111111",
+  "transcription_mode": "diarised"
+}
+```
 
 Variables d'environnement spécifiques (voir [`.env.example`](./.env.example) pour le détail) : `DATABASE_URL`, `KAEYRIS_DATA_DIR`, `TRANSCRIPTION_PROVIDER` (`cloud` par défaut, `local` pour l'hôte GPU LAN), `TRANSCRIPTION_BASE_URL`, `TRANSCRIPTION_API_KEY`, `TRANSCRIPTION_MODEL`, `TRANSCRIPTION_LANGUAGE_HINT`, `TRANSCRIPTION_CHUNK_DURATION_SECONDS`.
 
@@ -250,7 +261,7 @@ Posture alternative opt-in pour les sessions où la diarisation cloud ne donne r
 
 Flow MJ :
 
-1. `POST /sessions` avec `{"transcription_mode": "non_diarised", ...}` → session créée en mode chunked
+1. `POST /sessions` avec `{"transcription_mode": "non_diarised", "campaign_id": "...", ...}` → session créée en mode chunked
 2. `POST /sessions/{id}/audio` → transcription écrite en chunks ordonnés dans `jdr_chunks` (au lieu de segments diarisés)
 3. `GET /sessions/{id}/chunks` → inspecter le texte chunked
 4. `POST /sessions/{id}/players` avec `{"pj_ids": [...]}` → déclarer les PJ présents (équivalent du mapping en mode diarised)

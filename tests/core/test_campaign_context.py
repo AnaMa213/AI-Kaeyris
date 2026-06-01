@@ -6,7 +6,7 @@ from app.services.jdr.campaign_context import (
     adopt_existing_users_into_default_campaign,
     resolve_active_campaign_for_user,
 )
-from app.services.jdr.db.models import CampaignMember, CampaignRole, Pj, Session
+from app.services.jdr.db.models import Campaign, CampaignMember, CampaignRole, Pj, Session
 from tests.services.jdr.campaign_fixtures import (
     make_campaign,
     make_membership,
@@ -56,20 +56,19 @@ async def test_resolve_active_campaign_returns_none_without_membership(db_sessio
 async def test_campaign_schema_is_registered_on_metadata():
     assert "jdr_campaigns" in Base.metadata.tables
     assert "jdr_campaign_members" in Base.metadata.tables
+    assert "description" in Campaign.__table__.columns
     assert "default_campaign_id" in User.__table__.columns
     assert "campaign_id" in Session.__table__.columns
     assert "campaign_id" in Pj.__table__.columns
 
 
-async def test_adoption_backfills_users_sessions_and_pjs_to_default_campaign(
+async def test_adoption_backfills_users_and_sessions_to_default_campaign(
     db_session,
 ):
     gm = await make_user(db_session, username="gm", profile=Profile.GM)
     player = await make_user(db_session, username="player", profile=Profile.USER)
     campaign = await make_campaign(db_session, owner=gm)
-    pj = await make_pj(db_session, owner=gm, campaign=campaign)
     session = await make_session(db_session, owner=gm, campaign=campaign)
-    pj.campaign_id = None
     session.campaign_id = None
     await db_session.commit()
 
@@ -92,5 +91,25 @@ async def test_adoption_backfills_users_sessions_and_pjs_to_default_campaign(
     assert gm_membership.role == CampaignRole.GM
     assert player_membership is not None
     assert player_membership.role == CampaignRole.PLAYER
-    assert pj.campaign_id == adopted.id
+    assert session.campaign_id == adopted.id
+
+
+async def test_adoption_backfills_legacy_sessions_without_reassigning_existing_pjs(
+    db_session,
+):
+    gm = await make_user(db_session, username="gm", profile=Profile.GM)
+    player = await make_user(db_session, username="player", profile=Profile.USER)
+    campaign = await make_campaign(db_session, owner=gm)
+    pj = await make_pj(db_session, owner=gm, campaign=None)
+    session = await make_session(db_session, owner=gm, campaign=campaign)
+    session.campaign_id = None
+    await db_session.commit()
+
+    adopted = await adopt_existing_users_into_default_campaign(db_session)
+    assert adopted is not None
+    await db_session.commit()
+
+    assert gm.default_campaign_id == adopted.id
+    assert player.default_campaign_id == adopted.id
+    assert pj.campaign_id is None
     assert session.campaign_id == adopted.id

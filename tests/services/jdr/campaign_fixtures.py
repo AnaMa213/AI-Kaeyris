@@ -58,9 +58,11 @@ async def make_campaign(
     *,
     owner: User,
     name: str = "Campagne par defaut",
+    description: str | None = None,
 ) -> Campaign:
     campaign = Campaign(
         name=name,
+        description=description,
         owner_user_id=owner.id,
         created_at=datetime.now(UTC),
     )
@@ -100,12 +102,16 @@ async def make_pj(
     db: AsyncSession,
     *,
     owner: User,
-    campaign: Campaign,
+    campaign: Campaign | None = None,
     name: str = "Aelar",
 ) -> Pj:
     if owner.api_key_id is None:
         raise ValueError("A PJ fixture requires a GM user with api_key_id.")
-    pj = Pj(name=name, owner_gm_key_id=owner.api_key_id, campaign_id=campaign.id)
+    pj = Pj(
+        name=name,
+        owner_gm_key_id=owner.api_key_id,
+        campaign_id=campaign.id if campaign is not None else None,
+    )
     db.add(pj)
     await db.flush()
     return pj
@@ -117,12 +123,13 @@ async def make_session(
     owner: User,
     campaign: Campaign,
     title: str = "Session test",
+    recorded_at: datetime | None = None,
 ) -> Session:
     if owner.api_key_id is None:
         raise ValueError("A session fixture requires a GM user with api_key_id.")
     session = Session(
         title=title,
-        recorded_at=datetime.now(UTC),
+        recorded_at=recorded_at or datetime.now(UTC),
         gm_key_id=owner.api_key_id,
         campaign_id=campaign.id,
     )

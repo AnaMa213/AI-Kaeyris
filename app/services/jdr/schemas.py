@@ -13,7 +13,7 @@ emitted by ``app.core.errors`` (jalon 1, ADR 0002 §3).
 """
 
 from datetime import datetime
-from typing import Generic, TypeVar
+from typing import Generic, Literal, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
@@ -42,6 +42,51 @@ class JdrSchema(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Campaigns (BD-6)
+# ---------------------------------------------------------------------------
+
+
+class CampaignCreate(JdrSchema):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=4000)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Campaign name cannot be blank.")
+        return stripped
+
+
+class CampaignPatch(JdrSchema):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=4000)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Campaign name cannot be blank.")
+        return stripped
+
+
+class CampaignOut(JdrSchema):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+    description: str | None = None
+    role: Literal["gm", "player"]
+    session_count: int
+    last_session_at: datetime | None = None
+    created_at: datetime
+
+
+# ---------------------------------------------------------------------------
 # Sessions (US1)
 # ---------------------------------------------------------------------------
 
@@ -50,6 +95,7 @@ class SessionCreate(JdrSchema):
     """Payload accepted by ``POST /services/jdr/sessions``."""
 
     title: str = Field(..., min_length=1, max_length=500)
+    campaign_id: UUID
     recorded_at: datetime = Field(
         ...,
         description=(

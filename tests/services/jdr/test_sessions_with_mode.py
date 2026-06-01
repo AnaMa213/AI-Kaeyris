@@ -17,8 +17,10 @@ from httpx import ASGITransport, AsyncClient
 
 from app.core.db import get_db_session
 from app.core.errors import register_exception_handlers
+from app.core.models import Profile, User, UserStatus
 from app.core.redis_client import get_redis
-from app.services.jdr.db.models import ApiKey, ApiKeyStatus, Role
+from app.core.users import hash_password
+from app.services.jdr.db.models import ApiKey, ApiKeyStatus, Campaign, Role
 from app.services.jdr.router import router as jdr_router
 
 
@@ -39,8 +41,23 @@ async def _seed_gm(db_session, plain_token: str) -> ApiKey:
         status=ApiKeyStatus.ACTIVE,
     )
     db_session.add(gm)
+    await db_session.flush()
+    user = User(
+        username=f"gm-{uuid4().hex[:8]}",
+        profile=Profile.GM,
+        password_hash=hash_password("password"),
+        status=UserStatus.ACTIVE,
+        api_key_id=gm.id,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    db_session.add(user)
+    await db_session.flush()
+    campaign = Campaign(name=f"Campaign {uuid4().hex[:8]}", owner_user_id=user.id)
+    db_session.add(campaign)
     await db_session.commit()
     await db_session.refresh(gm)
+    gm.test_campaign_id = campaign.id
     return gm
 
 
@@ -62,13 +79,13 @@ async def test_post_session_default_mode_is_diarised(
     db_session, make_db_session_dep
 ):
     plain = "gm-default-mode"
-    await _seed_gm(db_session, plain)
+    gm = await _seed_gm(db_session, plain)
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/services/jdr/sessions",
-            json=_new_session_payload(),
+            json=_new_session_payload(campaign_id=str(gm.test_campaign_id)),
             headers={"Authorization": f"Bearer {plain}"},
         )
     assert response.status_code == 201
@@ -80,13 +97,16 @@ async def test_post_session_explicit_non_diarised(
     db_session, make_db_session_dep
 ):
     plain = "gm-non-diarised"
-    await _seed_gm(db_session, plain)
+    gm = await _seed_gm(db_session, plain)
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/services/jdr/sessions",
-            json=_new_session_payload(transcription_mode="non_diarised"),
+            json=_new_session_payload(
+                campaign_id=str(gm.test_campaign_id),
+                transcription_mode="non_diarised",
+            ),
             headers={"Authorization": f"Bearer {plain}"},
         )
     assert response.status_code == 201
@@ -98,13 +118,16 @@ async def test_post_session_invalid_mode_returns_422(
     db_session, make_db_session_dep
 ):
     plain = "gm-invalid-mode"
-    await _seed_gm(db_session, plain)
+    gm = await _seed_gm(db_session, plain)
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/services/jdr/sessions",
-            json=_new_session_payload(transcription_mode="garbage"),
+            json=_new_session_payload(
+                campaign_id=str(gm.test_campaign_id),
+                transcription_mode="garbage",
+            ),
             headers={"Authorization": f"Bearer {plain}"},
         )
     assert response.status_code == 422
@@ -114,13 +137,16 @@ async def test_get_session_exposes_transcription_mode(
     db_session, make_db_session_dep
 ):
     plain = "gm-get-mode"
-    await _seed_gm(db_session, plain)
+    gm = await _seed_gm(db_session, plain)
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         created = await client.post(
             "/services/jdr/sessions",
-            json=_new_session_payload(transcription_mode="non_diarised"),
+            json=_new_session_payload(
+                campaign_id=str(gm.test_campaign_id),
+                transcription_mode="non_diarised",
+            ),
             headers={"Authorization": f"Bearer {plain}"},
         )
         sid = created.json()["id"]
@@ -142,13 +168,16 @@ async def test_patch_session_rejects_transcription_mode_with_422(
 ):
     """FR-002 — `transcription_mode` est immuable après création."""
     plain = "gm-patch-mode"
-    await _seed_gm(db_session, plain)
+    gm = await _seed_gm(db_session, plain)
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         created = await client.post(
             "/services/jdr/sessions",
-            json=_new_session_payload(transcription_mode="non_diarised"),
+            json=_new_session_payload(
+                campaign_id=str(gm.test_campaign_id),
+                transcription_mode="non_diarised",
+            ),
             headers={"Authorization": f"Bearer {plain}"},
         )
         sid = created.json()["id"]
@@ -168,13 +197,13 @@ async def test_patch_session_title_still_works(
 ):
     """Regression — les champs Jalon 5 (title, campaign_context) restent modifiables."""
     plain = "gm-patch-title"
-    await _seed_gm(db_session, plain)
+    gm = await _seed_gm(db_session, plain)
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         created = await client.post(
             "/services/jdr/sessions",
-            json=_new_session_payload(),
+            json=_new_session_payload(campaign_id=str(gm.test_campaign_id)),
             headers={"Authorization": f"Bearer {plain}"},
         )
         sid = created.json()["id"]

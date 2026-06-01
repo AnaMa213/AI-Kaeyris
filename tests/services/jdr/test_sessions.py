@@ -7,6 +7,7 @@ discipline. Each scenario corresponds to an acceptance criterion of
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import fakeredis
 import pytest_asyncio
@@ -18,8 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
 from app.core.errors import register_exception_handlers
+from app.core.models import Profile, User, UserStatus
 from app.core.redis_client import get_redis
-from app.services.jdr.db.models import ApiKey, ApiKeyStatus, Role
+from app.core.users import hash_password
+from app.services.jdr.db.models import ApiKey, ApiKeyStatus, Campaign, Role
 from app.services.jdr.router import router as jdr_router
 
 
@@ -40,8 +43,23 @@ async def seeded_gm(db_session: AsyncSession) -> tuple[str, ApiKey]:
         pj_id=None,
     )
     db_session.add(api_key)
+    await db_session.flush()
+    user = User(
+        username="gm-sessions-test",
+        profile=Profile.GM,
+        password_hash=hash_password("gm-password"),
+        status=UserStatus.ACTIVE,
+        api_key_id=api_key.id,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    db_session.add(user)
+    await db_session.flush()
+    campaign = Campaign(name="Sessions test", owner_user_id=user.id)
+    db_session.add(campaign)
     await db_session.commit()
     await db_session.refresh(api_key)
+    api_key.test_campaign_id = campaign.id
     return plain, api_key
 
 
@@ -57,8 +75,23 @@ async def another_seeded_gm(db_session: AsyncSession) -> tuple[str, ApiKey]:
         pj_id=None,
     )
     db_session.add(api_key)
+    await db_session.flush()
+    user = User(
+        username="other-gm",
+        profile=Profile.GM,
+        password_hash=hash_password("other-password"),
+        status=UserStatus.ACTIVE,
+        api_key_id=api_key.id,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    db_session.add(user)
+    await db_session.flush()
+    campaign = Campaign(name="Other sessions test", owner_user_id=user.id)
+    db_session.add(campaign)
     await db_session.commit()
     await db_session.refresh(api_key)
+    api_key.test_campaign_id = campaign.id
     return plain, api_key
 
 
@@ -83,12 +116,13 @@ def _make_jdr_app(
 async def test_create_session_returns_201_with_id(
     seeded_gm, make_db_session_dep
 ):
-    plain, _ = seeded_gm
+    plain, api_key = seeded_gm
     app = _make_jdr_app(make_db_session_dep, fakeredis.FakeStrictRedis())
     transport = ASGITransport(app=app)
     payload = {
         "title": "Donjon des morts-vivants — chapitre 4",
         "recorded_at": "2026-05-04T20:30:00+00:00",
+        "campaign_id": str(api_key.test_campaign_id),
     }
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -114,7 +148,11 @@ async def test_create_session_requires_authentication(make_db_session_dep):
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/services/jdr/sessions",
-            json={"title": "x", "recorded_at": "2026-05-04T20:30:00+00:00"},
+            json={
+                "title": "x",
+                "recorded_at": "2026-05-04T20:30:00+00:00",
+                "campaign_id": str(uuid4()),
+            },
         )
 
     assert response.status_code == 401
@@ -136,6 +174,20 @@ async def test_create_session_rejects_player_role(
     )
     db_session.add(gm)
     await db_session.flush()
+    user = User(
+        username="gm-owner-of-pj",
+        profile=Profile.GM,
+        password_hash=hash_password("gm-token"),
+        status=UserStatus.ACTIVE,
+        api_key_id=gm.id,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    db_session.add(user)
+    await db_session.flush()
+    campaign = Campaign(name="Player reject test", owner_user_id=user.id)
+    db_session.add(campaign)
+    await db_session.flush()
     pj = Pj(name="Aragorn", owner_gm_key_id=gm.id)
     db_session.add(pj)
     await db_session.flush()
@@ -156,7 +208,11 @@ async def test_create_session_rejects_player_role(
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/services/jdr/sessions",
-            json={"title": "x", "recorded_at": "2026-05-04T20:30:00+00:00"},
+            json={
+                "title": "x",
+                "recorded_at": "2026-05-04T20:30:00+00:00",
+                "campaign_id": str(campaign.id),
+            },
             headers={"Authorization": f"Bearer {plain}"},
         )
 
@@ -188,8 +244,8 @@ async def test_create_session_validates_payload(seeded_gm, make_db_session_dep):
 async def test_list_sessions_returns_only_current_gm_sessions(
     seeded_gm, another_seeded_gm, make_db_session_dep
 ):
-    plain_a, _ = seeded_gm
-    plain_b, _ = another_seeded_gm
+    plain_a, api_key_a = seeded_gm
+    plain_b, api_key_b = another_seeded_gm
     app = _make_jdr_app(make_db_session_dep, fakeredis.FakeStrictRedis())
     transport = ASGITransport(app=app)
 
@@ -198,13 +254,21 @@ async def test_list_sessions_returns_only_current_gm_sessions(
         for title in ["Session A1", "Session A2"]:
             await client.post(
                 "/services/jdr/sessions",
-                json={"title": title, "recorded_at": "2026-05-04T20:30:00+00:00"},
+                json={
+                    "title": title,
+                    "recorded_at": "2026-05-04T20:30:00+00:00",
+                    "campaign_id": str(api_key_a.test_campaign_id),
+                },
                 headers={"Authorization": f"Bearer {plain_a}"},
             )
         # GM B creates one session
         await client.post(
             "/services/jdr/sessions",
-            json={"title": "Session B1", "recorded_at": "2026-05-04T20:30:00+00:00"},
+            json={
+                "title": "Session B1",
+                "recorded_at": "2026-05-04T20:30:00+00:00",
+                "campaign_id": str(api_key_b.test_campaign_id),
+            },
             headers={"Authorization": f"Bearer {plain_b}"},
         )
 
@@ -235,14 +299,18 @@ async def test_list_sessions_returns_only_current_gm_sessions(
 
 
 async def test_get_session_by_id(seeded_gm, make_db_session_dep):
-    plain, _ = seeded_gm
+    plain, api_key = seeded_gm
     app = _make_jdr_app(make_db_session_dep, fakeredis.FakeStrictRedis())
     transport = ASGITransport(app=app)
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         create = await client.post(
             "/services/jdr/sessions",
-            json={"title": "Lookup test", "recorded_at": "2026-05-04T20:30:00+00:00"},
+            json={
+                "title": "Lookup test",
+                "recorded_at": "2026-05-04T20:30:00+00:00",
+                "campaign_id": str(api_key.test_campaign_id),
+            },
             headers={"Authorization": f"Bearer {plain}"},
         )
         session_id = create.json()["id"]
@@ -261,8 +329,8 @@ async def test_get_session_belonging_to_another_gm_returns_404(
     seeded_gm, another_seeded_gm, make_db_session_dep
 ):
     """Cross-tenant isolation: GM B's session is invisible to GM A."""
-    plain_a, _ = seeded_gm
-    plain_b, _ = another_seeded_gm
+    plain_a, _api_key_a = seeded_gm
+    plain_b, api_key_b = another_seeded_gm
     app = _make_jdr_app(make_db_session_dep, fakeredis.FakeStrictRedis())
     transport = ASGITransport(app=app)
 
@@ -272,6 +340,7 @@ async def test_get_session_belonging_to_another_gm_returns_404(
             json={
                 "title": "GM B's session",
                 "recorded_at": "2026-05-04T20:30:00+00:00",
+                "campaign_id": str(api_key_b.test_campaign_id),
             },
             headers={"Authorization": f"Bearer {plain_b}"},
         )
