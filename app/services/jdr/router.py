@@ -43,12 +43,18 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Job
 from app.services.jdr import logic
 from app.services.jdr.batch.router import router as batch_router
-from app.services.jdr.campaign_context import resolve_campaign_scope_for_auth
+from app.services.jdr.campaign_context import (
+    CampaignAccessError,
+    resolve_campaign_scope_for_auth,
+)
 from app.services.jdr.live.router import router as live_router
 from app.services.jdr.logic import (
     DuplicatePjError,
     InvalidPlayerError,
     InvalidPlayerListError as LogicInvalidPlayerListError,
+    PjAssignmentError,
+    PjCampaignResolutionError,
+    PjForbiddenError,
 )
 from app.services.jdr.db.models import (
     JobKind,
@@ -175,6 +181,18 @@ class PjNotFoundError(AppError):
     status_code = status.HTTP_404_NOT_FOUND
     error_type = "pj-not-found"
     title = "PJ not found"
+
+
+class PjCampaignRequiredError(AppError):
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "pj-campaign-required"
+    title = "PJ campaign required"
+
+
+class PjForbiddenAppError(AppError):
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "pj-forbidden"
+    title = "Forbidden"
 
 
 class InvalidPlayerEnrolmentError(AppError):
@@ -387,7 +405,7 @@ async def list_campaigns(
 )
 async def create_campaign(
     payload: CampaignCreate,
-    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    auth: Annotated[AuthenticatedKey, Depends(require_api_key)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> CampaignOut:
     user_id = _web_user_id(auth)
@@ -717,10 +735,18 @@ async def create_pj(
             db,
             name=payload.name,
             gm_key_id=auth.id,
-            campaign_id=None,
+            campaign_id=payload.campaign_id,
+            user_id=payload.user_id,
+            requester_user_id=auth.user_id,
         )
     except DuplicatePjError as exc:
         raise DuplicatePjConflictError(detail=str(exc)) from exc
+    except PjCampaignResolutionError as exc:
+        raise PjCampaignRequiredError(detail=str(exc)) from exc
+    except (PjForbiddenError, CampaignAccessError) as exc:
+        raise PjForbiddenAppError(detail=str(exc)) from exc
+    except PjAssignmentError as exc:
+        raise PjNotFoundError(detail=str(exc)) from exc
     return PjOut.model_validate(pj)
 
 
@@ -732,8 +758,17 @@ async def create_pj(
 async def list_pjs(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    campaign_id: Annotated[UUID | None, Query()] = None,
 ) -> Page[PjOut]:
-    rows = await logic.list_pjs(db, gm_key_id=auth.id, campaign_id=None)
+    try:
+        rows = await logic.list_pjs(
+            db,
+            gm_key_id=auth.id,
+            campaign_id=campaign_id,
+            requester_user_id=auth.user_id,
+        )
+    except CampaignAccessError as exc:
+        raise PjForbiddenAppError(detail=str(exc)) from exc
     items = [PjOut.model_validate(r) for r in rows]
     return Page[PjOut](items=items, total=len(items), page=1, size=len(items) or 1)
 

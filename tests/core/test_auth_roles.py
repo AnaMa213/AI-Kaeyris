@@ -26,7 +26,14 @@ from app.services.jdr.campaign_context import (
     ensure_default_campaign,
     resolve_campaign_scope_for_auth,
 )
-from app.services.jdr.db.models import ApiKey, ApiKeyStatus, CampaignRole, Pj, Role
+from app.services.jdr.db.models import (
+    ApiKey,
+    ApiKeyStatus,
+    Campaign,
+    CampaignRole,
+    Pj,
+    Role,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +131,15 @@ async def seeded_pj(db_session: AsyncSession) -> Pj:
     )
     db_session.add(gm)
     await db_session.flush()
-    pj = Pj(id=uuid.uuid4(), name="Aragorn", owner_gm_key_id=gm.id)
+    campaign = Campaign(name="Auth roles campaign", owner_user_id=uuid.uuid4())
+    db_session.add(campaign)
+    await db_session.flush()
+    pj = Pj(
+        id=uuid.uuid4(),
+        name="Aragorn",
+        owner_gm_key_id=gm.id,
+        campaign_id=campaign.id,
+    )
     db_session.add(pj)
     await db_session.commit()
     await db_session.refresh(pj)

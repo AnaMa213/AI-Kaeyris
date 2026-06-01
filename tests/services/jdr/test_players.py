@@ -22,6 +22,7 @@ from app.core.redis_client import get_redis
 from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
+    Campaign,
     Pj,
     Role,
     Session,
@@ -55,7 +56,12 @@ async def _seed_gm(db_session, plain_token: str) -> ApiKey:
 
 
 async def _seed_pj(db_session, *, gm_id, name: str) -> Pj:
-    pj = Pj(name=name, owner_gm_key_id=gm_id)
+    campaign = await db_session.scalar(select(Campaign).limit(1))
+    if campaign is None:
+        campaign = Campaign(name="Legacy test campaign", owner_user_id=uuid4())
+        db_session.add(campaign)
+        await db_session.flush()
+    pj = Pj(name=name, owner_gm_key_id=gm_id, campaign_id=campaign.id)
     db_session.add(pj)
     await db_session.commit()
     await db_session.refresh(pj)
@@ -65,10 +71,16 @@ async def _seed_pj(db_session, *, gm_id, name: str) -> Pj:
 async def _seed_session(
     db_session, *, gm_id, mode: TranscriptionMode = TranscriptionMode.NON_DIARISED
 ) -> Session:
+    campaign = await db_session.scalar(select(Campaign).limit(1))
+    if campaign is None:
+        campaign = Campaign(name="Legacy test campaign", owner_user_id=uuid4())
+        db_session.add(campaign)
+        await db_session.flush()
     session = Session(
         title="Players test",
         recorded_at=datetime.now(UTC),
         gm_key_id=gm_id,
+        campaign_id=campaign.id,
         state=SessionState.TRANSCRIBED,
         transcription_mode=mode,
     )

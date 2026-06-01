@@ -18,7 +18,7 @@ from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatc
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.models import Profile, User, UserStatus, WebSession
+from app.core.models import Profile, SystemRole, User, UserStatus, WebSession
 from app.services.jdr.db.models import ApiKey, ApiKeyStatus, Role
 
 _hasher = PasswordHasher()
@@ -37,8 +37,11 @@ class SetupClosedError(Exception):
     """Raised when first-run setup is attempted after a user exists."""
 
 
-class LastActiveGmError(Exception):
-    """Raised when a change would remove the last active GM."""
+class LastActiveAdminError(Exception):
+    """Raised when a change would remove the last active administrator."""
+
+
+LastActiveGmError = LastActiveAdminError
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,8 +118,8 @@ def _internal_api_key(username: str) -> ApiKey:
     )
 
 
-async def _ensure_gm_api_key(session: AsyncSession, user: User) -> None:
-    if user.profile != Profile.GM or user.api_key_id is not None:
+async def _ensure_jdr_api_key(session: AsyncSession, user: User) -> None:
+    if user.api_key_id is not None:
         return
     api_key = _internal_api_key(user.username)
     session.add(api_key)
@@ -128,25 +131,31 @@ async def create_user(
     session: AsyncSession,
     *,
     username: str,
-    profile: Profile,
+    system_role: SystemRole | None = None,
+    profile: Profile | None = None,
     password: str,
 ) -> User:
     normalized = normalize_username(username)
     if await _username_exists(session, normalized):
         raise DuplicateUserError
 
-    api_key = _internal_api_key(normalized) if profile == Profile.GM else None
-    if api_key is not None:
-        session.add(api_key)
-        await session.flush()
+    resolved_system_role = system_role
+    if resolved_system_role is None:
+        resolved_system_role = (
+            SystemRole.ADMIN if profile == Profile.GM else SystemRole.USER
+        )
+
+    api_key = _internal_api_key(normalized)
+    session.add(api_key)
+    await session.flush()
 
     now = _utcnow()
     user = User(
         username=normalized,
-        profile=profile,
+        system_role=resolved_system_role,
         password_hash=hash_password(password),
         status=UserStatus.ACTIVE,
-        api_key_id=api_key.id if api_key is not None else None,
+        api_key_id=api_key.id,
         created_at=now,
         updated_at=now,
     )
@@ -167,7 +176,7 @@ async def create_first_gm(
         return await create_user(
             session,
             username=username,
-            profile=Profile.GM,
+            system_role=SystemRole.ADMIN,
             password=password,
         )
 
@@ -176,18 +185,16 @@ async def authenticate_user(
     session: AsyncSession,
     *,
     username: str,
-    profile: Profile,
     password: str,
 ) -> User | None:
     stmt = select(User).where(
         User.username == normalize_username(username),
-        User.profile == profile,
         User.status == UserStatus.ACTIVE,
     )
     user = await session.scalar(stmt)
     if user is None or not verify_password(user.password_hash, password):
         return None
-    await _ensure_gm_api_key(session, user)
+    await _ensure_jdr_api_key(session, user)
     return user
 
 
@@ -275,11 +282,11 @@ async def list_users(
     return list(result.all())
 
 
-async def count_active_gms(session: AsyncSession) -> int:
+async def count_active_admins(session: AsyncSession) -> int:
     return int(
         await session.scalar(
             select(func.count()).select_from(User).where(
-                User.profile == Profile.GM,
+                User.system_role == SystemRole.ADMIN,
                 User.status == UserStatus.ACTIVE,
             )
         )
@@ -287,25 +294,32 @@ async def count_active_gms(session: AsyncSession) -> int:
     )
 
 
+count_active_gms = count_active_admins
+
+
 async def update_user(
     session: AsyncSession,
     user_id: UUID,
     *,
+    system_role: SystemRole | None = None,
     profile: Profile | None = None,
     password: str | None = None,
     status: UserStatus | None = None,
 ) -> User:
     user = await get_user(session, user_id)
-    if user.profile == Profile.GM and user.status == UserStatus.ACTIVE:
-        would_remove_gm = (
-            profile not in (None, Profile.GM)
+    if system_role is None and profile is not None:
+        system_role = SystemRole.ADMIN if profile == Profile.GM else SystemRole.USER
+
+    if user.system_role == SystemRole.ADMIN and user.status == UserStatus.ACTIVE:
+        would_remove_admin = (
+            system_role not in (None, SystemRole.ADMIN)
             or status in (UserStatus.INACTIVE, UserStatus.DELETED)
         )
-        if would_remove_gm and await count_active_gms(session) <= 1:
-            raise LastActiveGmError
+        if would_remove_admin and await count_active_admins(session) <= 1:
+            raise LastActiveAdminError
 
-    if profile is not None:
-        user.profile = profile
+    if system_role is not None:
+        user.system_role = system_role
     if password is not None:
         user.password_hash = hash_password(password)
     if status is not None:
@@ -314,7 +328,7 @@ async def update_user(
             user.deleted_at = _utcnow()
         if status in (UserStatus.INACTIVE, UserStatus.DELETED):
             await revoke_user_sessions(session, user.id)
-    await _ensure_gm_api_key(session, user)
+    await _ensure_jdr_api_key(session, user)
     user.updated_at = _utcnow()
     await session.flush()
     return user
@@ -323,11 +337,11 @@ async def update_user(
 async def delete_user(session: AsyncSession, user_id: UUID) -> User:
     user = await get_user(session, user_id)
     if (
-        user.profile == Profile.GM
+        user.system_role == SystemRole.ADMIN
         and user.status == UserStatus.ACTIVE
-        and await count_active_gms(session) <= 1
+        and await count_active_admins(session) <= 1
     ):
-        raise LastActiveGmError
+        raise LastActiveAdminError
     user.status = UserStatus.DELETED
     user.deleted_at = _utcnow()
     user.updated_at = user.deleted_at

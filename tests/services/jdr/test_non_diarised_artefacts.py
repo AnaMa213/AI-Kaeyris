@@ -22,6 +22,7 @@ from app.services.jdr.db.models import (
     ApiKeyStatus,
     Artifact,
     Chunk,
+    Campaign,
     Pj,
     Role,
     Session,
@@ -83,8 +84,22 @@ async def ctx_non_diarised_with_chunk_summaries(
         await setup.flush()
         gm_id = gm.id
 
-        pj_a = Pj(id=pj_a_id, name="Aragorn", owner_gm_key_id=gm_id)
-        pj_b = Pj(id=pj_b_id, name="Galadriel", owner_gm_key_id=gm_id)
+        campaign = Campaign(name="ND artefacts campaign", owner_user_id=uuid4())
+        setup.add(campaign)
+        await setup.flush()
+
+        pj_a = Pj(
+            id=pj_a_id,
+            name="Aragorn",
+            owner_gm_key_id=gm_id,
+            campaign_id=campaign.id,
+        )
+        pj_b = Pj(
+            id=pj_b_id,
+            name="Galadriel",
+            owner_gm_key_id=gm_id,
+            campaign_id=campaign.id,
+        )
         setup.add(pj_a)
         setup.add(pj_b)
 
@@ -94,6 +109,7 @@ async def ctx_non_diarised_with_chunk_summaries(
                 title="ND artefacts test",
                 recorded_at=datetime.now(UTC),
                 gm_key_id=gm_id,
+                campaign_id=campaign.id,
                 state=SessionState.TRANSCRIBED,
                 transcription_mode=TranscriptionMode.NON_DIARISED,
             )

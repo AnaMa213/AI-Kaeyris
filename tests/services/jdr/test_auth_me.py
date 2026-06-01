@@ -51,7 +51,11 @@ async def test_auth_me_returns_gm_identity_and_active_campaign(
     assert response.headers["cache-control"] == "no-store"
     assert_datetime_fields_have_explicit_timezone(response.json())
     assert response.json() == {
-        "user": {"id": str(gm.id), "username": "admin"},
+        "user": {
+            "id": str(gm.id),
+            "username": "admin",
+            "system_role": "admin",
+        },
         "active_campaign": {
             "id": str(campaign.id),
             "name": campaign.name,
@@ -73,7 +77,7 @@ async def test_auth_me_returns_player_membership_with_character(
         db_session,
         user=player,
         campaign=campaign,
-        role=CampaignRole.PLAYER,
+        role=CampaignRole.PJ,
         character=pj,
     )
     token = await make_web_session(db_session, user=player)
@@ -88,7 +92,7 @@ async def test_auth_me_returns_player_membership_with_character(
     assert response.json()["active_campaign"] == {
         "id": str(campaign.id),
         "name": campaign.name,
-        "role": "player",
+            "role": "pj",
         "character_id": str(pj.id),
     }
 
@@ -108,7 +112,11 @@ async def test_auth_me_allows_active_user_without_membership(
 
     assert response.status_code == 200
     assert response.json() == {
-        "user": {"id": str(user.id), "username": "orphan"},
+        "user": {
+            "id": str(user.id),
+            "username": "orphan",
+            "system_role": "user",
+        },
         "active_campaign": None,
     }
 

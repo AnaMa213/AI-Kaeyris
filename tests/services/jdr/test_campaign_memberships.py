@@ -66,7 +66,7 @@ async def test_campaign_repository_lists_user_campaign_summaries(db_session):
         db_session,
         user=gm,
         campaign=campaign_b,
-        role=CampaignRole.PLAYER,
+        role=CampaignRole.PJ,
     )
     await make_membership(db_session, user=player, campaign=foreign)
     latest = datetime(2026, 5, 29, 18, 30, tzinfo=UTC)
@@ -93,7 +93,7 @@ async def test_campaign_repository_lists_user_campaign_summaries(db_session):
     assert summaries[0].role == CampaignRole.GM
     assert summaries[0].session_count == 2
     assert summaries[0].last_session_at == latest
-    assert summaries[1].role == CampaignRole.PLAYER
+    assert summaries[1].role == CampaignRole.PJ
     assert summaries[1].session_count == 0
     assert summaries[1].last_session_at is None
 
@@ -124,7 +124,7 @@ async def test_campaign_repository_create_duplicate_raises(db_session):
 
 async def test_profile_to_campaign_role_mapping_is_stable():
     assert campaign_role_for_profile(Profile.GM) == CampaignRole.GM
-    assert campaign_role_for_profile(Profile.USER) == CampaignRole.PLAYER
+    assert campaign_role_for_profile(Profile.USER) == CampaignRole.PJ
 
 
 async def test_membership_rejects_character_from_another_campaign(db_session):
@@ -139,7 +139,7 @@ async def test_membership_rejects_character_from_another_campaign(db_session):
             db_session,
             user=player,
             campaign=campaign_a,
-            role=CampaignRole.PLAYER,
+            role=CampaignRole.PJ,
             character_id=pj.id,
         )
 
@@ -155,7 +155,7 @@ async def test_membership_is_idempotent(db_session):
     assert first.campaign_id == second.campaign_id
 
 
-async def test_post_users_creates_memberships_for_gm_and_player_profiles(
+async def test_post_users_creates_standard_campaign_memberships(
     db_session,
     make_db_session_dep,
 ):
@@ -170,15 +170,15 @@ async def test_post_users_creates_memberships_for_gm_and_player_profiles(
         assert setup.status_code == 201
         player = await client.post(
             "/services/jdr/users",
-            json={"username": "alice", "profile": "user", "password": "secret"},
+            json={"username": "alice", "system_role": "user", "password": "secret"},
         )
-        gm = await client.post(
+        admin = await client.post(
             "/services/jdr/users",
-            json={"username": "bob", "profile": "gm", "password": "secret"},
+            json={"username": "bob", "system_role": "admin", "password": "secret"},
         )
 
     assert player.status_code == 201
-    assert gm.status_code == 201
+    assert admin.status_code == 201
     campaign = await db_session.scalar(select(Campaign))
     assert campaign is not None
     player_membership = await db_session.get(
@@ -187,12 +187,12 @@ async def test_post_users_creates_memberships_for_gm_and_player_profiles(
     )
     gm_membership = await db_session.get(
         CampaignMember,
-        {"user_id": UUID(gm.json()["id"]), "campaign_id": campaign.id},
+        {"user_id": UUID(admin.json()["id"]), "campaign_id": campaign.id},
     )
     assert player_membership is not None
-    assert player_membership.role == CampaignRole.PLAYER
+    assert player_membership.role == CampaignRole.PJ
     assert gm_membership is not None
-    assert gm_membership.role == CampaignRole.GM
+    assert gm_membership.role == CampaignRole.PJ
 
 
 async def test_post_users_falls_back_to_default_campaign_when_creator_has_no_scope(
@@ -208,7 +208,7 @@ async def test_post_users_falls_back_to_default_campaign_when_creator_has_no_sco
         client.cookies.set("session", token)
         response = await client.post(
             "/services/jdr/users",
-            json={"username": "alice", "profile": "user", "password": "secret"},
+            json={"username": "alice", "system_role": "user", "password": "secret"},
         )
 
     assert response.status_code == 201
@@ -219,7 +219,7 @@ async def test_post_users_falls_back_to_default_campaign_when_creator_has_no_sco
         {"user_id": UUID(response.json()["id"]), "campaign_id": campaign.id},
     )
     assert membership is not None
-    assert membership.role == CampaignRole.PLAYER
+    assert membership.role == CampaignRole.PJ
 
 
 async def test_delete_keeps_membership_rows_while_blocking_login(
@@ -236,13 +236,13 @@ async def test_delete_keeps_membership_rows_while_blocking_login(
         )
         created = await client.post(
             "/services/jdr/users",
-            json={"username": "alice", "profile": "user", "password": "secret"},
+            json={"username": "alice", "system_role": "user", "password": "secret"},
         )
         user_id = UUID(created.json()["id"])
         deleted = await client.delete(f"/services/jdr/users/{user_id}")
         login = await client.post(
             "/services/jdr/auth/login",
-            json={"username": "alice", "profile": "user", "password": "secret"},
+            json={"username": "alice", "password": "secret"},
         )
 
     assert deleted.status_code == 204
@@ -255,7 +255,7 @@ async def test_delete_keeps_membership_rows_while_blocking_login(
     assert membership is not None
 
 
-async def test_get_users_lists_only_active_campaign_members(
+async def test_get_users_lists_all_accounts_for_admin(
     db_session,
     make_db_session_dep,
 ):
@@ -274,4 +274,7 @@ async def test_get_users_lists_only_active_campaign_members(
         response = await client.get("/services/jdr/users")
 
     assert response.status_code == 200
-    assert [item["username"] for item in response.json()["items"]] == ["admin"]
+    assert [item["username"] for item in response.json()["items"]] == [
+        "admin",
+        "other",
+    ]

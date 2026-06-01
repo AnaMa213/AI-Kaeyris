@@ -53,7 +53,8 @@ class Role(str, enum.Enum):
 
 class CampaignRole(str, enum.Enum):
     GM = "gm"
-    PLAYER = "player"
+    PJ = "pj"
+    PLAYER = "pj"
 
 
 class ApiKeyStatus(str, enum.Enum):
@@ -115,7 +116,7 @@ def _utcnow() -> datetime:
 
 
 def _enum_values(enum_cls: type[enum.Enum]) -> list[str]:
-    return [member.value for member in enum_cls]
+    return list(dict.fromkeys(member.value for member in enum_cls))
 
 
 # ---------------------------------------------------------------------------
@@ -242,9 +243,15 @@ class Pj(Base):
         nullable=False,
         index=True,
     )
-    campaign_id: Mapped[uuid.UUID | None] = mapped_column(
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
         Uuid,
         ForeignKey("jdr_campaigns.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("core_users.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
@@ -253,9 +260,7 @@ class Pj(Base):
     )
 
     owner: Mapped[ApiKey] = relationship("ApiKey", foreign_keys=[owner_gm_key_id])
-    campaign: Mapped[Campaign | None] = relationship(
-        "Campaign", foreign_keys=[campaign_id]
-    )
+    campaign: Mapped[Campaign] = relationship("Campaign", foreign_keys=[campaign_id])
 
 
 class Session(Base):

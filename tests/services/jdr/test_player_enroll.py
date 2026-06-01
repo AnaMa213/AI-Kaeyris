@@ -24,6 +24,7 @@ from app.core.redis_client import get_redis
 from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
+    Campaign,
     Pj,
     Role,
 )
@@ -49,7 +50,10 @@ async def _seed_gm_and_pj(db_session, plain_token: str, pj_name: str = "Aragorn"
     db_session.add(gm)
     await db_session.commit()
     await db_session.refresh(gm)
-    pj = Pj(name=pj_name, owner_gm_key_id=gm.id)
+    campaign = Campaign(name=f"{pj_name}-campaign", owner_user_id=uuid4())
+    db_session.add(campaign)
+    await db_session.flush()
+    pj = Pj(name=pj_name, owner_gm_key_id=gm.id, campaign_id=campaign.id)
     db_session.add(pj)
     await db_session.commit()
     await db_session.refresh(pj)

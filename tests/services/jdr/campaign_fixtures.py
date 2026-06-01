@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from argon2 import PasswordHasher
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.models import Profile, User, UserStatus
+from app.core.models import Profile, SystemRole, User, UserStatus
 from app.core.users import create_web_session, hash_password
 from app.services.jdr.campaign_context import ensure_user_membership
 from app.services.jdr.db.models import (
@@ -27,24 +27,27 @@ async def make_user(
     *,
     username: str,
     profile: Profile = Profile.GM,
+    system_role: SystemRole | None = None,
     password: str = "password",
 ) -> User:
     api_key = None
-    if profile == Profile.GM:
-        api_key = ApiKey(
-            name=f"web:{username}",
-            hash=PasswordHasher().hash(f"token-{username}"),
-            role=Role.GM,
-            status=ApiKeyStatus.ACTIVE,
-        )
-        db.add(api_key)
-        await db.flush()
+    resolved_system_role = system_role or (
+        SystemRole.ADMIN if profile == Profile.GM else SystemRole.USER
+    )
+    api_key = ApiKey(
+        name=f"web:{username}",
+        hash=PasswordHasher().hash(f"token-{username}"),
+        role=Role.GM,
+        status=ApiKeyStatus.ACTIVE,
+    )
+    db.add(api_key)
+    await db.flush()
     user = User(
         username=username,
-        profile=profile,
+        system_role=resolved_system_role,
         password_hash=hash_password(password),
         status=UserStatus.ACTIVE,
-        api_key_id=api_key.id if api_key is not None else None,
+        api_key_id=api_key.id,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )
@@ -107,10 +110,12 @@ async def make_pj(
 ) -> Pj:
     if owner.api_key_id is None:
         raise ValueError("A PJ fixture requires a GM user with api_key_id.")
+    if campaign is None:
+        campaign = await make_campaign(db, owner=owner)
     pj = Pj(
         name=name,
         owner_gm_key_id=owner.api_key_id,
-        campaign_id=campaign.id if campaign is not None else None,
+        campaign_id=campaign.id,
     )
     db.add(pj)
     await db.flush()

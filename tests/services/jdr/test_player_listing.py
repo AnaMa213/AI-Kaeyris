@@ -16,6 +16,7 @@ from app.core.redis_client import get_redis
 from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
+    Campaign,
     Pj,
     Role,
     Session,
@@ -55,8 +56,12 @@ async def _seed_listing_fixture(db_session):
     await db_session.commit()
     await db_session.refresh(gm)
 
-    pj_a = Pj(name="Aragorn", owner_gm_key_id=gm.id)
-    pj_b = Pj(name="Boromir", owner_gm_key_id=gm.id)
+    campaign = Campaign(name="Listing campaign", owner_user_id=uuid4())
+    db_session.add(campaign)
+    await db_session.flush()
+
+    pj_a = Pj(name="Aragorn", owner_gm_key_id=gm.id, campaign_id=campaign.id)
+    pj_b = Pj(name="Boromir", owner_gm_key_id=gm.id, campaign_id=campaign.id)
     db_session.add(pj_a)
     db_session.add(pj_b)
     await db_session.commit()
@@ -77,18 +82,21 @@ async def _seed_listing_fixture(db_session):
         title="Session-vue-par-A",
         recorded_at=datetime.now(UTC),
         gm_key_id=gm.id,
+        campaign_id=campaign.id,
         state=SessionState.TRANSCRIBED,
     )
     s2 = Session(
         title="Session-pour-B-seulement",
         recorded_at=datetime.now(UTC),
         gm_key_id=gm.id,
+        campaign_id=campaign.id,
         state=SessionState.TRANSCRIBED,
     )
     s3 = Session(
         title="Session-sans-mapping",
         recorded_at=datetime.now(UTC),
         gm_key_id=gm.id,
+        campaign_id=campaign.id,
         state=SessionState.TRANSCRIBED,
     )
     db_session.add(s1)

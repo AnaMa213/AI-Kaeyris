@@ -24,9 +24,16 @@ def _enum_values(enum_cls: type[enum.Enum]) -> list[str]:
     return [member.value for member in enum_cls]
 
 
-class Profile(str, enum.Enum):
-    GM = "gm"
+class SystemRole(str, enum.Enum):
+    ADMIN = "admin"
     USER = "user"
+
+
+class Profile(str, enum.Enum):
+    """Deprecated compatibility alias for pre-BD-7 tests/helpers."""
+
+    GM = SystemRole.ADMIN.value
+    USER = SystemRole.USER.value
 
 
 class UserStatus(str, enum.Enum):
@@ -48,10 +55,10 @@ class User(Base):
     username: Mapped[str] = mapped_column(
         String(150), unique=True, nullable=False, index=True
     )
-    profile: Mapped[Profile] = mapped_column(
+    system_role: Mapped[SystemRole] = mapped_column(
         Enum(
-            Profile,
-            name="core_profile",
+            SystemRole,
+            name="core_system_role",
             native_enum=False,
             length=16,
             values_callable=_enum_values,
@@ -101,6 +108,19 @@ class User(Base):
     sessions: Mapped[list[WebSession]] = relationship(
         "WebSession", back_populates="user", cascade="all, delete-orphan"
     )
+
+    @property
+    def profile(self) -> Profile:
+        """Compatibility shim while BD-7 removes public `profile` contracts."""
+        return Profile.GM if self.system_role == SystemRole.ADMIN else Profile.USER
+
+    @profile.setter
+    def profile(self, value: Profile | SystemRole | str) -> None:
+        raw = value.value if isinstance(value, enum.Enum) else value
+        if raw in {Profile.GM.value, SystemRole.ADMIN.value, "gm"}:
+            self.system_role = SystemRole.ADMIN
+            return
+        self.system_role = SystemRole.USER
 
 
 class WebSession(Base):

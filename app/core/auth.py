@@ -29,7 +29,6 @@ from app.core.config import settings
 from app.core.db import get_db_session
 from app.core.logging import get_logger
 from app.core.errors import AppError
-from app.core.models import Profile
 from app.core.users import validate_web_session
 from app.services.jdr.db.models import ApiKey, ApiKeyStatus, Role
 
@@ -103,7 +102,7 @@ class AuthenticatedKey:
 
     id: UUID
     name: str
-    role: Role | Profile
+    role: Role
     pj_id: UUID | None
     source: str = "api_key"
     user_id: UUID | None = None
@@ -282,11 +281,10 @@ async def require_api_key(
         validated = await validate_web_session(session, session_token)
         if validated is not None:
             user = validated.user
-            auth_id = user.api_key_id if user.profile == Profile.GM else user.id
             return AuthenticatedKey(
-                id=auth_id or user.id,
+                id=user.api_key_id or user.id,
                 name=user.username,
-                role=user.profile,
+                role=Role.GM,
                 pj_id=None,
                 source="web_session",
                 user_id=user.id,

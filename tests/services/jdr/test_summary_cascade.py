@@ -24,6 +24,7 @@ from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
     Artifact,
+    Campaign,
     Chunk,
     Role,
     Session,
@@ -88,8 +89,22 @@ async def ctx_with_existing_derived_artefacts(
         await setup.flush()
         gm_id = gm.id
 
-        pj_a = Pj(id=pj_a_id, name="A", owner_gm_key_id=gm_id)
-        pj_b = Pj(id=pj_b_id, name="B", owner_gm_key_id=gm_id)
+        campaign = Campaign(name="Cascade campaign", owner_user_id=uuid4())
+        setup.add(campaign)
+        await setup.flush()
+
+        pj_a = Pj(
+            id=pj_a_id,
+            name="A",
+            owner_gm_key_id=gm_id,
+            campaign_id=campaign.id,
+        )
+        pj_b = Pj(
+            id=pj_b_id,
+            name="B",
+            owner_gm_key_id=gm_id,
+            campaign_id=campaign.id,
+        )
         setup.add(pj_a)
         setup.add(pj_b)
 
@@ -99,6 +114,7 @@ async def ctx_with_existing_derived_artefacts(
                 title="Cascade test",
                 recorded_at=datetime.now(UTC),
                 gm_key_id=gm_id,
+                campaign_id=campaign.id,
                 state=SessionState.TRANSCRIBED,
                 transcription_mode=TranscriptionMode.NON_DIARISED,
             )

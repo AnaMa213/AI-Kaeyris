@@ -18,6 +18,7 @@ import fakeredis
 from argon2 import PasswordHasher
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from app.core.db import get_db_session
 from app.core.errors import register_exception_handlers
@@ -25,6 +26,7 @@ from app.core.redis_client import get_redis
 from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
+    Campaign,
     Artifact,
     Pj,
     Role,
@@ -57,7 +59,12 @@ async def _seed_gm(db_session, plain_token: str) -> ApiKey:
 
 
 async def _seed_pj(db_session, *, gm_id, name: str) -> Pj:
-    pj = Pj(name=name, owner_gm_key_id=gm_id)
+    campaign = await db_session.scalar(select(Campaign).limit(1))
+    if campaign is None:
+        campaign = Campaign(name="Legacy test campaign", owner_user_id=uuid4())
+        db_session.add(campaign)
+        await db_session.flush()
+    pj = Pj(name=name, owner_gm_key_id=gm_id, campaign_id=campaign.id)
     db_session.add(pj)
     await db_session.commit()
     await db_session.refresh(pj)
@@ -71,10 +78,16 @@ async def _seed_session(
     state: SessionState = SessionState.TRANSCRIBED,
     title: str = "Session de test",
 ) -> Session:
+    campaign = await db_session.scalar(select(Campaign).limit(1))
+    if campaign is None:
+        campaign = Campaign(name="Legacy test campaign", owner_user_id=uuid4())
+        db_session.add(campaign)
+        await db_session.flush()
     session = Session(
         title=title,
         recorded_at=datetime.now(UTC),
         gm_key_id=gm_id,
+        campaign_id=campaign.id,
         state=state,
     )
     db_session.add(session)

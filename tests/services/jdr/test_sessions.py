@@ -188,7 +188,7 @@ async def test_create_session_rejects_player_role(
     campaign = Campaign(name="Player reject test", owner_user_id=user.id)
     db_session.add(campaign)
     await db_session.flush()
-    pj = Pj(name="Aragorn", owner_gm_key_id=gm.id)
+    pj = Pj(name="Aragorn", owner_gm_key_id=gm.id, campaign_id=campaign.id)
     db_session.add(pj)
     await db_session.flush()
     db_session.add(

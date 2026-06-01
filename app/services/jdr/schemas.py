@@ -80,7 +80,7 @@ class CampaignOut(JdrSchema):
     id: UUID
     name: str
     description: str | None = None
-    role: Literal["gm", "player"]
+    role: Literal["gm", "pj"]
     session_count: int
     last_session_at: datetime | None = None
     created_at: datetime
@@ -223,6 +223,8 @@ class PjCreate(JdrSchema):
     """Payload accepted by ``POST /services/jdr/pjs``."""
 
     name: str = Field(..., min_length=1, max_length=255)
+    campaign_id: UUID | None = None
+    user_id: UUID | None = None
 
 
 class PjOut(JdrSchema):
@@ -232,6 +234,8 @@ class PjOut(JdrSchema):
 
     id: UUID
     name: str
+    campaign_id: UUID
+    user_id: UUID | None = None
     created_at: datetime
 
 

@@ -164,14 +164,15 @@ async def test_pj_create_and_list_emit_explicit_timezone_suffixes(
     make_db_session_dep,
 ):
     plain = "gm-datetime-pj"
-    await _seed_gm(db_session, plain)
+    gm = await _seed_gm(db_session, plain)
+    campaign = await _seed_campaign(db_session, gm)
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         created = await client.post(
             "/services/jdr/pjs",
-            json={"name": "Aragorn"},
+            json={"name": "Aragorn", "campaign_id": str(campaign.id)},
             headers={"Authorization": f"Bearer {plain}"},
         )
         listed = await client.get(

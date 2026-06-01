@@ -48,7 +48,7 @@ async def test_setup_create_user_login_and_cookie_authenticates_protected_route(
             "/services/jdr/users",
             json={
                 "username": "alice",
-                "profile": "gm",
+                "system_role": "user",
                 "password": "alice-password",
             },
         )
@@ -59,7 +59,6 @@ async def test_setup_create_user_login_and_cookie_authenticates_protected_route(
             "/services/jdr/auth/login",
             json={
                 "username": "alice",
-                "profile": "gm",
                 "password": "alice-password",
             },
         )
@@ -72,7 +71,12 @@ async def test_setup_create_user_login_and_cookie_authenticates_protected_route(
 
         me = await client.get("/services/jdr/auth/me")
         assert me.status_code == 200
-        campaign_id = me.json()["active_campaign"]["id"]
+        campaign = await client.post(
+            "/services/jdr/campaigns",
+            json={"name": "Alice campaign"},
+        )
+        assert campaign.status_code == 201
+        campaign_id = campaign.json()["id"]
 
         protected = await client.post(
             "/services/jdr/sessions",
@@ -111,7 +115,7 @@ async def test_login_invalid_credentials_returns_exact_front_problem(
     }
 
 
-async def test_login_unsupported_profile_returns_exact_front_problem(
+async def test_login_extra_profile_field_is_ignored_and_credentials_fail(
     make_db_session_dep,
 ):
     app = _make_app(make_db_session_dep, fakeredis.FakeStrictRedis())
@@ -123,12 +127,12 @@ async def test_login_unsupported_profile_returns_exact_front_problem(
             json={"username": "admin", "profile": "owner", "password": "anything"},
         )
 
-    assert response.status_code == 403
+    assert response.status_code == 401
     assert response.headers["content-type"] == "application/problem+json"
     assert response.json() == {
         "type": "about:blank",
-        "title": "Forbidden",
-        "status": 403,
+        "title": "Invalid credentials",
+        "status": 401,
     }
 
 

@@ -36,6 +36,7 @@ from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
     Artifact,
+    Campaign,
     Pj,
     Role,
     Session,
@@ -112,8 +113,16 @@ async def _seed_session_with_mapping(
         await setup.flush()
         gm_id = gm.id
 
-        pj_galadriel = Pj(name="Galadriel", owner_gm_key_id=gm_id)
-        pj_aragorn = Pj(name="Aragorn", owner_gm_key_id=gm_id)
+        campaign = Campaign(name="POV campaign", owner_user_id=uuid4())
+        setup.add(campaign)
+        await setup.flush()
+
+        pj_galadriel = Pj(
+            name="Galadriel", owner_gm_key_id=gm_id, campaign_id=campaign.id
+        )
+        pj_aragorn = Pj(
+            name="Aragorn", owner_gm_key_id=gm_id, campaign_id=campaign.id
+        )
         setup.add(pj_galadriel)
         setup.add(pj_aragorn)
         await setup.flush()
@@ -126,6 +135,7 @@ async def _seed_session_with_mapping(
                 title="POV test session",
                 recorded_at=datetime.now(UTC),
                 gm_key_id=gm_id,
+                campaign_id=campaign.id,
                 state=SessionState.TRANSCRIBED,
             )
         )

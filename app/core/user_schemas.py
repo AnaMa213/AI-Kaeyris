@@ -5,10 +5,17 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    model_validator,
+)
 
 from app.core.datetime_serialization import serialize_datetime_utc
-from app.core.models import Profile, UserStatus
+from app.core.models import SystemRole, UserStatus
 
 
 class UserSchema(BaseModel):
@@ -32,24 +39,29 @@ class SetupRequest(UserSchema):
 
 class LoginRequest(UserSchema):
     username: str = Field(min_length=1, max_length=150)
-    profile: str = Field(min_length=1, max_length=32)
     password: str = Field(min_length=1, max_length=256)
 
 
 class UserCreate(UserSchema):
     username: str = Field(min_length=1, max_length=150)
-    profile: Profile
+    system_role: SystemRole = Field(
+        default=SystemRole.USER,
+        validation_alias=AliasChoices("system_role", "profile"),
+    )
     password: str = Field(min_length=1, max_length=256)
 
 
 class UserUpdate(UserSchema):
-    profile: Profile | None = None
+    system_role: SystemRole | None = Field(
+        default=None,
+        validation_alias=AliasChoices("system_role", "profile"),
+    )
     password: str | None = Field(default=None, min_length=1, max_length=256)
     status: UserStatus | None = None
 
     @model_validator(mode="after")
     def require_one_change(self) -> "UserUpdate":
-        if self.profile is None and self.password is None and self.status is None:
+        if self.system_role is None and self.password is None and self.status is None:
             raise ValueError("At least one user field must be provided.")
         return self
 
@@ -59,7 +71,7 @@ class UserOut(UserSchema):
 
     id: UUID
     username: str
-    profile: Profile
+    system_role: SystemRole
     status: UserStatus
     created_at: datetime
     updated_at: datetime
@@ -73,6 +85,7 @@ class UserListOut(UserSchema):
 class AuthMeUserOut(UserSchema):
     id: UUID
     username: str
+    system_role: SystemRole
 
 
 class AuthMeCampaignOut(UserSchema):

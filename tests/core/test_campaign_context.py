@@ -90,17 +90,17 @@ async def test_adoption_backfills_users_and_sessions_to_default_campaign(
     assert gm_membership is not None
     assert gm_membership.role == CampaignRole.GM
     assert player_membership is not None
-    assert player_membership.role == CampaignRole.PLAYER
+    assert player_membership.role == CampaignRole.PJ
     assert session.campaign_id == adopted.id
 
 
-async def test_adoption_backfills_legacy_sessions_without_reassigning_existing_pjs(
+async def test_adoption_backfills_legacy_sessions_without_changing_scoped_pjs(
     db_session,
 ):
     gm = await make_user(db_session, username="gm", profile=Profile.GM)
     player = await make_user(db_session, username="player", profile=Profile.USER)
     campaign = await make_campaign(db_session, owner=gm)
-    pj = await make_pj(db_session, owner=gm, campaign=None)
+    pj = await make_pj(db_session, owner=gm, campaign=campaign)
     session = await make_session(db_session, owner=gm, campaign=campaign)
     session.campaign_id = None
     await db_session.commit()
@@ -111,5 +111,5 @@ async def test_adoption_backfills_legacy_sessions_without_reassigning_existing_p
 
     assert gm.default_campaign_id == adopted.id
     assert player.default_campaign_id == adopted.id
-    assert pj.campaign_id is None
+    assert pj.campaign_id == campaign.id
     assert session.campaign_id == adopted.id
