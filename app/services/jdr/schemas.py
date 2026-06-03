@@ -154,6 +154,7 @@ class SessionOut(JdrSchema):
     state: SessionState
     transcription_mode: TranscriptionMode
     campaign_context: str | None = None
+    current_job_id: str | None = None
     created_at: datetime
     updated_at: datetime
 

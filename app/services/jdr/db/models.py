@@ -9,7 +9,7 @@ Implementation choices kept simple on purpose:
 - ``DateTime(timezone=True)`` everywhere; values inserted as ``datetime.now(UTC)``.
 - ``JSON`` for transcription segments and artefact contents — SQLite uses
   the JSON1 extension, Postgres will use JSONB transparently.
-- Cross-table invariants (role/pj_id consistency, purge-after-transcription,
+- Cross-table invariants (role/pj_id consistency, explicit audio deletion,
   etc.) are enforced in business code, not via DB CHECK constraints. The
   reasoning: they involve multiple tables / lifecycle states, and SQLite's
   CHECK is single-row only — keeping the DB layer simple avoids a layer of
@@ -325,6 +325,12 @@ class Session(Base):
     campaign_context: Mapped[str | None] = mapped_column(
         String(8000), nullable=True
     )
+    current_job_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("jdr_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
@@ -351,8 +357,14 @@ class Session(Base):
     artifacts: Mapped[list[Artifact]] = relationship(
         "Artifact", back_populates="session", cascade="all, delete-orphan"
     )
+    current_job: Mapped[Job | None] = relationship(
+        "Job", foreign_keys=[current_job_id], post_update=True
+    )
     jobs: Mapped[list[Job]] = relationship(
-        "Job", back_populates="session", cascade="all, delete-orphan"
+        "Job",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        foreign_keys="Job.session_id",
     )
     # Sous-jalon 5.5 — only populated when transcription_mode = NON_DIARISED.
     chunks: Mapped[list[Chunk]] = relationship(
@@ -364,7 +376,7 @@ class Session(Base):
 
 
 class AudioSource(Base):
-    """Uploaded audio file metadata — purged from disk after transcription."""
+    """Uploaded audio file metadata, purged only by explicit deletion."""
 
     __tablename__ = "jdr_audio_sources"
 
@@ -505,7 +517,9 @@ class Job(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    session: Mapped[Session] = relationship("Session", back_populates="jobs")
+    session: Mapped[Session] = relationship(
+        "Session", back_populates="jobs", foreign_keys=[session_id]
+    )
 
 
 class Chunk(Base):

@@ -16,7 +16,6 @@ import asyncio
 import json
 import re
 import time
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -156,7 +155,7 @@ async def _transcribe_session(session_id: UUID) -> None:
     - moves the session state to ``transcribing`` then ``transcribed``
       (or ``transcription_failed`` on PermanentJobError)
     - persists the ``Transcription`` row (UPSERT semantics)
-    - marks ``AudioSource.purged_at`` and deletes the audio file from disk
+    - keeps the source audio available until explicit destructive deletion
     """
     sessionmaker = get_sessionmaker()
 
@@ -218,7 +217,7 @@ async def _transcribe_session(session_id: UUID) -> None:
         await _mark_session_failed(sessionmaker, session_id)
         raise PermanentJobError(f"Audio chunking failed: {exc}") from exc
 
-    # --- Step 3: persist + transition + purge audio (single commit) ---------
+    # --- Step 3: persist + transition (single commit) ----------------------
     # Forks on session.transcription_mode (feature 002-non-diarised-mode).
 
     if transcription_mode is TranscriptionMode.NON_DIARISED:
@@ -234,11 +233,6 @@ async def _transcribe_session(session_id: UUID) -> None:
                 update(Session)
                 .where(Session.id == session_id)
                 .values(state=SessionState.TRANSCRIBED)
-            )
-            await db.execute(
-                update(AudioSource)
-                .where(AudioSource.session_id == session_id)
-                .values(purged_at=datetime.now(UTC))
             )
             await db.commit()
     else:
@@ -257,24 +251,7 @@ async def _transcribe_session(session_id: UUID) -> None:
                 .where(Session.id == session_id)
                 .values(state=SessionState.TRANSCRIBED)
             )
-            await db.execute(
-                update(AudioSource)
-                .where(AudioSource.session_id == session_id)
-                .values(purged_at=datetime.now(UTC))
-            )
             await db.commit()
-
-    # --- Step 4: best-effort file deletion (DB is the source of truth) ------
-
-    try:
-        full_path.unlink()
-    except OSError as exc:
-        # DB already says purged; a stale file on disk is a janitor task.
-        logger.warning(
-            "transcribe.audio_unlink_failed",
-            audio_path=str(full_path),
-            error=str(exc),
-        )
 
 
 async def _load_session_source_document(

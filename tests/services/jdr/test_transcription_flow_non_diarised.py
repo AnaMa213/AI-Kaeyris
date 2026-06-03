@@ -197,11 +197,11 @@ async def test_transcribe_non_diarised_writes_chunks(
     assert "trésor" in joined or "tresor" in joined  # tolérance accents
     # PAS de row dans jdr_transcriptions
     assert transcription_row is None
-    # State transcribed, audio purgé
+    # State transcribed, source audio kept
     assert session_row.state == SessionState.TRANSCRIBED
-    assert audio_row.purged_at is not None
-    # Fichier audio supprimé du disque
-    assert not ctx.audio_file.exists()
+    assert audio_row.purged_at is None
+    # Source audio still present on disk
+    assert ctx.audio_file.exists()
 
 
 async def test_transcribe_non_diarised_no_chunking_when_short(
