@@ -512,3 +512,26 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
 - Pas de RBAC fin, invitation email, audit log ou transfert de propriété campagne dans BD-7.
 - La migration est pensée pour une purge local/staging : les environnements avec des PJ orphelins doivent être nettoyés ou reseed avant upgrade.
 - Les API keys GM/player restent un mode legacy supporté ; le contrôle riche de membership web passe par les sessions.
+
+---
+
+## 2026-06-03 — BD-8 : current_job_id et accès audio source
+
+### Ce qui a été fait
+
+- Ajout de `Session.current_job_id` avec migration Alembic et exposition additive dans `SessionOut`.
+- L'upload audio crée une projection `jdr_jobs` et pose le job de transcription courant sur la session.
+- Le job de transcription conserve maintenant l'audio source après succès ou échec ; seul un DELETE explicite marque l'audio purgé.
+- Ajout de `GET /services/jdr/sessions/{session_id}/audio` avec réponse fichier complète, headers player, et support des ranges `206`.
+- Refonte de `DELETE /services/jdr/sessions/{session_id}/audio` : reset idempotent vers `created`, suppression des transcriptions/chunks/artifacts dérivés, vidage de `current_job_id`, refus uniquement pendant `transcribing`.
+
+### Ce que j'ai appris
+
+- **Un pointeur de job n'est pas l'historique des jobs** : garder la row `jdr_jobs` tout en vidant `current_job_id` donne au front un signal clair sans effacer l'audit local.
+- **La disponibilité audio est une règle métier distincte de la transcription** : réussir une transcription ne signifie plus que le fichier source doit disparaître. Le cycle de vie est maintenant piloté par l'action explicite de remplacement.
+- **Les endpoints binaires ont besoin de tests de headers** : pour un player navigateur, `Accept-Ranges`, `Content-Length` et `Content-Range` font partie du contrat observable autant que le corps de réponse.
+
+### Limitations acceptées
+
+- La lecture audio est ouverte aux membres web de la campagne active ; upload et suppression restent des actions GM.
+- Pas de signed URL ni stockage objet : fichier local sous `KAEYRIS_DATA_DIR`, cohérent avec le périmètre monolithe local.

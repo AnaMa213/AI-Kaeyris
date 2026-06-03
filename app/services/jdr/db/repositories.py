@@ -18,7 +18,7 @@ as a clear runtime error rather than a silent no-op.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -35,6 +35,7 @@ from app.services.jdr.db.models import (
     Campaign,
     CampaignMember,
     CampaignRole,
+    Job,
     Pj,
     Session,
     SessionPjMapping,
@@ -45,10 +46,7 @@ from app.services.jdr.db.models import (
 )
 
 if TYPE_CHECKING:
-    from app.services.jdr.db.models import (
-        ApiKey,
-        Job,
-    )
+    from app.services.jdr.db.models import ApiKey
 
 
 class DuplicatePjNameError(Exception):
@@ -468,6 +466,18 @@ class SessionRepository(_BaseRepository):
             .values(state=state)
         )
 
+    async def set_current_job_id(
+        self, session_id: UUID, job_id: str | None
+    ) -> None:
+        await self._session.execute(
+            update(Session)
+            .where(Session.id == session_id)
+            .values(current_job_id=job_id)
+        )
+
+    async def clear_current_job_id(self, session_id: UUID) -> None:
+        await self.set_current_job_id(session_id, None)
+
 
 class TranscriptionRepository(_BaseRepository):
     """``jdr_transcriptions`` access. Used by US1 (write) and every other
@@ -515,6 +525,12 @@ class TranscriptionRepository(_BaseRepository):
         return await self._session.scalar(
             select(Transcription).where(Transcription.session_id == session_id)
         )
+
+    async def delete_for_session(self, session_id: UUID) -> int:
+        result = await self._session.execute(
+            delete(Transcription).where(Transcription.session_id == session_id)
+        )
+        return result.rowcount
 
 
 class MappingRepository(_BaseRepository):
@@ -629,6 +645,12 @@ class ArtifactRepository(_BaseRepository):
         )
         return result.rowcount
 
+    async def delete_for_session(self, session_id: UUID) -> int:
+        result = await self._session.execute(
+            delete(Artifact).where(Artifact.session_id == session_id)
+        )
+        return result.rowcount
+
 
 class JobRepository(_BaseRepository):
     """``jdr_jobs`` lightweight projection of RQ jobs (data-model.md §8)."""
@@ -642,13 +664,39 @@ class JobRepository(_BaseRepository):
         status,
         failure_reason: str | None = None,
     ) -> Job:
-        raise NotImplementedError("Filled in by US1.")
+        now = datetime.now(UTC)
+        existing = await self._session.get(Job, job_id)
+        if existing is not None:
+            existing.kind = kind
+            existing.session_id = session_id
+            existing.status = status
+            existing.failure_reason = failure_reason
+            if status.value == "running" and existing.started_at is None:
+                existing.started_at = now
+            if status.value in {"succeeded", "failed"}:
+                existing.ended_at = now
+            await self._session.flush()
+            return existing
+
+        row = Job(
+            id=job_id,
+            kind=kind,
+            session_id=session_id,
+            status=status,
+            failure_reason=failure_reason,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return row
 
     async def list_for_session(self, session_id: UUID) -> list[Job]:
-        raise NotImplementedError("Filled in by US1.")
+        rows = await self._session.scalars(
+            select(Job).where(Job.session_id == session_id).order_by(Job.queued_at)
+        )
+        return list(rows.all())
 
     async def get(self, job_id: str) -> Job | None:
-        raise NotImplementedError("Filled in by US1.")
+        return await self._session.get(Job, job_id)
 
 
 # ---------------------------------------------------------------------------
@@ -706,6 +754,12 @@ class ChunkRepository(_BaseRepository):
             update(Chunk)
             .where(Chunk.session_id == session_id)
             .values(summary_text=None)
+        )
+        return result.rowcount
+
+    async def delete_for_session(self, session_id: UUID) -> int:
+        result = await self._session.execute(
+            delete(Chunk).where(Chunk.session_id == session_id)
         )
         return result.rowcount
 

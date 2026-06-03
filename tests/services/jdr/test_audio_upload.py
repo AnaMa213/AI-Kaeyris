@@ -30,6 +30,9 @@ from app.services.jdr.db.models import (
     ApiKeyStatus,
     AudioSource,
     Campaign,
+    Job,
+    JobKind,
+    JobStatus,
     Role,
     Session,
     SessionState,
@@ -247,6 +250,48 @@ async def test_upload_enqueues_transcription_job(
 
     # Exactly one new RQ job key landed in Redis.
     assert len(after_keys - before_keys) == 1
+
+
+async def test_upload_sets_session_current_job_id(
+    tmp_path: Path,
+    seeded_gm,
+    make_db_session_dep,
+    db_session: AsyncSession,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
+    )
+    plain, api_key = seeded_gm
+    app = _make_jdr_app(make_db_session_dep, fakeredis.FakeStrictRedis())
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        session_id = await _create_session(client, plain, api_key.test_campaign_id)
+        response = await client.post(
+            f"/services/jdr/sessions/{session_id}/audio",
+            files={"audio": ("a.m4a", b"xy", "audio/mp4")},
+            headers={"Authorization": f"Bearer {plain}"},
+        )
+        detail = await client.get(
+            f"/services/jdr/sessions/{session_id}",
+            headers={"Authorization": f"Bearer {plain}"},
+        )
+
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    row = await db_session.scalar(
+        select(Session).where(Session.id == UUID(session_id))
+    )
+    assert row is not None
+    assert row.current_job_id == job_id
+
+    job_row = await db_session.get(Job, job_id)
+    assert job_row is not None
+    assert job_row.kind == JobKind.TRANSCRIPTION
+    assert job_row.status == JobStatus.QUEUED
+    assert detail.status_code == 200
+    assert detail.json()["current_job_id"] == job_id
 
 
 # ---------------------------------------------------------------------------

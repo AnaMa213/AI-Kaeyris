@@ -35,6 +35,8 @@ from app.services.jdr.db.models import (
     AudioSource,
     Chunk,
     CampaignRole,
+    JobKind,
+    JobStatus,
     Pj,
     Role,
     Session,
@@ -49,10 +51,12 @@ from app.services.jdr.db.repositories import (
     ChunkRepository,
     DuplicateCampaignNameError,
     DuplicatePjNameError,
+    JobRepository,
     MappingRepository,
     PjRepository,
     SessionPlayerRepository,
     SessionRepository,
+    TranscriptionRepository,
 )
 
 logger = get_logger(__name__)
@@ -124,19 +128,17 @@ class InvalidPlayerListError(Exception):
 class AudioPurgeBlockedError(Exception):
     """The session is in a state where the audio cannot be safely purged.
 
-    Reasons (the route maps both to HTTP 409 with distinct detail
-    messages):
-
-    - ``state == transcribing``: a worker has the file open and is
-      writing to the DB; purging now would race the job.
-    - ``state == transcribed``: the audio was already auto-purged after a
-      successful transcription, the call is a no-op from the caller's
-      point of view.
+    ``state == transcribing`` is the only refused state: a worker may have
+    the file open and be writing derived rows.
     """
 
 
 class NoAudioToPurgeError(Exception):
     """The session has no audio source on record — nothing to delete."""
+
+
+class AudioReadNotFoundError(Exception):
+    """The session audio cannot be served."""
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +411,15 @@ class AudioUploadResult:
     job_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class AudioReadResult:
+    """Resolved audio file metadata for HTTP streaming."""
+
+    path: Path
+    size_bytes: int
+    media_type: str = "audio/mp4"
+
+
 async def store_audio_source_for_session(
     db: AsyncSession,
     *,
@@ -471,8 +482,41 @@ async def store_audio_source_for_session(
     job = enqueue_job(
         queue, transcribe_session_job, session.id, transient_errors=True
     )
+    await JobRepository(db).upsert_status(
+        job.id,
+        kind=JobKind.TRANSCRIPTION,
+        session_id=session.id,
+        status=JobStatus.QUEUED,
+    )
+    await repo.set_current_job_id(session.id, job.id)
 
     return AudioUploadResult(audio_source=audio, job_id=job.id)
+
+
+async def get_audio_for_session(
+    db: AsyncSession,
+    *,
+    session: Session,
+) -> AudioReadResult:
+    """Resolve a non-purged source audio file for playback/download."""
+    audio = await SessionRepository(db).get_audio_source(session.id)
+    if audio is None:
+        raise AudioReadNotFoundError(
+            f"Session {session.id} has no audio source on record."
+        )
+    if audio.purged_at is not None:
+        raise AudioReadNotFoundError(f"Session {session.id} audio is purged.")
+
+    full_path = Path(settings.KAEYRIS_DATA_DIR) / audio.path
+    if not full_path.is_file():
+        raise AudioReadNotFoundError(
+            f"Session {session.id} audio file is missing on disk."
+        )
+
+    return AudioReadResult(
+        path=full_path,
+        size_bytes=full_path.stat().st_size,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -772,48 +816,21 @@ async def purge_audio_for_session(
     *,
     session: Session,
 ) -> None:
-    """Drop the audio file and reset the session to ``created``.
+    """Drop source audio and every output derived from it.
 
-    Allowed states: ``audio_uploaded``, ``transcription_failed``. In both
-    cases the file is still on disk (the auto-purge only fires on
-    transcription success — FR-004) and the MJ wants either to cancel an
-    upload mistake or to re-upload after a failure.
-
-    Refused states:
-
-    - ``transcribing``: a worker has the file; tolerating purge here would
-      race the job. -> AudioPurgeBlockedError.
-    - ``transcribed``: the audio was already auto-purged. Calling DELETE
-      now is misleading — surface it explicitly. -> AudioPurgeBlockedError.
-    - ``created`` and any other state without an audio source row
-      -> NoAudioToPurgeError (404).
-
-    Side effects on the happy path:
-
-    - removes ``<KAEYRIS_DATA_DIR>/<audio.path>`` from disk if it exists
-      (best effort — a stale file on disk is logged as a warning).
-    - UPDATE ``jdr_audio_sources.purged_at`` so the row stays for audit.
-    - UPDATE ``jdr_sessions.state = 'created'`` so a fresh upload is allowed.
+    The operation is intentionally idempotent for existing sessions. It
+    refuses only ``transcribing`` because a worker may still be reading the
+    file and writing rows.
     """
     if session.state == SessionState.TRANSCRIBING:
         raise AudioPurgeBlockedError(
             f"Session {session.id} is currently transcribing; "
             "purging the audio now would race the worker."
         )
-    if session.state == SessionState.TRANSCRIBED:
-        raise AudioPurgeBlockedError(
-            f"Session {session.id} is already transcribed and its audio "
-            "was auto-purged at that time — nothing left to delete."
-        )
-
     repo = SessionRepository(db)
     audio = await repo.get_audio_source(session.id)
-    if audio is None:
-        raise NoAudioToPurgeError(
-            f"Session {session.id} has no audio source on record."
-        )
 
-    if audio.purged_at is None:
+    if audio is not None and audio.purged_at is None:
         full_path = Path(settings.KAEYRIS_DATA_DIR) / audio.path
         try:
             full_path.unlink(missing_ok=True)
@@ -824,8 +841,12 @@ async def purge_audio_for_session(
                 audio_path=str(full_path),
                 error=str(exc),
             )
+        await repo.mark_audio_purged(session.id)
 
-    await repo.mark_audio_purged(session.id)
+    await TranscriptionRepository(db).delete_for_session(session.id)
+    await ChunkRepository(db).delete_for_session(session.id)
+    await ArtifactRepository(db).delete_for_session(session.id)
+    await repo.clear_current_job_id(session.id)
     await repo.update_state(session.id, SessionState.CREATED)
     await db.commit()
 

@@ -1,7 +1,7 @@
 """US1 — Transcription job + GET /sessions/{id}/transcription route.
 
 The job consumes an uploaded audio, calls TranscriptionAdapter, persists
-the segments, purges the audio file from disk, and moves the session to
+the segments, keeps the source audio available, and moves the session to
 ``state=transcribed``. The GET route exposes the JSON transcription.
 
 These tests open their own short-lived sessions (rather than reusing
@@ -42,6 +42,9 @@ from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
     AudioSource,
+    Job,
+    JobKind,
+    JobStatus,
     Role,
     Session,
     SessionState,
@@ -62,6 +65,7 @@ class TranscriptionTestContext:
     plain_token: str
     gm_key_id: UUID
     session_id: UUID
+    current_job_id: str
     audio_file: Path
     sessionmaker: async_sessionmaker
 
@@ -112,15 +116,14 @@ async def ctx(
         await setup_session.flush()
         gm_id = gm.id
 
-        setup_session.add(
-            Session(
-                id=session_id,
-                title="Transcription test",
-                recorded_at=datetime.now(UTC),
-                gm_key_id=gm_id,
-                state=SessionState.AUDIO_UPLOADED,
-            )
+        session_row = Session(
+            id=session_id,
+            title="Transcription test",
+            recorded_at=datetime.now(UTC),
+            gm_key_id=gm_id,
+            state=SessionState.AUDIO_UPLOADED,
         )
+        setup_session.add(session_row)
         setup_session.add(
             AudioSource(
                 session_id=session_id,
@@ -130,6 +133,17 @@ async def ctx(
                 duration_seconds=10,
             )
         )
+        current_job_id = f"job-{session_id.hex[:24]}"
+        setup_session.add(
+            Job(
+                id=current_job_id,
+                kind=JobKind.TRANSCRIPTION,
+                session_id=session_id,
+                status=JobStatus.QUEUED,
+                queued_at=datetime.now(UTC),
+            )
+        )
+        session_row.current_job_id = current_job_id
         await setup_session.commit()
 
     audio_dir = tmp_path / "audios"
@@ -141,6 +155,7 @@ async def ctx(
         plain_token=plain,
         gm_key_id=gm_id,
         session_id=session_id,
+        current_job_id=current_job_id,
         audio_file=audio_file,
         sessionmaker=sm,
     )
@@ -209,15 +224,16 @@ async def test_transcribe_job_happy_path(ctx, monkeypatch):
             )
         )
         assert audio is not None
-        assert audio.purged_at is not None
+        assert audio.purged_at is None
 
         session_row = await db.scalar(
             select(Session).where(Session.id == ctx.session_id)
         )
         assert session_row is not None
         assert session_row.state == SessionState.TRANSCRIBED
+        assert session_row.current_job_id == ctx.current_job_id
 
-    assert not ctx.audio_file.exists()
+    assert ctx.audio_file.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +265,13 @@ async def test_transcribe_job_remaps_permanent_error(ctx, monkeypatch):
         )
         assert row is not None
         assert row.state == SessionState.TRANSCRIPTION_FAILED
+        assert row.current_job_id == ctx.current_job_id
+        audio = await db.scalar(
+            select(AudioSource).where(AudioSource.session_id == ctx.session_id)
+        )
+        assert audio is not None
+        assert audio.purged_at is None
+    assert ctx.audio_file.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -295,14 +318,17 @@ async def test_transcribe_job_skips_already_purged_audio(ctx, monkeypatch):
 
 
 async def test_transcribe_job_is_idempotent_on_rerun(ctx, monkeypatch):
-    """Second run after success bails on the purged-audio check."""
+    """Source audio stays available; a duplicate worker run remains harmless."""
     _patch_transcription_adapter(monkeypatch, _DeterministicAdapter())
 
     await _transcribe_session(ctx.session_id)
-    assert not ctx.audio_file.exists()
+    assert ctx.audio_file.exists()
 
-    with pytest.raises(PermanentJobError, match="already purged"):
-        await _transcribe_session(ctx.session_id)
+    await _transcribe_session(ctx.session_id)
+    async with ctx.sessionmaker() as db:
+        row = await db.scalar(select(Session).where(Session.id == ctx.session_id))
+        assert row is not None
+        assert row.state == SessionState.TRANSCRIBED
 
 
 # ---------------------------------------------------------------------------

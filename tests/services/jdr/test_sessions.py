@@ -137,6 +137,7 @@ async def test_create_session_returns_201_with_id(
     assert body["title"] == payload["title"]
     assert body["state"] == "created"
     assert body["mode"] == "batch"
+    assert body["current_job_id"] is None
     assert "id" in body and isinstance(body["id"], str)
     assert "created_at" in body
 
@@ -287,6 +288,8 @@ async def test_list_sessions_returns_only_current_gm_sessions(
     items_a = list_a.json()["items"]
     titles_a = sorted(s["title"] for s in items_a)
     assert titles_a == ["Session A1", "Session A2"]
+    assert all("current_job_id" in s for s in items_a)
+    assert all(s["current_job_id"] is None for s in items_a)
 
     assert list_b.status_code == 200
     items_b = list_b.json()["items"]
@@ -323,6 +326,7 @@ async def test_get_session_by_id(seeded_gm, make_db_session_dep):
     assert get_resp.status_code == 200
     assert get_resp.json()["id"] == session_id
     assert get_resp.json()["title"] == "Lookup test"
+    assert get_resp.json()["current_job_id"] is None
 
 
 async def test_get_session_belonging_to_another_gm_returns_404(

@@ -1,9 +1,8 @@
-"""Lot 4b — DELETE /sessions/{id}/audio.
+"""BD-8 — DELETE /sessions/{id}/audio.
 
 Purges an uploaded audio file and resets the session so a fresh upload can
-follow. Allowed states: ``audio_uploaded`` and ``transcription_failed``.
-Refused (409) for ``transcribing`` and ``transcribed`` — see
-``logic.purge_audio_for_session`` for the rationale.
+follow. It is idempotent for already-created sessions, clears data derived
+from the old audio, and refuses only active transcriptions.
 """
 
 from collections.abc import Callable
@@ -24,10 +23,16 @@ from app.core.redis_client import get_redis
 from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
+    Artifact,
     AudioSource,
+    Chunk,
+    Job,
+    JobKind,
+    JobStatus,
     Role,
     Session,
     SessionState,
+    Transcription,
 )
 from app.services.jdr.router import router as jdr_router
 
@@ -53,7 +58,7 @@ async def _seed_session_with_audio(
     state: SessionState,
     plain_token: str = "gm-purge-token",
     audio_already_purged: bool = False,
-) -> tuple[str, UUID, Path]:
+) -> tuple[str, UUID, Path, str]:
     """Insert GM + Session(state=state) + AudioSource + matching file on disk."""
     gm = ApiKey(
         name=f"gm-{uuid4().hex[:8]}",
@@ -65,15 +70,35 @@ async def _seed_session_with_audio(
     await db.flush()
 
     session_id = uuid4()
+    session_row = Session(
+        id=session_id,
+        title="Purge test",
+        recorded_at=datetime.now(UTC),
+        gm_key_id=gm.id,
+        state=state,
+    )
+    db.add(session_row)
+    await db.flush()
+
+    current_job_id = f"job-{session_id.hex[:24]}"
+    status_by_state = {
+        SessionState.AUDIO_UPLOADED: JobStatus.QUEUED,
+        SessionState.TRANSCRIBING: JobStatus.RUNNING,
+        SessionState.TRANSCRIPTION_FAILED: JobStatus.FAILED,
+        SessionState.TRANSCRIBED: JobStatus.SUCCEEDED,
+    }
     db.add(
-        Session(
-            id=session_id,
-            title="Purge test",
-            recorded_at=datetime.now(UTC),
-            gm_key_id=gm.id,
-            state=state,
+        Job(
+            id=current_job_id,
+            kind=JobKind.TRANSCRIPTION,
+            session_id=session_id,
+            status=status_by_state.get(state, JobStatus.QUEUED),
+            queued_at=datetime.now(UTC),
         )
     )
+    await db.flush()
+    session_row.current_job_id = current_job_id
+
     audio_path_rel = f"audios/{session_id}.m4a"
     db.add(
         AudioSource(
@@ -91,7 +116,7 @@ async def _seed_session_with_audio(
     audio_file = audio_dir / f"{session_id}.m4a"
     audio_file.write_bytes(b"fake-m4a-bytes")
 
-    return plain_token, session_id, audio_file
+    return plain_token, session_id, audio_file, current_job_id
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +130,7 @@ async def test_purge_after_audio_uploaded_deletes_file_and_resets_state(
     monkeypatch.setattr(
         "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
     )
-    plain, session_id, audio_file = await _seed_session_with_audio(
+    plain, session_id, audio_file, _current_job_id = await _seed_session_with_audio(
         db_session, tmp_path / "audios", state=SessionState.AUDIO_UPLOADED
     )
     app = _make_jdr_app(make_db_session_dep)
@@ -127,6 +152,7 @@ async def test_purge_after_audio_uploaded_deletes_file_and_resets_state(
     )
     assert session_row is not None
     assert session_row.state == SessionState.CREATED
+    assert session_row.current_job_id is None
     audio_row = await db_session.scalar(
         select(AudioSource).where(AudioSource.session_id == session_id)
     )
@@ -141,7 +167,7 @@ async def test_purge_after_transcription_failed_works(
     monkeypatch.setattr(
         "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
     )
-    plain, session_id, audio_file = await _seed_session_with_audio(
+    plain, session_id, audio_file, _current_job_id = await _seed_session_with_audio(
         db_session, tmp_path / "audios", state=SessionState.TRANSCRIPTION_FAILED
     )
     app = _make_jdr_app(make_db_session_dep)
@@ -161,6 +187,7 @@ async def test_purge_after_transcription_failed_works(
     )
     assert session_row is not None
     assert session_row.state == SessionState.CREATED
+    assert session_row.current_job_id is None
 
 
 async def test_purge_tolerates_missing_file_on_disk(
@@ -170,7 +197,7 @@ async def test_purge_tolerates_missing_file_on_disk(
     monkeypatch.setattr(
         "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
     )
-    plain, session_id, audio_file = await _seed_session_with_audio(
+    plain, session_id, audio_file, _current_job_id = await _seed_session_with_audio(
         db_session, tmp_path / "audios", state=SessionState.AUDIO_UPLOADED
     )
     # Delete the file before calling the endpoint — pretend the janitor
@@ -191,10 +218,11 @@ async def test_purge_tolerates_missing_file_on_disk(
     )
     assert session_row is not None
     assert session_row.state == SessionState.CREATED
+    assert session_row.current_job_id is None
 
 
 # ---------------------------------------------------------------------------
-# Refused states
+# Protected and terminal paths
 # ---------------------------------------------------------------------------
 
 
@@ -204,7 +232,7 @@ async def test_purge_returns_409_while_transcribing(
     monkeypatch.setattr(
         "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
     )
-    plain, session_id, audio_file = await _seed_session_with_audio(
+    plain, session_id, audio_file, current_job_id = await _seed_session_with_audio(
         db_session, tmp_path / "audios", state=SessionState.TRANSCRIBING
     )
     app = _make_jdr_app(make_db_session_dep)
@@ -226,20 +254,20 @@ async def test_purge_returns_409_while_transcribing(
     )
     assert session_row is not None
     assert session_row.state == SessionState.TRANSCRIBING
+    assert session_row.current_job_id == current_job_id
 
 
-async def test_purge_returns_409_when_already_transcribed(
+async def test_purge_after_transcribed_deletes_file_and_resets_state(
     tmp_path: Path, db_session: AsyncSession, make_db_session_dep, monkeypatch
 ):
-    """Transcribed sessions had their audio auto-purged — the call is a lie."""
+    """Transcribed sessions are replaceable once transcription is idle."""
     monkeypatch.setattr(
         "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
     )
-    plain, session_id, _ = await _seed_session_with_audio(
+    plain, session_id, audio_file, _current_job_id = await _seed_session_with_audio(
         db_session,
         tmp_path / "audios",
         state=SessionState.TRANSCRIBED,
-        audio_already_purged=True,
     )
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
@@ -250,8 +278,103 @@ async def test_purge_returns_409_when_already_transcribed(
             headers={"Authorization": f"Bearer {plain}"},
         )
 
-    assert response.status_code == 409
-    assert response.json()["type"].endswith("/audio-purge-conflict")
+    assert response.status_code == 204
+    assert not audio_file.exists()
+    session_row = await db_session.scalar(
+        select(Session).where(Session.id == session_id)
+    )
+    assert session_row is not None
+    assert session_row.state == SessionState.CREATED
+    assert session_row.current_job_id is None
+
+
+async def test_purge_clears_transcription_chunks_artifacts_and_current_job(
+    tmp_path: Path, db_session: AsyncSession, make_db_session_dep, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
+    )
+    plain, session_id, audio_file, current_job_id = await _seed_session_with_audio(
+        db_session,
+        tmp_path / "audios",
+        state=SessionState.TRANSCRIBED,
+    )
+    db_session.add(
+        Transcription(
+            session_id=session_id,
+            segments_json=[{"speaker_label": "speaker_1", "text": "hello"}],
+            language="fr",
+            model_used="test:whisper",
+            provider="test",
+        )
+    )
+    db_session.add(
+        Chunk(
+            session_id=session_id,
+            ordre=0,
+            text="chunk text",
+            summary_text="chunk summary",
+        )
+    )
+    db_session.add(
+        Artifact(
+            session_id=session_id,
+            kind="narrative",
+            content_json={"text": "old narrative"},
+            model_used="test:llm",
+        )
+    )
+    db_session.add(
+        Artifact(
+            session_id=session_id,
+            kind=f"pov:{uuid4()}",
+            content_json={"text": "old pov"},
+            model_used="test:llm",
+        )
+    )
+    await db_session.commit()
+
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.delete(
+            f"/services/jdr/sessions/{session_id}/audio",
+            headers={"Authorization": f"Bearer {plain}"},
+        )
+
+    assert response.status_code == 204
+    assert not audio_file.exists()
+
+    session_row = await db_session.scalar(
+        select(Session).where(Session.id == session_id)
+    )
+    assert session_row is not None
+    assert session_row.state == SessionState.CREATED
+    assert session_row.current_job_id is None
+
+    audio_row = await db_session.scalar(
+        select(AudioSource).where(AudioSource.session_id == session_id)
+    )
+    assert audio_row is not None
+    assert audio_row.purged_at is not None
+
+    assert (
+        await db_session.scalar(
+            select(Transcription).where(Transcription.session_id == session_id)
+        )
+    ) is None
+    chunks = (
+        await db_session.scalars(select(Chunk).where(Chunk.session_id == session_id))
+    ).all()
+    artifacts = (
+        await db_session.scalars(
+            select(Artifact).where(Artifact.session_id == session_id)
+        )
+    ).all()
+    job_row = await db_session.scalar(select(Job).where(Job.id == current_job_id))
+    assert chunks == []
+    assert artifacts == []
+    assert job_row is not None
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +382,7 @@ async def test_purge_returns_409_when_already_transcribed(
 # ---------------------------------------------------------------------------
 
 
-async def test_purge_returns_404_when_no_audio_attached(
+async def test_purge_created_without_audio_is_idempotent_204(
     tmp_path: Path, db_session: AsyncSession, make_db_session_dep, monkeypatch
 ):
     """Session exists but has never had an audio upload."""
@@ -295,8 +418,13 @@ async def test_purge_returns_404_when_no_audio_attached(
             headers={"Authorization": f"Bearer {plain}"},
         )
 
-    assert response.status_code == 404
-    assert response.json()["type"].endswith("/audio-not-found")
+    assert response.status_code == 204
+    session_row = await db_session.scalar(
+        select(Session).where(Session.id == session_id)
+    )
+    assert session_row is not None
+    assert session_row.state == SessionState.CREATED
+    assert session_row.current_job_id is None
 
 
 async def test_purge_returns_404_for_unknown_session(
@@ -333,7 +461,7 @@ async def test_purge_cross_tenant_returns_404(
     monkeypatch.setattr(
         "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
     )
-    plain_a, session_id, audio_file = await _seed_session_with_audio(
+    plain_a, session_id, audio_file, _current_job_id = await _seed_session_with_audio(
         db_session,
         tmp_path / "audios",
         state=SessionState.AUDIO_UPLOADED,

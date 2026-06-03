@@ -246,6 +246,8 @@ La création de session exige maintenant un `campaign_id` explicite. La liste de
 
 Depuis BD-7, les PJ sont scoppés par campagne : `POST /services/jdr/pjs` accepte `campaign_id` et `user_id` optionnels, retombe sur la campagne par défaut du GM web si `campaign_id` est omis, et répond toujours avec `campaign_id` plus `user_id`. `GET /services/jdr/pjs?campaign_id=<uuid>` filtre une campagne après contrôle de membership ; sans filtre, la route retourne les PJ des campagnes où l'utilisateur web est membre.
 
+Depuis BD-8, les réponses session exposent `current_job_id` pour reprendre le polling après refresh. L'audio source reste disponible après succès ou échec de transcription : `GET /services/jdr/sessions/{session_id}/audio` sert le fichier aux membres autorisés de la campagne avec support `Range: bytes=...`, et `DELETE /services/jdr/sessions/{session_id}/audio` remet la session en `created`, vide `current_job_id`, marque l'audio purgé et supprime transcription/chunks/artifacts dérivés. Seul l'état `transcribing` bloque la suppression avec `409`.
+
 ```json
 {
   "title": "Session 13 - La crypte oubliee",
