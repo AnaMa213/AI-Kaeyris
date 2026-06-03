@@ -26,6 +26,7 @@ from app.services.jdr.logic import (
     AudioAlreadyUploadedError,
     AudioPurgeBlockedError,
     AudioReadNotFoundError,
+    AudioUploadTooLargeError,
     NoAudioToPurgeError,
     UnsupportedAudioMimeError,
 )
@@ -57,6 +58,14 @@ class AudioAlreadyUploaded(AppError):
     status_code = status.HTTP_409_CONFLICT
     error_type = "audio-already-uploaded"
     title = "Audio already uploaded"
+
+
+class AudioUploadTooLarge(AppError):
+    """The uploaded raw audio exceeds the configured backend limit."""
+
+    status_code = status.HTTP_413_CONTENT_TOO_LARGE
+    error_type = "audio-upload-too-large"
+    title = "Audio upload too large"
 
 
 class AudioPurgeConflict(AppError):
@@ -226,6 +235,14 @@ async def post_audio(
         raise UnsupportedAudioMime(detail=str(exc)) from exc
     except AudioAlreadyUploadedError as exc:
         raise AudioAlreadyUploaded(detail=str(exc)) from exc
+    except AudioUploadTooLargeError as exc:
+        raise AudioUploadTooLarge(
+            detail=(
+                "Audio upload exceeds the configured limit of "
+                f"{exc.limit_bytes} bytes."
+            ),
+            limit_bytes=exc.limit_bytes,
+        ) from exc
 
     return AudioUploadOut(
         session_id=result.audio_source.session_id,

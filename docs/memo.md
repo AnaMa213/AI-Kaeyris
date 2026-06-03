@@ -128,8 +128,15 @@ alembic history                     # historique des migrations
 | `SessionOut.current_job_id` | Job de transcription courant/récent ; reste renseigné jusqu'au DELETE audio |
 | `GET /services/jdr/sessions/{id}/audio` | Sert l'audio source non purgé ; supporte `Range: bytes=...` pour le player |
 | `DELETE /services/jdr/sessions/{id}/audio` | Reset idempotent vers `created`, purge audio, dérivés et `current_job_id`; `409` si `transcribing` |
+| `KAEYRIS_AUDIO_MAX_UPLOAD_BYTES` | Limite raw upload BD-9 avant reduce serveur ; défaut 500 MiB |
 | `POST /services/jdr/pjs` | Crée un PJ scoppé campagne ; `campaign_id` et `user_id` sont optionnels |
 | `GET /services/jdr/pjs?campaign_id=<uuid>` | Liste les PJ d'une campagne ou, sans filtre, ceux des campagnes visibles |
+
+| BD-9 | Action |
+|---|---|
+| `KAEYRIS_AUDIO_MAX_UPLOAD_BYTES` | Limite raw upload ; defaut `524288000` bytes (500 MiB) |
+| `POST /services/jdr/sessions/{id}/audio` | Stocke `.tmp/audio-reduce/<session_id>/raw.m4a`, renvoie `AudioUploadOut` + job `transcription` |
+| Worker transcription | Prepare `audios/<session_id>.m4a` via `ffmpeg`, supprime le raw, puis appelle l'adapter |
 
 ```powershell
 curl -X POST http://localhost:8000/services/jdr/campaigns `

@@ -123,6 +123,34 @@ async def test_get_audio_returns_full_file_with_player_headers(
     assert "private" in response.headers["cache-control"]
 
 
+async def test_get_audio_serves_prepared_retained_audio(
+    tmp_path: Path, db_session: AsyncSession, make_db_session_dep, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
+    )
+    prepared_bytes = b"prepared-retained-audio"
+    plain, session_id, audio_file, _audio_bytes = await _seed_session_with_audio(
+        db_session,
+        tmp_path,
+        audio_bytes=prepared_bytes,
+    )
+    raw_leftover = tmp_path / ".tmp" / "audio-reduce" / str(session_id) / "raw.m4a"
+    assert audio_file == tmp_path / "audios" / f"{session_id}.m4a"
+    assert not raw_leftover.exists()
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/services/jdr/sessions/{session_id}/audio",
+            headers={"Authorization": f"Bearer {plain}"},
+        )
+
+    assert response.status_code == 200
+    assert response.content == prepared_bytes
+
+
 async def test_get_audio_allows_web_campaign_member(
     tmp_path: Path, db_session: AsyncSession, make_db_session_dep, monkeypatch
 ):

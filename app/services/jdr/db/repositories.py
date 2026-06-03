@@ -459,6 +459,26 @@ class SessionRepository(_BaseRepository):
             .values(purged_at=datetime.now(UTC))
         )
 
+    async def update_audio_source_file(
+        self,
+        session_id: UUID,
+        *,
+        path: str,
+        sha256: str,
+        size_bytes: int,
+        duration_seconds: int | None,
+    ) -> AudioSource | None:
+        audio = await self.get_audio_source(session_id)
+        if audio is None:
+            return None
+        audio.path = path
+        audio.sha256 = sha256
+        audio.size_bytes = size_bytes
+        audio.duration_seconds = duration_seconds
+        await self._session.flush()
+        await self._session.refresh(audio)
+        return audio
+
     async def update_state(self, session_id: UUID, state: SessionState) -> None:
         await self._session.execute(
             update(Session)

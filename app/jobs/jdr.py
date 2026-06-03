@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -40,9 +41,16 @@ from app.core.db import get_sessionmaker
 from app.core.logging import get_logger
 from app.core.metrics import JOB_DURATION_SECONDS, JOBS_TOTAL
 from app.jobs import PermanentJobError, TransientJobError
-from app.services.jdr.audio import AudioChunkingError, chunked_audio
+from app.services.jdr.audio import (
+    AudioChunkingError,
+    AudioReduceError,
+    chunked_audio,
+    prepare_audio_for_transcription,
+)
 from app.services.jdr.db.models import (
     AudioSource,
+    Job,
+    JobStatus,
     Pj,
     Session,
     SessionState,
@@ -54,6 +62,7 @@ from app.services.jdr.db.repositories import (
     ChunkRepository,
     MappingRepository,
     SessionPlayerRepository,
+    SessionRepository,
     TranscriptionRepository,
 )
 from app.services.jdr.text_chunker import chunk_text
@@ -182,6 +191,7 @@ async def _transcribe_session(session_id: UUID) -> None:
             )
 
         audio_path_relative = audio.path
+        duration_seconds = audio.duration_seconds
         transcription_mode = session_row.transcription_mode
         session_row.state = SessionState.TRANSCRIBING
         await db.commit()
@@ -192,6 +202,42 @@ async def _transcribe_session(session_id: UUID) -> None:
         raise PermanentJobError(
             f"Audio file missing on disk: {full_path}"
         )
+
+    if _is_transient_raw_audio_path(audio_path_relative):
+        prepared_path = _prepared_audio_path_for_session(session_id)
+        try:
+            prepared = prepare_audio_for_transcription(full_path, prepared_path)
+        except AudioReduceError as exc:
+            _cleanup_transient_audio_dir(session_id)
+            await _mark_session_failed(
+                sessionmaker,
+                session_id,
+                failure_reason=f"Audio reduce failed: {exc}",
+            )
+            raise PermanentJobError(f"Audio reduce failed: {exc}") from exc
+
+        async with sessionmaker() as db:
+            updated_audio = await SessionRepository(db).update_audio_source_file(
+                session_id,
+                path=_relative_data_path(prepared.path),
+                sha256=prepared.sha256,
+                size_bytes=prepared.size_bytes,
+                duration_seconds=duration_seconds,
+            )
+            if updated_audio is None:
+                await db.rollback()
+                await _mark_session_failed(
+                    sessionmaker,
+                    session_id,
+                    failure_reason="Audio source row missing after preparation.",
+                )
+                raise PermanentJobError(
+                    f"Session {session_id} has no audio source row after preparation."
+                )
+            await db.commit()
+
+        _cleanup_transient_audio_dir(session_id)
+        full_path = prepared.path
 
     # --- Step 2: call the adapter (long, no DB) -----------------------------
 
@@ -853,13 +899,65 @@ def _format_segments_for_narrative(segments: list[dict]) -> str:
     return "\n".join(lines) if lines else "(transcription vide)"
 
 
-async def _mark_session_failed(sessionmaker, session_id: UUID) -> None:
+def _data_dir() -> Path:
+    return Path(settings.KAEYRIS_DATA_DIR)
+
+
+def _relative_data_path(path: Path) -> str:
+    return path.relative_to(_data_dir()).as_posix()
+
+
+def _prepared_audio_path_for_session(session_id: UUID) -> Path:
+    return _data_dir() / "audios" / f"{session_id}.m4a"
+
+
+def _transient_audio_dir(session_id: UUID) -> Path:
+    return _data_dir() / ".tmp" / "audio-reduce" / str(session_id)
+
+
+def _cleanup_transient_audio_dir(session_id: UUID) -> None:
+    path = _transient_audio_dir(session_id)
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except OSError as exc:
+        logger.warning(
+            "audio.reduce_cleanup_failed",
+            session_id=str(session_id),
+            path=str(path),
+            error=str(exc),
+        )
+
+
+def _is_transient_raw_audio_path(audio_path_relative: str) -> bool:
+    normalized = audio_path_relative.replace("\\", "/")
+    return normalized.startswith(".tmp/audio-reduce/") and normalized.endswith(
+        "/raw.m4a"
+    )
+
+
+async def _mark_session_failed(
+    sessionmaker,
+    session_id: UUID,
+    *,
+    failure_reason: str | None = None,
+) -> None:
     async with sessionmaker() as db:
+        session_row = await db.get(Session, session_id)
+        current_job_id = session_row.current_job_id if session_row is not None else None
         await db.execute(
             update(Session)
             .where(Session.id == session_id)
             .values(state=SessionState.TRANSCRIPTION_FAILED)
         )
+        if current_job_id is not None:
+            await db.execute(
+                update(Job)
+                .where(Job.id == current_job_id)
+                .values(
+                    status=JobStatus.FAILED,
+                    failure_reason=failure_reason,
+                )
+            )
         await db.commit()
 
 

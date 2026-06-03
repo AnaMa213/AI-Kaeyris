@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -139,6 +140,16 @@ class NoAudioToPurgeError(Exception):
 
 class AudioReadNotFoundError(Exception):
     """The session audio cannot be served."""
+
+
+class AudioUploadTooLargeError(Exception):
+    """The uploaded audio exceeded the configured raw upload limit."""
+
+    def __init__(self, *, limit_bytes: int) -> None:
+        super().__init__(
+            f"Audio upload exceeds the configured limit of {limit_bytes} bytes."
+        )
+        self.limit_bytes = limit_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +445,8 @@ async def store_audio_source_for_session(
     - the session must not already have an audio source (AudioAlreadyUploadedError)
 
     Side effects:
-    - writes the file to ``KAEYRIS_DATA_DIR/audios/<session_id>.m4a``
+    - writes the raw file to
+      ``KAEYRIS_DATA_DIR/.tmp/audio-reduce/<session_id>/raw.m4a``
     - INSERT into ``jdr_audio_sources``
     - UPDATE ``jdr_sessions.state`` to ``audio_uploaded``
     - enqueues ``transcribe_session_job`` (retryable)
@@ -451,27 +463,40 @@ async def store_audio_source_for_session(
             f"Session {session.id} already has an audio source."
         )
 
-    target_path = (
-        Path(settings.KAEYRIS_DATA_DIR) / "audios" / f"{session.id}.m4a"
-    )
+    target_path = raw_audio_path_for_session(session.id)
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
     sha256 = hashlib.sha256()
     size_bytes = 0
-    with target_path.open("wb") as dest:
-        while True:
-            chunk = await upload_file.read(_CHUNK_SIZE)
-            if not chunk:
-                break
-            sha256.update(chunk)
-            size_bytes += len(chunk)
-            dest.write(chunk)
+    try:
+        with target_path.open("wb") as dest:
+            while True:
+                chunk = await upload_file.read(_CHUNK_SIZE)
+                if not chunk:
+                    break
+                size_bytes += len(chunk)
+                if size_bytes > settings.KAEYRIS_AUDIO_MAX_UPLOAD_BYTES:
+                    raise AudioUploadTooLargeError(
+                        limit_bytes=settings.KAEYRIS_AUDIO_MAX_UPLOAD_BYTES
+                    )
+                sha256.update(chunk)
+                dest.write(chunk)
+    except AudioUploadTooLargeError:
+        best_effort_unlink(
+            target_path,
+            event="audio.upload_too_large_unlink_failed",
+        )
+        best_effort_remove_tree(
+            target_path.parent,
+            event="audio.upload_too_large_rmtree_failed",
+        )
+        raise
 
     duration_seconds = _probe_duration_seconds(target_path)
 
     audio = await repo.store_audio_source(
         session.id,
-        path=str(target_path.relative_to(settings.KAEYRIS_DATA_DIR).as_posix()),
+        path=_relative_data_path(target_path),
         sha256=sha256.hexdigest(),
         size_bytes=size_bytes,
         duration_seconds=duration_seconds,
@@ -843,6 +868,10 @@ async def purge_audio_for_session(
             )
         await repo.mark_audio_purged(session.id)
 
+    best_effort_remove_tree(
+        _raw_audio_reduce_dir(session.id),
+        event="audio.purge_raw_rmtree_failed",
+    )
     await TranscriptionRepository(db).delete_for_session(session.id)
     await ChunkRepository(db).delete_for_session(session.id)
     await ArtifactRepository(db).delete_for_session(session.id)
@@ -893,3 +922,37 @@ def _probe_duration_seconds(audio_path: Path) -> int | None:
     except (json.JSONDecodeError, KeyError, ValueError) as exc:
         logger.info("ffprobe.unparseable", error=str(exc))
         return None
+
+
+def _data_dir() -> Path:
+    return Path(settings.KAEYRIS_DATA_DIR)
+
+
+def _relative_data_path(path: Path) -> str:
+    return path.relative_to(_data_dir()).as_posix()
+
+
+def _raw_audio_reduce_dir(session_id: UUID) -> Path:
+    return _data_dir() / ".tmp" / "audio-reduce" / str(session_id)
+
+
+def raw_audio_path_for_session(session_id: UUID) -> Path:
+    return _raw_audio_reduce_dir(session_id) / "raw.m4a"
+
+
+def prepared_audio_path_for_session(session_id: UUID) -> Path:
+    return _data_dir() / "audios" / f"{session_id}.m4a"
+
+
+def best_effort_unlink(path: Path, *, event: str) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(event, path=str(path), error=str(exc))
+
+
+def best_effort_remove_tree(path: Path, *, event: str) -> None:
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except OSError as exc:
+        logger.warning(event, path=str(path), error=str(exc))

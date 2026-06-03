@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     # Local data directory: audios while being transcribed, then purged
     # (FR-004), and the SQLite file when DATABASE_URL points there.
     KAEYRIS_DATA_DIR: str = "./data"
+    # BD-9: accepted raw audio upload ceiling before server-side reduce.
+    # Default target: 500 MiB.
+    KAEYRIS_AUDIO_MAX_UPLOAD_BYTES: int = 500 * 1024 * 1024
 
     # Transcription adapter — see ADR 0006 §2 and the spec contract
     # `specs/001-kaeyris-jdr/contracts/transcription-adapter.md`.
@@ -85,6 +88,11 @@ if settings.KAEYRIS_CHUNK_MAX_CHARS <= 0:
     raise RuntimeError(
         "KAEYRIS_CHUNK_MAX_CHARS must be strictly positive "
         f"(got {settings.KAEYRIS_CHUNK_MAX_CHARS!r})."
+    )
+if settings.KAEYRIS_AUDIO_MAX_UPLOAD_BYTES <= 0:
+    raise RuntimeError(
+        "KAEYRIS_AUDIO_MAX_UPLOAD_BYTES must be strictly positive "
+        f"(got {settings.KAEYRIS_AUDIO_MAX_UPLOAD_BYTES!r})."
     )
 if settings.WEB_SESSION_TTL_SECONDS <= 0:
     raise RuntimeError(
