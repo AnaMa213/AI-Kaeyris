@@ -1,5 +1,28 @@
 # Journal d'apprentissage
 
+## 2026-06-03 - BD-9 : preparation audio serveur
+
+### Ce qui a ete fait
+
+- Ajout de `KAEYRIS_AUDIO_MAX_UPLOAD_BYTES` pour plafonner les uploads bruts cote API avant ecriture definitive.
+- L'upload JDR stocke maintenant le M4A brut sous `.tmp/audio-reduce/<session_id>/raw.m4a`, garde la reponse `AudioUploadOut`, et conserve un seul job visible de type `transcription`.
+- Le worker prepare un artefact durable `audios/<session_id>.m4a` via `ffmpeg`, met a jour `AudioSource`, supprime le brut, puis appelle l'adapter de transcription.
+- Les erreurs de preparation marquent la session et le job en echec de transcription; les erreurs de transcription apres preparation conservent le fichier prepare pour retry ou suppression explicite.
+- `DELETE /audio` supprime maintenant le fichier prepare, les restes de brut, les transcriptions, chunks, artifacts et `current_job_id`.
+
+### Ce que j'ai appris
+
+- **Garder le contrat public stable reduit le cout frontend** : la preparation serveur reste une etape interne du job `transcription`, sans nouvel etat `reducing` ni job `audio_reduce`.
+- **Le fichier temporaire n'est pas le fichier metier** : stocker le brut sous `.tmp/` puis promouvoir seulement l'artefact prepare clarifie le cycle de vie et simplifie `GET /audio`.
+- **Les limites applicatives doivent etre testables** : meme si un proxy peut imposer une limite HTTP, `KAEYRIS_AUDIO_MAX_UPLOAD_BYTES` donne un comportement metier deterministe et un `413` documente.
+
+### Limitations acceptees
+
+- Pas de job separe de preparation audio : YAGNI tant que le front n'a pas besoin d'observer cette etape.
+- Pas de strategie de retention du brut original : il est supprime apres preparation pour limiter l'usage disque.
+
+---
+
 ## 2026-05-01 — Jalon 0 : Foundations
 
 ### Ce qui a été fait

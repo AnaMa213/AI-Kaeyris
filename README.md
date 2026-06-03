@@ -248,6 +248,8 @@ Depuis BD-7, les PJ sont scoppés par campagne : `POST /services/jdr/pjs` accept
 
 Depuis BD-8, les réponses session exposent `current_job_id` pour reprendre le polling après refresh. L'audio source reste disponible après succès ou échec de transcription : `GET /services/jdr/sessions/{session_id}/audio` sert le fichier aux membres autorisés de la campagne avec support `Range: bytes=...`, et `DELETE /services/jdr/sessions/{session_id}/audio` remet la session en `created`, vide `current_job_id`, marque l'audio purgé et supprime transcription/chunks/artifacts dérivés. Seul l'état `transcribing` bloque la suppression avec `409`.
 
+Depuis BD-9, le client n'a plus besoin de reduire l'audio avant upload. Le backend accepte un M4A brut jusqu'a `KAEYRIS_AUDIO_MAX_UPLOAD_BYTES` (500 MiB par defaut), le stocke temporairement sous `.tmp/audio-reduce/<session_id>/raw.m4a`, puis le worker prepare un artefact durable `audios/<session_id>.m4a` via `ffmpeg` avant la transcription. Le contrat visible reste inchange : `POST /audio` renvoie `202` avec `job_id`, le job reste de type `transcription`, et une erreur de limite renvoie un Problem Details `413` avec `limit_bytes`. Le brut temporaire est supprime apres preparation, apres rejet 413, ou lors du `DELETE /audio`.
+
 ```json
 {
   "title": "Session 13 - La crypte oubliee",
@@ -260,6 +262,8 @@ Depuis BD-8, les réponses session exposent `current_job_id` pour reprendre le p
 Variables d'environnement spécifiques (voir [`.env.example`](./.env.example) pour le détail) : `DATABASE_URL`, `KAEYRIS_DATA_DIR`, `TRANSCRIPTION_PROVIDER` (`cloud` par défaut, `local` pour l'hôte GPU LAN), `TRANSCRIPTION_BASE_URL`, `TRANSCRIPTION_API_KEY`, `TRANSCRIPTION_MODEL`, `TRANSCRIPTION_LANGUAGE_HINT`, `TRANSCRIPTION_CHUNK_DURATION_SECONDS`.
 
 > **Mode live** : `POST /services/jdr/live/sessions` et `WS /services/jdr/live/stream` sont publiés dans l'OpenAPI mais retournent respectivement `501` et ferment immédiatement le WebSocket avec le code `1011` — l'implémentation arrive au Jalon 6+ (FR-015/016).
+
+BD-9 ajoute aussi `KAEYRIS_AUDIO_MAX_UPLOAD_BYTES` pour plafonner l'upload brut cote API avant preparation serveur.
 
 ### Mode `non_diarised` (sub-jalon 5.5)
 

@@ -288,6 +288,35 @@ async def test_purge_after_transcribed_deletes_file_and_resets_state(
     assert session_row.current_job_id is None
 
 
+async def test_purge_deletes_prepared_audio_and_raw_leftover(
+    tmp_path: Path, db_session: AsyncSession, make_db_session_dep, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
+    )
+    plain, session_id, audio_file, _current_job_id = await _seed_session_with_audio(
+        db_session,
+        tmp_path / "audios",
+        state=SessionState.TRANSCRIBED,
+    )
+    raw_leftover = tmp_path / ".tmp" / "audio-reduce" / str(session_id) / "raw.m4a"
+    raw_leftover.parent.mkdir(parents=True, exist_ok=True)
+    raw_leftover.write_bytes(b"raw-leftover")
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.delete(
+            f"/services/jdr/sessions/{session_id}/audio",
+            headers={"Authorization": f"Bearer {plain}"},
+        )
+
+    assert response.status_code == 204
+    assert not audio_file.exists()
+    assert not raw_leftover.exists()
+    assert not raw_leftover.parent.exists()
+
+
 async def test_purge_clears_transcription_chunks_artifacts_and_current_job(
     tmp_path: Path, db_session: AsyncSession, make_db_session_dep, monkeypatch
 ):
@@ -299,6 +328,9 @@ async def test_purge_clears_transcription_chunks_artifacts_and_current_job(
         tmp_path / "audios",
         state=SessionState.TRANSCRIBED,
     )
+    raw_leftover = tmp_path / ".tmp" / "audio-reduce" / str(session_id) / "raw.m4a"
+    raw_leftover.parent.mkdir(parents=True, exist_ok=True)
+    raw_leftover.write_bytes(b"raw-leftover")
     db_session.add(
         Transcription(
             session_id=session_id,
@@ -344,6 +376,7 @@ async def test_purge_clears_transcription_chunks_artifacts_and_current_job(
 
     assert response.status_code == 204
     assert not audio_file.exists()
+    assert not raw_leftover.exists()
 
     session_row = await db_session.scalar(
         select(Session).where(Session.id == session_id)

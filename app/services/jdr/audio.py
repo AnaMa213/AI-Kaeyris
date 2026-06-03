@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import hashlib
+from dataclasses import dataclass
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,6 +29,70 @@ logger = get_logger(__name__)
 
 class AudioChunkingError(RuntimeError):
     """Raised when ffmpeg fails or produces no output."""
+
+
+class AudioReduceError(RuntimeError):
+    """Raised when server-side audio preparation fails."""
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedAudioResult:
+    """Metadata for a prepared transcription-ready audio file."""
+
+    path: Path
+    sha256: str
+    size_bytes: int
+
+
+def prepare_audio_for_transcription(
+    source: Path,
+    target: Path,
+) -> PreparedAudioResult:
+    """Reduce a raw upload into a small mono AAC/M4A file for transcription."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-nostdin",
+        "-loglevel", "error",
+        "-y",
+        "-i", str(source),
+        "-vn",
+        "-map", "0:a:0",
+        "-c:a", "aac",
+        "-b:a", "24k",
+        "-ac", "1",
+        str(target),
+    ]
+    try:
+        result = subprocess.run(
+            cmd, check=False, capture_output=True, text=True, timeout=1800
+        )
+    except FileNotFoundError as exc:
+        target.unlink(missing_ok=True)
+        raise AudioReduceError(
+            "ffmpeg binary not found on PATH. Install ffmpeg in the worker "
+            "image (apt-get install ffmpeg)."
+        ) from exc
+    except subprocess.SubprocessError as exc:
+        target.unlink(missing_ok=True)
+        raise AudioReduceError(f"ffmpeg invocation failed: {exc}") from exc
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        target.unlink(missing_ok=True)
+        raise AudioReduceError(
+            f"ffmpeg exited with code {result.returncode}: {stderr}"
+        )
+
+    if not target.is_file() or target.stat().st_size <= 0:
+        target.unlink(missing_ok=True)
+        raise AudioReduceError(f"ffmpeg produced empty output for {source}.")
+
+    return PreparedAudioResult(
+        path=target,
+        sha256=_sha256_file(target),
+        size_bytes=target.stat().st_size,
+    )
 
 
 @contextmanager
@@ -100,3 +166,11 @@ def chunked_audio(
         yield indexed
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _sha256_file(path: Path) -> str:
+    sha256 = hashlib.sha256()
+    with path.open("rb") as file:
+        while chunk := file.read(1024 * 1024):
+            sha256.update(chunk)
+    return sha256.hexdigest()

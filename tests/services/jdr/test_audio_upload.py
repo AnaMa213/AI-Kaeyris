@@ -141,6 +141,40 @@ async def test_upload_m4a_returns_202_with_job_id(
     assert "duration_seconds" in body
 
 
+async def test_upload_response_preserves_audio_upload_out_contract(
+    tmp_path: Path, seeded_gm, make_db_session_dep, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
+    )
+    plain, api_key = seeded_gm
+    app = _make_jdr_app(make_db_session_dep, fakeredis.FakeStrictRedis())
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        session_id = await _create_session(client, plain, api_key.test_campaign_id)
+        response = await client.post(
+            f"/services/jdr/sessions/{session_id}/audio",
+            files={"audio": ("contract.m4a", b"contract-audio", "audio/mp4")},
+            headers={"Authorization": f"Bearer {plain}"},
+        )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert set(body) == {
+        "session_id",
+        "path",
+        "sha256",
+        "size_bytes",
+        "duration_seconds",
+        "uploaded_at",
+        "job_id",
+    }
+    assert body["session_id"] == session_id
+    assert body["path"] == f".tmp/audio-reduce/{session_id}/raw.m4a"
+    assert isinstance(body["job_id"], str)
+
+
 async def test_upload_writes_file_to_data_dir(
     tmp_path: Path, seeded_gm, make_db_session_dep, monkeypatch
 ):
@@ -160,9 +194,10 @@ async def test_upload_writes_file_to_data_dir(
             headers={"Authorization": f"Bearer {plain}"},
         )
 
-    expected = tmp_path / "audios" / f"{session_id}.m4a"
+    expected = tmp_path / ".tmp" / "audio-reduce" / session_id / "raw.m4a"
     assert expected.is_file()
     assert expected.read_bytes() == fake_audio
+    assert not (tmp_path / "audios" / f"{session_id}.m4a").exists()
 
 
 async def test_upload_transitions_session_state(
@@ -224,7 +259,7 @@ async def test_upload_creates_audio_source_row(
     assert audio.size_bytes == len(fake_audio)
     assert len(audio.sha256) == 64
     assert audio.purged_at is None
-    assert audio.path.endswith(f"{session_id}.m4a")
+    assert audio.path == f".tmp/audio-reduce/{session_id}/raw.m4a"
 
 
 async def test_upload_enqueues_transcription_job(
@@ -250,6 +285,103 @@ async def test_upload_enqueues_transcription_job(
 
     # Exactly one new RQ job key landed in Redis.
     assert len(after_keys - before_keys) == 1
+
+
+async def test_upload_accepts_raw_audio_under_configured_limit(
+    tmp_path: Path, seeded_gm, make_db_session_dep, db_session, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
+    )
+    monkeypatch.setattr(
+        "app.services.jdr.logic.settings.KAEYRIS_AUDIO_MAX_UPLOAD_BYTES", 16
+    )
+    plain, api_key = seeded_gm
+    app = _make_jdr_app(make_db_session_dep, fakeredis.FakeStrictRedis())
+    transport = ASGITransport(app=app)
+    fake_audio = b"0123456789abcdef"
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        session_id = await _create_session(client, plain, api_key.test_campaign_id)
+        response = await client.post(
+            f"/services/jdr/sessions/{session_id}/audio",
+            files={"audio": ("raw.m4a", fake_audio, "audio/mp4")},
+            headers={"Authorization": f"Bearer {plain}"},
+        )
+
+    assert response.status_code == 202
+    raw_path = tmp_path / ".tmp" / "audio-reduce" / session_id / "raw.m4a"
+    assert raw_path.read_bytes() == fake_audio
+    audio = await db_session.scalar(
+        select(AudioSource).where(AudioSource.session_id == UUID(session_id))
+    )
+    assert audio is not None
+    assert audio.path == f".tmp/audio-reduce/{session_id}/raw.m4a"
+    assert audio.size_bytes == len(fake_audio)
+
+
+async def test_upload_rejects_raw_audio_above_configured_limit(
+    tmp_path: Path, seeded_gm, make_db_session_dep, db_session, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
+    )
+    monkeypatch.setattr(
+        "app.services.jdr.logic.settings.KAEYRIS_AUDIO_MAX_UPLOAD_BYTES", 5
+    )
+    plain, api_key = seeded_gm
+    app = _make_jdr_app(make_db_session_dep, fakeredis.FakeStrictRedis())
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        session_id = await _create_session(client, plain, api_key.test_campaign_id)
+        response = await client.post(
+            f"/services/jdr/sessions/{session_id}/audio",
+            files={"audio": ("too-big.m4a", b"012345", "audio/mp4")},
+            headers={"Authorization": f"Bearer {plain}"},
+        )
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["type"].endswith("/audio-upload-too-large")
+    assert body["limit_bytes"] == 5
+    assert "5 bytes" in body["detail"]
+    raw_path = tmp_path / ".tmp" / "audio-reduce" / session_id / "raw.m4a"
+    assert not raw_path.exists()
+    audio = await db_session.scalar(
+        select(AudioSource).where(AudioSource.session_id == UUID(session_id))
+    )
+    assert audio is None
+
+
+async def test_upload_413_problem_details_exposes_effective_limit(
+    tmp_path: Path, seeded_gm, make_db_session_dep, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
+    )
+    monkeypatch.setattr(
+        "app.services.jdr.logic.settings.KAEYRIS_AUDIO_MAX_UPLOAD_BYTES", 4
+    )
+    plain, api_key = seeded_gm
+    app = _make_jdr_app(make_db_session_dep, fakeredis.FakeStrictRedis())
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        session_id = await _create_session(client, plain, api_key.test_campaign_id)
+        response = await client.post(
+            f"/services/jdr/sessions/{session_id}/audio",
+            files={"audio": ("too-big.m4a", b"12345", "audio/mp4")},
+            headers={"Authorization": f"Bearer {plain}"},
+        )
+
+    assert response.status_code == 413
+    assert response.headers["content-type"] == "application/problem+json"
+    body = response.json()
+    assert body["type"].endswith("/audio-upload-too-large")
+    assert body["status"] == 413
+    assert body["limit_bytes"] == 4
+    assert "4 bytes" in body["detail"]
 
 
 async def test_upload_sets_session_current_job_id(
