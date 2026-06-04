@@ -323,6 +323,35 @@ def _ensure_aware(dt):
     return dt
 
 
+# Closed phase vocabulary mirrored from JobOut (BD-10). Kept here so the route
+# can reject anything else before it ever reaches Pydantic validation.
+_VALID_JOB_PHASES = frozenset({"reducing", "transcribing", "done", "failed"})
+
+
+def _project_progress_meta(meta: dict) -> tuple[str | None, int | None]:
+    """Project best-effort RQ progress metadata into validated public fields.
+
+    BD-10 invariant: progress is *best-effort*. Missing, expired, malformed,
+    non-integer, or out-of-domain values collapse to ``None`` so they never
+    turn a valid job into a 500 — they just hide the optional progress hint.
+    ``queued`` jobs simply carry no metadata, so nothing is synthesised
+    (no ``phase="queued"``, no ``progress_percent=0``).
+    """
+    raw_phase = meta.get("phase")
+    phase = raw_phase if raw_phase in _VALID_JOB_PHASES else None
+
+    raw_percent = meta.get("progress_percent")
+    # bool is an int subclass — reject it explicitly so True/False is not 1/0.
+    if isinstance(raw_percent, bool) or not isinstance(raw_percent, int):
+        progress_percent = None
+    elif 0 <= raw_percent <= 100:
+        progress_percent = raw_percent
+    else:
+        progress_percent = None
+
+    return phase, progress_percent
+
+
 async def _campaign_id_for_auth(
     db: AsyncSession,
     auth: AuthenticatedKey,
@@ -1935,6 +1964,12 @@ async def get_job(
         # leaking too much internal detail to the client.
         failure_reason = str(job.exc_info).strip().splitlines()[-1][:500]
 
+    # BD-10: best-effort transcription progress lives on the RQ job metadata.
+    # Validate it here so malformed/expired values fall back to null instead
+    # of turning a valid job into a 500 (US2).
+    meta = job.get_meta(refresh=True) or {}
+    phase, progress_percent = _project_progress_meta(meta)
+
     return JobOut(
         id=job.id,
         kind=kind,
@@ -1944,4 +1979,6 @@ async def get_job(
         queued_at=_ensure_aware(job.created_at) or datetime.now(UTC),
         started_at=_ensure_aware(getattr(job, "started_at", None)),
         ended_at=_ensure_aware(getattr(job, "ended_at", None)),
+        phase=phase,
+        progress_percent=progress_percent,
     )

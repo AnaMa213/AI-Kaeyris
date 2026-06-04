@@ -558,3 +558,42 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
 
 - La lecture audio est ouverte aux membres web de la campagne active ; upload et suppression restent des actions GM.
 - Pas de signed URL ni stockage objet : fichier local sous `KAEYRIS_DATA_DIR`, cohérent avec le périmètre monolithe local.
+---
+
+## 2026-06-03 — BD-10 : Progression réelle des jobs de transcription
+
+### Ce qui a été fait
+
+- `JobOut` expose deux champs best-effort nullables : `phase`
+  (`reducing | transcribing | done | failed`) et `progress_percent` (0..100).
+- Le worker écrit la progression sur la métadonnée du job RQ via
+  `_ProgressReporter` ; `_transcribe_with_optional_chunking` reçoit un
+  callback `(chunks_done, chunks_total)` queue-agnostique. `100` n'est émis
+  qu'après persistance + transition d'état réussies (chunks plafonnés à 99).
+- `GET /services/jdr/jobs/{id}` projette et valide la métadonnée via
+  `_project_progress_meta` : valeur absente/expirée/malformée ⇒ `null`,
+  jamais de `500`. Un échec émet `phase="failed"` sans percent et préserve
+  donc la dernière progression connue.
+- Contrat public régénéré dans `docs/context/api/openapi.json` ; doc service
+  et mémo enrichis.
+
+### Ce que j'ai appris
+
+- **Une métadonnée transitoire suffit pour un besoin UX best-effort** :
+  `job.meta` RQ évite une colonne DB et un write par chunk, tout en gardant
+  le polling existant comme seule surface (pas de SSE prématuré — YAGNI).
+- **Séparer le dénominateur de la file** : le helper de chunking connaît le
+  nombre réel de chunks mais ignore RQ ; un simple callback garde la logique
+  testable sans Redis et la spécificité queue au bord du job.
+- **L'absence de donnée doit rester un état valide** : valider la métadonnée
+  côté route (au lieu de faire confiance) empêche une donnée Redis douteuse
+  de transformer un job valide en erreur serveur.
+
+### Limitations acceptées
+
+- Pas de SSE/WebSocket, pas de pub/sub, pas d'historique de progression en base.
+- `phase` ne contient pas `queued` (déjà porté par `status`) et ne pilote
+  jamais la complétion ; `status` reste la source de vérité du cycle de vie.
+- Progression instrumentée sur le seul chemin de transcription ; les autres
+  jobs (narrative/elements/povs/summary) renvoient `phase`/`progress_percent`
+  à `null`.

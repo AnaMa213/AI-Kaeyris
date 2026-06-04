@@ -1,0 +1,3924 @@
+{
+  "components": {
+    "schemas": {
+      "AudioUploadOut": {
+        "description": "Response of ``POST /sessions/{id}/audio``.",
+        "properties": {
+          "duration_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Audio duration in seconds. ``null`` when ``ffprobe`` is unavailable on the host — non-fatal.",
+            "title": "Duration Seconds"
+          },
+          "job_id": {
+            "description": "RQ job identifier for the queued transcription.",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "path": {
+            "description": "Path on disk relative to KAEYRIS_DATA_DIR.",
+            "title": "Path",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "uploaded_at": {
+            "format": "date-time",
+            "title": "Uploaded At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "path",
+          "sha256",
+          "size_bytes",
+          "uploaded_at",
+          "job_id"
+        ],
+        "title": "AudioUploadOut",
+        "type": "object"
+      },
+      "AuthMeCampaignOut": {
+        "properties": {
+          "character_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Character Id"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "role"
+        ],
+        "title": "AuthMeCampaignOut",
+        "type": "object"
+      },
+      "AuthMeOut": {
+        "properties": {
+          "active_campaign": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AuthMeCampaignOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "user": {
+            "$ref": "#/components/schemas/AuthMeUserOut"
+          }
+        },
+        "required": [
+          "user"
+        ],
+        "title": "AuthMeOut",
+        "type": "object"
+      },
+      "AuthMeUserOut": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "system_role": {
+            "$ref": "#/components/schemas/SystemRole"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "system_role"
+        ],
+        "title": "AuthMeUserOut",
+        "type": "object"
+      },
+      "Body_post_audio_services_jdr_sessions__session_id__audio_post": {
+        "properties": {
+          "audio": {
+            "contentMediaType": "application/octet-stream",
+            "description": "Audio file (M4A). The upload itself is streamed to disk and has no hard size limit at this layer. Note: with TRANSCRIPTION_PROVIDER=cloud, the OpenAI Whisper API caps individual requests at 25 MB, so the transcription job has to chunk larger files (R3 — to be implemented). With provider=local (LAN GPU host running faster-whisper), any size is supported.",
+            "title": "Audio",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audio"
+        ],
+        "title": "Body_post_audio_services_jdr_sessions__session_id__audio_post",
+        "type": "object"
+      },
+      "CampaignCreate": {
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 4000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "CampaignCreate",
+        "type": "object"
+      },
+      "CampaignOut": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_session_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Session At"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "gm",
+              "pj"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "session_count": {
+            "title": "Session Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "role",
+          "session_count",
+          "created_at"
+        ],
+        "title": "CampaignOut",
+        "type": "object"
+      },
+      "CampaignPatch": {
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 4000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "title": "CampaignPatch",
+        "type": "object"
+      },
+      "ChunkListOut": {
+        "description": "Response of `GET /services/jdr/sessions/{session_id}/chunks`.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ChunkOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "items"
+        ],
+        "title": "ChunkListOut",
+        "type": "object"
+      },
+      "ChunkOut": {
+        "description": "One row of `jdr_chunks` as exposed by `GET /sessions/{id}/chunks`.\n\n`summary_text` is intentionally NOT exposed — it is internal to the\nLLM pipeline (research.md §5).",
+        "properties": {
+          "chunk_id": {
+            "format": "uuid",
+            "title": "Chunk Id",
+            "type": "string"
+          },
+          "ordre": {
+            "title": "Ordre",
+            "type": "integer"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "chunk_id",
+          "ordre",
+          "text"
+        ],
+        "title": "ChunkOut",
+        "type": "object"
+      },
+      "Element": {
+        "description": "One row of the four-category elements card.\n\nThe LLM may return arbitrary keys; we surface only ``name`` and\n``description`` so the public contract is stable across model swaps.",
+        "properties": {
+          "description": {
+            "default": "",
+            "description": "One-sentence description (≤ ~25 words).",
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "description": "Short label (proper name or descriptor).",
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "Element",
+        "type": "object"
+      },
+      "ElementsArtifactOut": {
+        "description": "Public projection of an ``Artifact(kind='elements')`` row.\n\nThe four lists are *always* present, even when empty (``[]``). See\nacceptance scenario US 2.3 in ``spec.md``.",
+        "properties": {
+          "clues": {
+            "items": {
+              "$ref": "#/components/schemas/Element"
+            },
+            "title": "Clues",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Element"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "locations": {
+            "items": {
+              "$ref": "#/components/schemas/Element"
+            },
+            "title": "Locations",
+            "type": "array"
+          },
+          "model_used": {
+            "title": "Model Used",
+            "type": "string"
+          },
+          "npcs": {
+            "items": {
+              "$ref": "#/components/schemas/Element"
+            },
+            "title": "Npcs",
+            "type": "array"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "model_used",
+          "generated_at"
+        ],
+        "title": "ElementsArtifactOut",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "JobKind": {
+        "enum": [
+          "transcription",
+          "narrative",
+          "elements",
+          "povs",
+          "summary"
+        ],
+        "title": "JobKind",
+        "type": "string"
+      },
+      "JobOut": {
+        "description": "Job status projection — see ``data-model.md`` §8.\n\n``phase`` and ``progress_percent`` (BD-10) are best-effort transcription\nprogress read from the RQ job metadata. They are nullable on purpose:\nqueued jobs, missing/expired/malformed metadata, and non-transcription\njobs all map to ``null`` so the contract never breaks for a valid job.\n``status`` stays the authoritative lifecycle field.",
+        "properties": {
+          "ended_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "failure_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Reason"
+          },
+          "id": {
+            "description": "RQ job identifier (echoed from the queue).",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/JobKind"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "enum": [
+                  "reducing",
+                  "transcribing",
+                  "done",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Best-effort transcription phase. ``null`` when unknown, not started, expired, or for non-transcription jobs. ``queued`` is intentionally absent — use ``status`` for that.",
+            "title": "Phase"
+          },
+          "progress_percent": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Best-effort transcription progress (0..100). ``null`` when unknown/not started/expired. ``100`` is reserved for terminal success paired with ``phase=\"done\"``.",
+            "title": "Progress Percent"
+          },
+          "queued_at": {
+            "format": "date-time",
+            "title": "Queued At",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "session_id",
+          "status",
+          "queued_at"
+        ],
+        "title": "JobOut",
+        "type": "object"
+      },
+      "JobQueuedOut": {
+        "description": "Reply to an artefact-trigger POST: a freshly enqueued RQ job.\n\nStatus starts at ``queued``; the worker updates it as it processes.\nThe full lifecycle (running -> succeeded/failed) is observable via\nGET /jobs/{id} (added in sub-lot 3f).",
+        "properties": {
+          "id": {
+            "description": "RQ job identifier.",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/JobKind"
+          },
+          "queued_at": {
+            "format": "date-time",
+            "title": "Queued At",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus",
+            "default": "queued",
+            "description": "Initial status after enqueue."
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "session_id",
+          "queued_at"
+        ],
+        "title": "JobQueuedOut",
+        "type": "object"
+      },
+      "JobStatus": {
+        "enum": [
+          "queued",
+          "running",
+          "succeeded",
+          "failed"
+        ],
+        "title": "JobStatus",
+        "type": "string"
+      },
+      "LiveSessionInit": {
+        "description": "Body that the future ``POST /live/sessions`` will accept.\n\nPublished as a Pydantic model so the OpenAPI schema is complete even\nthough the handler always raises 501.",
+        "properties": {
+          "campaign_context": {
+            "anyOf": [
+              {
+                "maxLength": 8000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional campaign-bible block (same semantics as batch mode).",
+            "title": "Campaign Context"
+          },
+          "title": {
+            "description": "Human-readable title for the live session.",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "LiveSessionInit",
+        "type": "object"
+      },
+      "LoginRequest": {
+        "properties": {
+          "password": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          },
+          "username": {
+            "maxLength": 150,
+            "minLength": 1,
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "LoginRequest",
+        "type": "object"
+      },
+      "MappingOut": {
+        "description": "Response for both PUT and GET ``/mapping``.\n\n``updated_at`` is the most recent ``updated_at`` across the rows,\nor ``None`` when the session has no mapping yet.",
+        "properties": {
+          "mapping": {
+            "additionalProperties": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Mapping",
+            "type": "object"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "session_id",
+          "mapping",
+          "updated_at"
+        ],
+        "title": "MappingOut",
+        "type": "object"
+      },
+      "MappingPut": {
+        "description": "Body for ``PUT /services/jdr/sessions/{session_id}/mapping``.\n\nShape ``{speaker_label: pj_id}`` per ``contracts/rest-api.md``\n§148-163.",
+        "properties": {
+          "mapping": {
+            "additionalProperties": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "description": "speaker_label -> pj_id",
+            "title": "Mapping",
+            "type": "object"
+          }
+        },
+        "title": "MappingPut",
+        "type": "object"
+      },
+      "MeOut": {
+        "description": "Response of ``GET /services/jdr/me``.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pj": {
+            "$ref": "#/components/schemas/PjMini"
+          }
+        },
+        "required": [
+          "name",
+          "pj"
+        ],
+        "title": "MeOut",
+        "type": "object"
+      },
+      "NarrativeArtifactOut": {
+        "description": "Public projection of an ``Artifact(kind='narrative')`` row.",
+        "properties": {
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "model_used": {
+            "title": "Model Used",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "text": {
+            "description": "French narrative summary produced by the LLM.",
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "text",
+          "model_used",
+          "generated_at"
+        ],
+        "title": "NarrativeArtifactOut",
+        "type": "object"
+      },
+      "Page_CampaignOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CampaignOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "page": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Page",
+            "type": "integer"
+          },
+          "size": {
+            "default": 50,
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Size",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "Page[CampaignOut]",
+        "type": "object"
+      },
+      "Page_PjOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PjOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "page": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Page",
+            "type": "integer"
+          },
+          "size": {
+            "default": 50,
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Size",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "Page[PjOut]",
+        "type": "object"
+      },
+      "Page_SessionOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SessionOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "page": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Page",
+            "type": "integer"
+          },
+          "size": {
+            "default": 50,
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Size",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "Page[SessionOut]",
+        "type": "object"
+      },
+      "PjCreate": {
+        "description": "Payload accepted by ``POST /services/jdr/pjs``.",
+        "properties": {
+          "campaign_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campaign Id"
+          },
+          "name": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "PjCreate",
+        "type": "object"
+      },
+      "PjMini": {
+        "description": "Compact PJ projection used inside ``MeOut``.",
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "PjMini",
+        "type": "object"
+      },
+      "PjOut": {
+        "description": "Public projection of ``jdr_pjs`` rows.",
+        "properties": {
+          "campaign_id": {
+            "format": "uuid",
+            "title": "Campaign Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "campaign_id",
+          "created_at"
+        ],
+        "title": "PjOut",
+        "type": "object"
+      },
+      "PlayerCreate": {
+        "description": "Body for ``POST /services/jdr/players``.",
+        "properties": {
+          "name": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "pj_id": {
+            "format": "uuid",
+            "title": "Pj Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "pj_id"
+        ],
+        "title": "PlayerCreate",
+        "type": "object"
+      },
+      "PlayerOut": {
+        "description": "Response of ``POST /services/jdr/players``.\n\n``token`` is the *plaintext* Bearer token; it is returned **once** at\ncreation and never again. The server only stores the Argon2 hash.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pj_id": {
+            "format": "uuid",
+            "title": "Pj Id",
+            "type": "string"
+          },
+          "token": {
+            "description": "Plaintext Bearer token. Shown only on this 201 response. Store it now — the server only keeps an Argon2 hash.",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "pj_id",
+          "token",
+          "created_at"
+        ],
+        "title": "PlayerOut",
+        "type": "object"
+      },
+      "PlayerSessionItem": {
+        "description": "One row of ``GET /services/jdr/me/sessions``.",
+        "properties": {
+          "recorded_at": {
+            "format": "date-time",
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "title",
+          "recorded_at"
+        ],
+        "title": "PlayerSessionItem",
+        "type": "object"
+      },
+      "PlayerSessionListOut": {
+        "description": "Envelope for ``GET /services/jdr/me/sessions``.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PlayerSessionItem"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "PlayerSessionListOut",
+        "type": "object"
+      },
+      "PovArtifactOut": {
+        "description": "Public projection of an ``Artifact(kind='pov:<pj_id>')`` row.\n\n``pj_id`` is exposed at the top level for clients that don't want to\nparse the composite ``kind`` field.",
+        "properties": {
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "model_used": {
+            "title": "Model Used",
+            "type": "string"
+          },
+          "pj_id": {
+            "format": "uuid",
+            "title": "Pj Id",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "text": {
+            "description": "French POV summary scoped to this PJ.",
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "pj_id",
+          "text",
+          "model_used",
+          "generated_at"
+        ],
+        "title": "PovArtifactOut",
+        "type": "object"
+      },
+      "SessionCreate": {
+        "description": "Payload accepted by ``POST /services/jdr/sessions``.",
+        "properties": {
+          "campaign_context": {
+            "anyOf": [
+              {
+                "maxLength": 8000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional campaign-bible block prepended to every narrative / elements LLM prompt for this session. Use it to anchor the model on recurring PNJ, the campaign tone, or the current story arc. Can be updated later via PATCH.",
+            "title": "Campaign Context"
+          },
+          "campaign_id": {
+            "format": "uuid",
+            "title": "Campaign Id",
+            "type": "string"
+          },
+          "recorded_at": {
+            "description": "When the session actually took place (not the upload time). ISO-8601 with timezone.",
+            "format": "date-time",
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "transcription_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TranscriptionMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional. 'diarised' (default, Jalon 5 behaviour) or 'non_diarised' (chunked transcription + map-reduce LLM summary). Immutable after creation. Default applied server-side if omitted."
+          }
+        },
+        "required": [
+          "title",
+          "campaign_id",
+          "recorded_at"
+        ],
+        "title": "SessionCreate",
+        "type": "object"
+      },
+      "SessionMode": {
+        "enum": [
+          "batch",
+          "live"
+        ],
+        "title": "SessionMode",
+        "type": "string"
+      },
+      "SessionOut": {
+        "description": "Public projection of ``jdr_sessions`` rows.",
+        "properties": {
+          "campaign_context": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campaign Context"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/SessionMode"
+          },
+          "recorded_at": {
+            "format": "date-time",
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/SessionState"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "transcription_mode": {
+            "$ref": "#/components/schemas/TranscriptionMode"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "recorded_at",
+          "mode",
+          "state",
+          "transcription_mode",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SessionOut",
+        "type": "object"
+      },
+      "SessionPlayersIn": {
+        "description": "Body of `POST /services/jdr/sessions/{session_id}/players`.\n\nReplaces the player list integrally (PUT-like semantics).",
+        "properties": {
+          "pj_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Pj Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "pj_ids"
+        ],
+        "title": "SessionPlayersIn",
+        "type": "object"
+      },
+      "SessionPlayersOut": {
+        "description": "Response of `POST` and `GET /sessions/{session_id}/players`.",
+        "properties": {
+          "pj_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Pj Ids",
+            "type": "array"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "session_id",
+          "pj_ids",
+          "updated_at"
+        ],
+        "title": "SessionPlayersOut",
+        "type": "object"
+      },
+      "SessionState": {
+        "description": "Lifecycle of a session — see data-model.md §3.",
+        "enum": [
+          "created",
+          "audio_uploaded",
+          "transcribing",
+          "transcription_failed",
+          "transcribed"
+        ],
+        "title": "SessionState",
+        "type": "string"
+      },
+      "SessionUpdate": {
+        "description": "Payload accepted by ``PATCH /services/jdr/sessions/{id}``.\n\nEvery field is optional — the route applies only the keys that are\npresent (PATCH semantics). To clear ``campaign_context``, send\n``\"campaign_context\": null`` explicitly (the route distinguishes\n\"unset\" from \"explicit null\" via Pydantic's ``model_fields_set``).",
+        "properties": {
+          "campaign_context": {
+            "anyOf": [
+              {
+                "maxLength": 8000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campaign Context"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "SessionUpdate",
+        "type": "object"
+      },
+      "SetupRequest": {
+        "properties": {
+          "password": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          },
+          "username": {
+            "maxLength": 150,
+            "minLength": 1,
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "SetupRequest",
+        "type": "object"
+      },
+      "SetupStatusOut": {
+        "properties": {
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "required"
+        ],
+        "title": "SetupStatusOut",
+        "type": "object"
+      },
+      "SummaryArtifactOut": {
+        "description": "Public projection of an ``Artifact(kind='summary')`` row.",
+        "properties": {
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "model_used": {
+            "title": "Model Used",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "text": {
+            "description": "Global session summary in French.",
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "text",
+          "model_used",
+          "generated_at"
+        ],
+        "title": "SummaryArtifactOut",
+        "type": "object"
+      },
+      "SystemRole": {
+        "enum": [
+          "admin",
+          "user"
+        ],
+        "title": "SystemRole",
+        "type": "string"
+      },
+      "TranscriptionMode": {
+        "description": "Per-session transcription posture — see feature 002 data-model.md §2.\n\n- ``DIARISED`` (default): Jalon 5 pipeline, segments stored in\n  ``jdr_transcriptions`` with speaker labels.\n- ``NON_DIARISED``: chunked transcription stored in ``jdr_chunks``,\n  no speaker labels, downstream artefacts consume per-chunk summaries.",
+        "enum": [
+          "diarised",
+          "non_diarised"
+        ],
+        "title": "TranscriptionMode",
+        "type": "string"
+      },
+      "TranscriptionOut": {
+        "description": "Public projection of ``jdr_transcriptions`` rows.",
+        "properties": {
+          "completed_at": {
+            "format": "date-time",
+            "title": "Completed At",
+            "type": "string"
+          },
+          "language": {
+            "description": "BCP-47 code, e.g. 'fr'.",
+            "title": "Language",
+            "type": "string"
+          },
+          "model_used": {
+            "title": "Model Used",
+            "type": "string"
+          },
+          "provider": {
+            "description": "'cloud' | 'local' | 'mock'.",
+            "title": "Provider",
+            "type": "string"
+          },
+          "segments": {
+            "items": {
+              "$ref": "#/components/schemas/TranscriptionSegmentOut"
+            },
+            "title": "Segments",
+            "type": "array"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "segments",
+          "language",
+          "model_used",
+          "provider",
+          "completed_at"
+        ],
+        "title": "TranscriptionOut",
+        "type": "object"
+      },
+      "TranscriptionSegmentOut": {
+        "description": "One diarised utterance in a transcription.",
+        "properties": {
+          "end_seconds": {
+            "title": "End Seconds",
+            "type": "number"
+          },
+          "speaker_label": {
+            "description": "Raw label produced by the backend ('speaker_1', 'unknown', …). The mapping to PJs is a per-session business decision exposed via /mapping (US3).",
+            "title": "Speaker Label",
+            "type": "string"
+          },
+          "start_seconds": {
+            "title": "Start Seconds",
+            "type": "number"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "speaker_label",
+          "start_seconds",
+          "end_seconds",
+          "text"
+        ],
+        "title": "TranscriptionSegmentOut",
+        "type": "object"
+      },
+      "UserCreate": {
+        "properties": {
+          "password": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          },
+          "system_role": {
+            "$ref": "#/components/schemas/SystemRole",
+            "default": "user"
+          },
+          "username": {
+            "maxLength": 150,
+            "minLength": 1,
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "UserCreate",
+        "type": "object"
+      },
+      "UserListOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/UserOut"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "UserListOut",
+        "type": "object"
+      },
+      "UserOut": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_login_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Login At"
+          },
+          "status": {
+            "$ref": "#/components/schemas/UserStatus"
+          },
+          "system_role": {
+            "$ref": "#/components/schemas/SystemRole"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "system_role",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "UserOut",
+        "type": "object"
+      },
+      "UserStatus": {
+        "enum": [
+          "active",
+          "inactive",
+          "deleted"
+        ],
+        "title": "UserStatus",
+        "type": "string"
+      },
+      "UserUpdate": {
+        "properties": {
+          "password": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Password"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UserStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "system_role": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SystemRole"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "UserUpdate",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "kaeyris-bearer": {
+        "description": "Bearer token issued by the operator. Use `python scripts/generate_api_key.py <name>` to create one.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Plateforme AI personnelle — monolithe modulaire FastAPI.",
+    "title": "AI-Kaeyris",
+    "version": "0.0.1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/health": {
+      "get": {
+        "description": "Legacy liveness endpoint kept for backward compatibility.\n\nEquivalent to ``/healthz``. New monitoring setups should target\n``/healthz`` (liveness) and ``/readyz`` (readiness) instead.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Health Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Liveness alias (legacy Jalon 0).",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "description": "Always 200 as long as the Python process is alive.\n\nDoes NOT check external dependencies. Use ``/readyz`` to decide\nwhether to send traffic. Intent: orchestrator should restart the\nprocess iff this fails.",
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Healthz Healthz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Liveness probe (Jalon 6).",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/readyz": {
+      "get": {
+        "description": "200 if every backing dependency is reachable, 503 otherwise.\n\nPer-check status surfaced in the body so an operator can see\nwhich dependency is down without parsing logs.",
+        "operationId": "readyz_readyz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Readiness probe — DB + Redis (Jalon 6).",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/services/jdr/auth/login": {
+      "post": {
+        "operationId": "post_login_services_jdr_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Login",
+        "tags": [
+          "jdr-auth"
+        ]
+      }
+    },
+    "/services/jdr/auth/logout": {
+      "post": {
+        "operationId": "post_logout_services_jdr_auth_logout_post",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Post Logout",
+        "tags": [
+          "jdr-auth"
+        ]
+      }
+    },
+    "/services/jdr/auth/me": {
+      "get": {
+        "operationId": "get_me_services_jdr_auth_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthMeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Return the current web user and active JDR campaign context.",
+        "tags": [
+          "jdr-auth"
+        ]
+      }
+    },
+    "/services/jdr/auth/setup": {
+      "post": {
+        "operationId": "post_setup_services_jdr_auth_setup_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Setup",
+        "tags": [
+          "jdr-auth"
+        ]
+      }
+    },
+    "/services/jdr/auth/setup/status": {
+      "get": {
+        "operationId": "get_setup_status_services_jdr_auth_setup_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupStatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Setup Status",
+        "tags": [
+          "jdr-auth"
+        ]
+      }
+    },
+    "/services/jdr/campaigns": {
+      "get": {
+        "operationId": "list_campaigns_services_jdr_campaigns_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_CampaignOut_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "List the current web user's campaigns.",
+        "tags": [
+          "jdr"
+        ]
+      },
+      "post": {
+        "operationId": "create_campaign_services_jdr_campaigns_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CampaignCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Create a campaign and make the current user its GM.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/campaigns/{campaign_id}": {
+      "delete": {
+        "operationId": "delete_campaign_services_jdr_campaigns__campaign_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Campaign Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Delete an empty campaign.",
+        "tags": [
+          "jdr"
+        ]
+      },
+      "get": {
+        "operationId": "get_campaign_services_jdr_campaigns__campaign_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Campaign Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Fetch one of the current web user's campaigns.",
+        "tags": [
+          "jdr"
+        ]
+      },
+      "patch": {
+        "operationId": "patch_campaign_services_jdr_campaigns__campaign_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Campaign Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CampaignPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Partially update a campaign.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/jobs/{job_id}": {
+      "get": {
+        "description": "Project an RQ job into the project's JobOut shape.\n\nRQ holds the live state for 24h on success / 7d on failure. Cross-\ntenant access (a GM polling another GM's job) returns 404 so the\nendpoint never confirms the existence of a foreign job.",
+        "operationId": "get_job_services_jdr_jobs__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Fetch the status of a JDR-service async job.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/live/sessions": {
+      "post": {
+        "description": "Always raises 501 ``live-not-implemented``.\n\nThe Pydantic body is validated first so a malformed payload still\nreturns 422, keeping the published contract honest even when the\nimplementation lands later.",
+        "operationId": "post_live_session_services_jdr_live_sessions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LiveSessionInit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "(stub — Jalon 5) Open a live ingestion session.",
+        "tags": [
+          "jdr",
+          "jdr-live"
+        ]
+      }
+    },
+    "/services/jdr/me": {
+      "get": {
+        "operationId": "get_me_services_jdr_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Profile of the current player (name + their PJ).",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/me/sessions": {
+      "get": {
+        "operationId": "get_my_sessions_services_jdr_me_sessions_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerSessionListOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "List the sessions where the current player's PJ is mapped.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/me/sessions/{session_id}/narrative": {
+      "get": {
+        "operationId": "get_my_narrative_services_jdr_me_sessions__session_id__narrative_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NarrativeArtifactOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Read the global narrative summary of a session (player view).",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/me/sessions/{session_id}/narrative.md": {
+      "get": {
+        "operationId": "get_my_narrative_md_services_jdr_me_sessions__session_id__narrative_md_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Export the global narrative summary as Markdown (player view).",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/me/sessions/{session_id}/pov": {
+      "get": {
+        "operationId": "get_my_pov_services_jdr_me_sessions__session_id__pov_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PovArtifactOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Read the current player's POV summary for a session.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/me/sessions/{session_id}/pov.md": {
+      "get": {
+        "operationId": "get_my_pov_md_services_jdr_me_sessions__session_id__pov_md_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Export the current player's POV as Markdown.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/pjs": {
+      "get": {
+        "operationId": "list_pjs_services_jdr_pjs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "campaign_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Campaign Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_PjOut_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "List the current MJ's PJs.",
+        "tags": [
+          "jdr"
+        ]
+      },
+      "post": {
+        "description": "A PJ is stable across sessions — it's the narrative anchor that\nlater gets mapped to a diarisation ``speaker_label`` per session\n(sub-lot 5b) and to a player API key (US4).\n\nDuplicate name within the same MJ -> 409 ``duplicate-pj``.",
+        "operationId": "create_pj_services_jdr_pjs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PjCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PjOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Create a PJ (player-character) owned by the current MJ.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/players": {
+      "post": {
+        "description": "Create a player key bound to one of the GM's PJs.\n\nThe plaintext token is returned exactly once — store it now, the\nserver only keeps the Argon2 hash.",
+        "operationId": "post_player_services_jdr_players_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlayerCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Enroll a player and return the plaintext Bearer token (once).",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/players/{player_id}": {
+      "delete": {
+        "operationId": "delete_player_services_jdr_players__player_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "player_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Player Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Revoke a player key (immediate effect on the next request).",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions": {
+      "get": {
+        "operationId": "list_sessions_services_jdr_sessions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "campaign_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Campaign Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_SessionOut_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "List the MJ's sessions.",
+        "tags": [
+          "jdr"
+        ]
+      },
+      "post": {
+        "description": "Create a session owned by the authenticated MJ.\n\nThe body holds the human title and the date the session actually\ntook place (``recorded_at``). State starts at ``created``; the\naudio is uploaded separately via ``POST /sessions/{id}/audio``.\nThe optional ``campaign_context`` is a steering block for the LLM\n(PNJ récurrents, ton, fil narratif) — see PATCH for updating it.",
+        "operationId": "create_session_services_jdr_sessions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Create a new JDR session.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions/{session_id}": {
+      "get": {
+        "operationId": "get_session_services_jdr_sessions__session_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Fetch one of the MJ's sessions.",
+        "tags": [
+          "jdr"
+        ]
+      },
+      "patch": {
+        "description": "Apply a partial update.\n\nOnly the fields present in the body are touched. To clear\n``campaign_context``, send ``{\"campaign_context\": null}`` explicitly —\nomitting the key leaves the existing value alone. Updating\n``campaign_context`` does NOT re-run any previously generated\nartefact; the new value affects only future generations.\n\n``transcription_mode`` is immutable after creation (FR-002 of\nfeature 002): any PATCH body referencing it is rejected with 422.",
+        "operationId": "patch_session_services_jdr_sessions__session_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Partially update a session (title and/or campaign_context).",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions/{session_id}/artifacts/elements": {
+      "get": {
+        "operationId": "get_elements_services_jdr_sessions__session_id__artifacts_elements_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElementsArtifactOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Fetch the structured-elements card of a session.",
+        "tags": [
+          "jdr"
+        ]
+      },
+      "post": {
+        "operationId": "post_elements_services_jdr_sessions__session_id__artifacts_elements_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobQueuedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Trigger the structured-elements card generation for a session.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions/{session_id}/artifacts/elements.md": {
+      "get": {
+        "operationId": "get_elements_md_services_jdr_sessions__session_id__artifacts_elements_md_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Export the structured-elements card as Markdown (text/markdown).",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions/{session_id}/artifacts/narrative": {
+      "get": {
+        "operationId": "get_narrative_services_jdr_sessions__session_id__artifacts_narrative_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NarrativeArtifactOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Fetch the narrative summary of a session.",
+        "tags": [
+          "jdr"
+        ]
+      },
+      "post": {
+        "operationId": "post_narrative_services_jdr_sessions__session_id__artifacts_narrative_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobQueuedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Trigger the narrative summary generation for a session.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions/{session_id}/artifacts/narrative.md": {
+      "get": {
+        "operationId": "get_narrative_md_services_jdr_sessions__session_id__artifacts_narrative_md_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Export the narrative summary as Markdown (text/markdown).",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions/{session_id}/artifacts/povs": {
+      "post": {
+        "description": "Enqueue a single job that generates one ``pov:<pj_id>`` artefact\nper row in the session's mapping. Pre-conditions match the other\ngenerators (404 if foreign, 409 if not transcribed) plus FR-011:\na 409 ``no-mapping`` is raised when the session has no configured\nspeaker-PJ mapping yet — the operator must call\n``PUT /mapping`` first.",
+        "operationId": "post_povs_services_jdr_sessions__session_id__artifacts_povs_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobQueuedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Trigger POV generation — one artefact per mapped PJ.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions/{session_id}/artifacts/povs/{pj_id_str}": {
+      "get": {
+        "description": "One route handles both representations because the ``.md`` suffix\npattern would otherwise collide with the UUID path param at the\nStarlette routing layer (``{pj_id}`` matches ``[^/]+`` which greedily\nswallows the ``.md``).\n\n- ``GET .../povs/<uuid>``     → JSON (:class:`PovArtifactOut`)\n- ``GET .../povs/<uuid>.md``  → Markdown (``text/markdown``)",
+        "operationId": "get_pov_services_jdr_sessions__session_id__artifacts_povs__pj_id_str__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "pj_id_str",
+            "required": true,
+            "schema": {
+              "title": "Pj Id Str",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Fetch one PJ's POV — JSON, or Markdown via the .md suffix.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions/{session_id}/artifacts/summary": {
+      "get": {
+        "operationId": "get_summary_services_jdr_sessions__session_id__artifacts_summary_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SummaryArtifactOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Fetch the global session summary (JSON).",
+        "tags": [
+          "jdr"
+        ]
+      },
+      "post": {
+        "description": "Enqueue the map-reduce summary job for a non_diarised session.\n\nPre-conditions:\n- session must belong to the MJ (404 otherwise)\n- session must be in non_diarised mode (409 wrong-mode)\n- session must be in state=transcribed (409 session-not-transcribed)\n- session must have at least 1 chunk (409 no-chunks)\n\nSide effect documented under FR-011: each new summary job resets\nchunks.summary_text and cascade-deletes existing narrative /\nelements / pov:* artefacts for the session. The atomicity is\nenforced by ``_generate_summary`` (see research.md §2).",
+        "operationId": "post_summary_services_jdr_sessions__session_id__artifacts_summary_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobQueuedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Trigger the global session summary (map-reduce LLM).",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions/{session_id}/artifacts/summary.md": {
+      "get": {
+        "operationId": "get_summary_md_services_jdr_sessions__session_id__artifacts_summary_md_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Export the global session summary as Markdown (text/markdown).",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions/{session_id}/audio": {
+      "delete": {
+        "description": "Drop the audio file on disk and reset the session to ``created``.\n\nUse cases (matches data-model.md §3 retry arrow\n``transcription_failed → audio_uploaded`` and the analogous\ncancel-before-transcription path):\n\n- The MJ uploaded the wrong file and wants to re-upload before the\n  worker picks it up.\n- Transcription failed and the MJ wants to try again with a different\n  audio (or after the upstream provider has recovered).\n\nRefused (409) when ``state ∈ {transcribing, transcribed}``: see\n``logic.purge_audio_for_session`` for the rationale.",
+        "operationId": "delete_audio_services_jdr_sessions__session_id__audio_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Purge a session's audio file and reset the session so a new upload can be sent.",
+        "tags": [
+          "jdr"
+        ]
+      },
+      "post": {
+        "operationId": "post_audio_services_jdr_sessions__session_id__audio_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_post_audio_services_jdr_sessions__session_id__audio_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudioUploadOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Upload the audio of a session and enqueue its transcription.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions/{session_id}/chunks": {
+      "get": {
+        "description": "Return the chunks (text, ordre) of a non_diarised session.\n\nReserved for non_diarised sessions — diarised sessions use the\n`GET /transcription` endpoint instead (409 wrong-mode otherwise).\nReturns 404 transcription-not-ready if no chunks have been produced\nyet for the session.",
+        "operationId": "get_session_chunks_services_jdr_sessions__session_id__chunks_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChunkListOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Chunked transcription of a non_diarised session (ordered).",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions/{session_id}/mapping": {
+      "get": {
+        "description": "Returns 200 with an empty dict when the session has no mapping\nyet (resource exists but is not configured).\n\n409 wrong-mode if the session is non_diarised (use GET /players).",
+        "operationId": "get_session_mapping_services_jdr_sessions__session_id__mapping_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MappingOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Read the current speaker→PJ mapping for a session.",
+        "tags": [
+          "jdr"
+        ]
+      },
+      "put": {
+        "description": "Replace the mapping in one atomic write.\n\n- 404 if the session does not belong to the current MJ.\n- 409 wrong-mode if the session is non_diarised (use /players instead).\n- 409 if the session is not yet in ``state=transcribed``.\n- 422 if any ``pj_id`` is unknown or owned by another MJ.\n\nSide-effect: any existing ``pov:*`` artefact for this session is\ndeleted (data-model.md §6 invariant). A subsequent\n``POST /artifacts/povs`` is required to regenerate them.",
+        "operationId": "put_session_mapping_services_jdr_sessions__session_id__mapping_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MappingPut"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MappingOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Replace the speaker→PJ mapping for a session.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions/{session_id}/players": {
+      "get": {
+        "operationId": "get_session_players_services_jdr_sessions__session_id__players_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionPlayersOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Read the current PJ list of a non_diarised session.",
+        "tags": [
+          "jdr"
+        ]
+      },
+      "post": {
+        "description": "Declare the PJ present at a non_diarised session (FR-012).\n\nPUT-like semantics — the provided list replaces the previous one\nintegrally. Each ``pj_id`` must belong to the current MJ (422\n``invalid-player-list`` otherwise). Reserved for non_diarised\nsessions (409 ``wrong-mode`` on diarised).",
+        "operationId": "post_session_players_services_jdr_sessions__session_id__players_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionPlayersIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionPlayersOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Replace the list of PJ present at a non_diarised session.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions/{session_id}/transcription": {
+      "get": {
+        "operationId": "get_transcription_services_jdr_sessions__session_id__transcription_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Fetch the diarised transcription of a session.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions/{session_id}/transcription.md": {
+      "get": {
+        "operationId": "get_transcription_md_services_jdr_sessions__session_id__transcription_md_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Export the transcription as Markdown (text/markdown).",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/users": {
+      "get": {
+        "operationId": "get_users_services_jdr_users_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserListOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Get Users",
+        "tags": [
+          "jdr-auth"
+        ]
+      },
+      "post": {
+        "operationId": "post_user_services_jdr_users_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Post User",
+        "tags": [
+          "jdr-auth"
+        ]
+      }
+    },
+    "/services/jdr/users/{user_id}": {
+      "delete": {
+        "operationId": "delete_user_route_services_jdr_users__user_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Delete User Route",
+        "tags": [
+          "jdr-auth"
+        ]
+      },
+      "patch": {
+        "operationId": "patch_user_services_jdr_users__user_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Patch User",
+        "tags": [
+          "jdr-auth"
+        ]
+      }
+    }
+  }
+}
