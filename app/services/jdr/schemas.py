@@ -417,7 +417,14 @@ class JobQueuedOut(JdrSchema):
 
 
 class JobOut(JdrSchema):
-    """Job status projection — see ``data-model.md`` §8."""
+    """Job status projection — see ``data-model.md`` §8.
+
+    ``phase`` and ``progress_percent`` (BD-10) are best-effort transcription
+    progress read from the RQ job metadata. They are nullable on purpose:
+    queued jobs, missing/expired/malformed metadata, and non-transcription
+    jobs all map to ``null`` so the contract never breaks for a valid job.
+    ``status`` stays the authoritative lifecycle field.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -429,6 +436,24 @@ class JobOut(JdrSchema):
     queued_at: datetime
     started_at: datetime | None = None
     ended_at: datetime | None = None
+    phase: Literal["reducing", "transcribing", "done", "failed"] | None = Field(
+        default=None,
+        description=(
+            "Best-effort transcription phase. ``null`` when unknown, not "
+            "started, expired, or for non-transcription jobs. ``queued`` is "
+            "intentionally absent — use ``status`` for that."
+        ),
+    )
+    progress_percent: int | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description=(
+            "Best-effort transcription progress (0..100). ``null`` when "
+            "unknown/not started/expired. ``100`` is reserved for terminal "
+            "success paired with ``phase=\"done\"``."
+        ),
+    )
 
 
 class Page(JdrSchema, Generic[T]):

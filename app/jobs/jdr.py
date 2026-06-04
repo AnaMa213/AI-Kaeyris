@@ -17,10 +17,12 @@ import json
 import re
 import shutil
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from rq import get_current_job
 from sqlalchemy import select, update
 
 from app.adapters.llm import (
@@ -82,6 +84,35 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
+class _ProgressReporter:
+    """Best-effort writer of transcription progress onto the current RQ job.
+
+    BD-10: progress is transient UX state stored on ``job.meta`` and read
+    back by ``GET /jobs/{id}`` (RQ documents ``job.meta`` + ``save_meta()``:
+    https://python-rq.org/docs/jobs/). A ``None`` job — code running outside
+    a worker, e.g. the direct async tests — turns every call into a no-op,
+    so the transcription core stays queue-agnostic and unit-testable.
+
+    Emitting a ``phase`` without a ``progress_percent`` deliberately leaves
+    the last stored percent untouched: a terminal ``failed`` must not erase
+    the last known progress (BD-10 US3).
+    """
+
+    def __init__(self, job: Any) -> None:
+        self._job = job
+
+    def __call__(self, phase: str, progress_percent: int | None = None) -> None:
+        if self._job is None:
+            return
+        self._job.meta["phase"] = phase
+        if progress_percent is not None:
+            self._job.meta["progress_percent"] = progress_percent
+        try:
+            self._job.save_meta()
+        except Exception as exc:  # never let progress telemetry fail the job
+            logger.warning("transcribe.progress_save_failed", error=str(exc))
+
+
 def _run_job_with_metrics(kind: str, coro) -> None:
     """Run an async job core inside the sync RQ entry point + record metrics.
 
@@ -115,9 +146,14 @@ def transcribe_session_job(session_id: UUID) -> None:
     """Transcribe the audio attached to a session.
 
     Sync wrapper around the async core so RQ can pickle the reference.
+    Looks up the current RQ job here (the only spot with worker context)
+    and hands the async core a queue-agnostic progress reporter (BD-10).
     See :func:`_transcribe_session` for the actual logic.
     """
-    _run_job_with_metrics("transcription", _transcribe_session(session_id))
+    reporter = _ProgressReporter(get_current_job())
+    _run_job_with_metrics(
+        "transcription", _transcribe_session(session_id, report_progress=reporter)
+    )
 
 
 def generate_narrative_job(session_id: UUID) -> None:
@@ -157,7 +193,11 @@ def generate_summary_job(session_id: UUID) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _transcribe_session(session_id: UUID) -> None:
+async def _transcribe_session(
+    session_id: UUID,
+    *,
+    report_progress: Callable[[str, int | None], None] | None = None,
+) -> None:
     """Run the transcription pipeline for one session.
 
     Side effects:
@@ -165,6 +205,11 @@ async def _transcribe_session(session_id: UUID) -> None:
       (or ``transcription_failed`` on PermanentJobError)
     - persists the ``Transcription`` row (UPSERT semantics)
     - keeps the source audio available until explicit destructive deletion
+
+    ``report_progress`` (BD-10) is an optional ``(phase, progress_percent)``
+    reporter. It is ``None`` for the direct async tests, which keeps this
+    core queue-agnostic; the RQ entry point passes a :class:`_ProgressReporter`
+    bound to the live job.
     """
     sessionmaker = get_sessionmaker()
 
@@ -242,25 +287,49 @@ async def _transcribe_session(session_id: UUID) -> None:
     # --- Step 2: call the adapter (long, no DB) -----------------------------
 
     adapter = get_transcription_adapter()
+    chunk_duration = settings.TRANSCRIPTION_CHUNK_DURATION_SECONDS
+
+    def _on_chunk(chunks_done: int, chunks_total: int) -> None:
+        # Map the chunk-progress event onto a public percent. 100 is
+        # reserved for terminal success, so the in-flight value is capped
+        # at 99 (BD-10 research §5).
+        if report_progress is None or chunks_total <= 0:
+            return
+        percent = min(99, round(chunks_done / chunks_total * 100))
+        report_progress("transcribing", percent)
+
+    if report_progress is not None:
+        # Chunked runs re-encode/segment the audio first ("reducing");
+        # single-shot jumps straight to transcribing. Either way start at 0.
+        report_progress("reducing" if chunk_duration > 0 else "transcribing", 0)
+
     try:
         result = await _transcribe_with_optional_chunking(
             adapter=adapter,
             audio_path=full_path,
             session_id=session_id,
             language_hint=settings.TRANSCRIPTION_LANGUAGE_HINT or None,
-            chunk_duration_seconds=settings.TRANSCRIPTION_CHUNK_DURATION_SECONDS,
+            chunk_duration_seconds=chunk_duration,
+            on_progress=_on_chunk,
         )
     except TransientTranscriptionError as exc:
         # Roll back to AUDIO_UPLOADED so the retry picks it up.
         await _restore_session_state(
             sessionmaker, session_id, SessionState.AUDIO_UPLOADED
         )
+        if report_progress is not None:
+            # No percent: keep the last known progress instead of resetting.
+            report_progress("failed")
         raise TransientJobError(str(exc)) from exc
     except PermanentTranscriptionError as exc:
         await _mark_session_failed(sessionmaker, session_id)
+        if report_progress is not None:
+            report_progress("failed")
         raise PermanentJobError(str(exc)) from exc
     except AudioChunkingError as exc:
         await _mark_session_failed(sessionmaker, session_id)
+        if report_progress is not None:
+            report_progress("failed")
         raise PermanentJobError(f"Audio chunking failed: {exc}") from exc
 
     # --- Step 3: persist + transition (single commit) ----------------------
@@ -299,6 +368,10 @@ async def _transcribe_session(session_id: UUID) -> None:
             )
             await db.commit()
 
+    # Persistence + session state transition succeeded — only now is the
+    # transcription truly complete, so 100 is emitted here and nowhere else.
+    if report_progress is not None:
+        report_progress("done", 100)
 
 async def _load_session_source_document(
     session_id: UUID,
@@ -722,6 +795,7 @@ async def _transcribe_with_optional_chunking(
     session_id: UUID,
     language_hint: str | None,
     chunk_duration_seconds: int,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> TranscriptionResult:
     """Run the transcription against the adapter, possibly chunk-by-chunk.
 
@@ -734,6 +808,12 @@ async def _transcribe_with_optional_chunking(
     offset. Chunking is the only client-side defence against the Whisper
     repetition-loop failure mode on long sessions: a hallucination on one
     chunk cannot bleed into the next because each chunk is decoded fresh.
+
+    ``on_progress`` (BD-10) is an optional ``(chunks_done, chunks_total)``
+    callback invoked after each chunk is transcribed. It is queue-agnostic
+    on purpose — the helper owns the real denominator but knows nothing
+    about RQ; the job boundary maps these events to job metadata. The
+    single-shot path emits no callback (no chunk denominator to report).
 
     The temp directory under ``data/.tmp/chunks/<session_id>/`` is removed
     on exit by ``chunked_audio`` regardless of success.
@@ -752,7 +832,8 @@ async def _transcribe_with_optional_chunking(
     model_used = ""
     provider = ""
     with chunked_audio(audio_path, chunk_duration_seconds, work_dir) as chunks:
-        for offset, chunk_path in chunks:
+        chunks_total = len(chunks)
+        for index, (offset, chunk_path) in enumerate(chunks):
             chunk_result = await adapter.transcribe(
                 audio_path=str(chunk_path),
                 language_hint=language_hint,
@@ -771,6 +852,8 @@ async def _transcribe_with_optional_chunking(
             language = chunk_result.language or language
             model_used = chunk_result.model_used or model_used
             provider = chunk_result.provider or provider
+            if on_progress is not None:
+                on_progress(index + 1, chunks_total)
 
     return TranscriptionResult(
         segments=all_segments,

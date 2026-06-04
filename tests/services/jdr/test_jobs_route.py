@@ -24,6 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from app.core.db import get_db_session
 from app.core.errors import register_exception_handlers
 from app.core.redis_client import get_redis
+from rq.job import Job
+
 from app.jobs import enqueue_job, get_default_queue
 from app.jobs.jdr import generate_narrative_job, transcribe_session_job
 from app.services.jdr.db.models import (
@@ -105,6 +107,50 @@ def _make_jdr_app(
     return app
 
 
+def _set_job_meta(redis_client: fakeredis.FakeStrictRedis, job_id: str, **meta: Any) -> None:
+    """Simulate worker-emitted RQ progress metadata for a job.
+
+    The worker writes ``phase``/``progress_percent`` onto ``job.meta`` via
+    ``save_meta()``; the route reads it back. Without a live worker we set
+    the same fields directly so the route projection can be asserted.
+    """
+    job = Job.fetch(job_id, connection=redis_client)
+    job.meta.update(meta)
+    job.save_meta()
+
+
+# ---------------------------------------------------------------------------
+# Schema / contract (BD-10 — Foundational)
+# ---------------------------------------------------------------------------
+
+
+def test_jobout_schema_exposes_nullable_progress_fields():
+    """BD-10 contract: ``phase`` is a nullable closed enum and
+    ``progress_percent`` is a nullable 0..100 integer in the JSON Schema
+    (so the regenerated OpenAPI lets the frontend generate typed clients).
+    """
+    from app.services.jdr.schemas import JobOut
+
+    schema = JobOut.model_json_schema()
+    props = schema["properties"]
+
+    assert "phase" in props
+    assert "progress_percent" in props
+
+    # phase: closed enum {reducing, transcribing, done, failed} + null.
+    phase_variants = props["phase"]["anyOf"]
+    enum_values = next(v["enum"] for v in phase_variants if "enum" in v)
+    assert set(enum_values) == {"reducing", "transcribing", "done", "failed"}
+    assert any(v.get("type") == "null" for v in phase_variants)
+
+    # progress_percent: integer bounded 0..100, nullable.
+    pct_variants = props["progress_percent"]["anyOf"]
+    int_variant = next(v for v in pct_variants if v.get("type") == "integer")
+    assert int_variant["minimum"] == 0
+    assert int_variant["maximum"] == 100
+    assert any(v.get("type") == "null" for v in pct_variants)
+
+
 # ---------------------------------------------------------------------------
 # Happy path
 # ---------------------------------------------------------------------------
@@ -135,6 +181,10 @@ async def test_get_job_for_freshly_enqueued_transcription(
     assert body["started_at"] is None
     assert body["ended_at"] is None
     assert body["failure_reason"] is None
+    # BD-10: a queued job has no progress metadata yet — the fields are
+    # null, never a synthesised phase="queued" or progress_percent=0 (US2).
+    assert body["phase"] is None
+    assert body["progress_percent"] is None
 
 
 async def test_get_job_for_narrative_kind(ctx, make_db_session_dep):
@@ -153,6 +203,148 @@ async def test_get_job_for_narrative_kind(ctx, make_db_session_dep):
     body = response.json()
     assert body["kind"] == "narrative"
     assert body["session_id"] == str(ctx.session_id)
+
+
+# ---------------------------------------------------------------------------
+# US1 — real transcription progress projection (BD-10)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_job_running_transcription_exposes_progress(
+    ctx, make_db_session_dep
+):
+    """A running transcription with metadata exposes phase=transcribing and
+    an in-flight 0..99 progress percent."""
+    queue = get_default_queue(ctx.redis_client)
+    job = enqueue_job(queue, transcribe_session_job, ctx.session_id)
+    _set_job_meta(
+        ctx.redis_client, job.id, phase="transcribing", progress_percent=42
+    )
+
+    app = _make_jdr_app(make_db_session_dep, ctx.redis_client)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/services/jdr/jobs/{job.id}",
+            headers={"Authorization": f"Bearer {ctx.plain_token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["phase"] == "transcribing"
+    assert body["progress_percent"] == 42
+    assert 0 <= body["progress_percent"] <= 99
+
+
+async def test_get_job_done_transcription_reports_100(
+    ctx, make_db_session_dep
+):
+    """A successful transcription exposes phase=done and progress=100."""
+    queue = get_default_queue(ctx.redis_client)
+    job = enqueue_job(queue, transcribe_session_job, ctx.session_id)
+    _set_job_meta(
+        ctx.redis_client, job.id, phase="done", progress_percent=100
+    )
+
+    app = _make_jdr_app(make_db_session_dep, ctx.redis_client)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/services/jdr/jobs/{job.id}",
+            headers={"Authorization": f"Bearer {ctx.plain_token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["phase"] == "done"
+    assert body["progress_percent"] == 100
+
+
+# ---------------------------------------------------------------------------
+# US2 — best-effort fallback: bad metadata never breaks a valid job (BD-10)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_job_malformed_progress_falls_back_to_null(
+    ctx, make_db_session_dep
+):
+    """Out-of-domain phase + out-of-range percent must not 500: the route
+    returns 200 with null progress fields and an unchanged main status."""
+    queue = get_default_queue(ctx.redis_client)
+    job = enqueue_job(queue, transcribe_session_job, ctx.session_id)
+    _set_job_meta(
+        ctx.redis_client, job.id, phase="bogus-phase", progress_percent=150
+    )
+
+    app = _make_jdr_app(make_db_session_dep, ctx.redis_client)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/services/jdr/jobs/{job.id}",
+            headers={"Authorization": f"Bearer {ctx.plain_token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["phase"] is None
+    assert body["progress_percent"] is None
+    assert body["status"] == "queued"
+
+
+async def test_get_job_non_integer_progress_falls_back_to_null(
+    ctx, make_db_session_dep
+):
+    """A non-integer percent (e.g. a stray string) is ignored, not echoed."""
+    queue = get_default_queue(ctx.redis_client)
+    job = enqueue_job(queue, transcribe_session_job, ctx.session_id)
+    _set_job_meta(
+        ctx.redis_client, job.id, phase="transcribing", progress_percent="oops"
+    )
+
+    app = _make_jdr_app(make_db_session_dep, ctx.redis_client)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/services/jdr/jobs/{job.id}",
+            headers={"Authorization": f"Bearer {ctx.plain_token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    # phase is still a valid enum value, percent is dropped to null.
+    assert body["phase"] == "transcribing"
+    assert body["progress_percent"] is None
+
+
+# ---------------------------------------------------------------------------
+# US3 — a failed job keeps its last known progress (BD-10)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_job_failed_preserves_last_progress(
+    ctx, make_db_session_dep
+):
+    """A failed transcription exposes phase=failed and keeps the last known
+    progress percent instead of resetting it to 0/null."""
+    queue = get_default_queue(ctx.redis_client)
+    job = enqueue_job(queue, transcribe_session_job, ctx.session_id)
+    # Worker emitted some progress, then failed (phase flipped, percent kept).
+    _set_job_meta(
+        ctx.redis_client, job.id, phase="failed", progress_percent=73
+    )
+
+    app = _make_jdr_app(make_db_session_dep, ctx.redis_client)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/services/jdr/jobs/{job.id}",
+            headers={"Authorization": f"Bearer {ctx.plain_token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["phase"] == "failed"
+    assert body["progress_percent"] == 73
 
 
 # ---------------------------------------------------------------------------

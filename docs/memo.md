@@ -426,6 +426,22 @@ rq info --url redis://localhost:6379/0
 rq info --url redis://localhost:6379/0 --queues default
 ```
 
+### Progression de job (BD-10 — JobOut.phase / progress_percent)
+`GET /services/jdr/jobs/{id}` projette 2 champs best-effort lus sur `job.meta` :
+
+| Champ | Domaine | Note |
+|---|---|---|
+| `phase` | `reducing` / `transcribing` / `done` / `failed` / `null` | pas de `queued` (c'est un `status`) |
+| `progress_percent` | `0..99` en cours, `100` succès seul, `null` | métadonnée invalide/absente ⇒ `null`, jamais `500` |
+
+| Geste | Où |
+|---|---|
+| Émettre la progression worker | `_ProgressReporter` + callback `(done, total)` dans `app/jobs/jdr.py` |
+| Lire/valider côté HTTP | `_project_progress_meta` dans `app/services/jdr/router.py` |
+| Régénérer le contrat OpenAPI | `python -c "import json;from app.main import app;open('docs/context/api/openapi.json','w',encoding='utf-8').write(json.dumps(app.openapi(),ensure_ascii=False,indent=2,sort_keys=True))"` |
+
+Règle d'or : `status` reste la vérité du cycle de vie ; `100` seulement après persistance ; un échec préserve la dernière progression (émet `failed` sans percent).
+
 ### Rate limiting
 Sliding window Redis, 60 req/min par API key. Activer sur un router :
 ```python

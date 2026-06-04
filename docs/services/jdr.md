@@ -176,6 +176,43 @@ Le mode `diarised` (défaut) reste strictement inchangé Jalon 5 (`/mapping`, `/
 
 Voir [ADR 0007](../adr/0007-non-diarised-mode.md) pour le détail des décisions et alternatives rejetées.
 
+## 4ter. Suivi de progression des jobs (BD-10)
+
+`GET /services/jdr/jobs/{job_id}` reste l'unique surface de polling du front
+(pas de SSE/WebSocket en v1). La projection `JobOut` est enrichie de deux
+champs **best-effort** lus depuis la métadonnée du job RQ
+(`job.meta` / `save_meta()`, [doc RQ](https://python-rq.org/docs/jobs/)) :
+
+| Champ | Type | Valeurs |
+|---|---|---|
+| `phase` | enum nullable | `reducing` (préparation/segmentation audio), `transcribing`, `done`, `failed`, ou `null` |
+| `progress_percent` | entier nullable | `0..99` en cours, `100` succès terminal uniquement, ou `null` |
+
+Règles de contrat :
+
+- **`status` reste la source de vérité** du cycle de vie ; `phase` ne pilote
+  jamais la complétion. `queued` n'est volontairement pas une `phase` —
+  c'est déjà un `status`.
+- **Best-effort** : métadonnée absente, expirée, malformée, non-entière ou
+  hors domaine ⇒ les deux champs retombent à `null`, jamais un `500`. Un job
+  fraîchement enfilé renvoie `phase=null` / `progress_percent=null` (aucune
+  synthèse de `phase="queued"` ni `progress_percent=0`).
+- **`100` réservé au succès** : la boucle de chunks plafonne à `99` ;
+  `progress_percent=100` n'est émis qu'après persistance + transition d'état
+  réussies, avec `phase="done"`.
+- **Échec non destructif** : sur erreur, le worker émet `phase="failed"`
+  *sans* percent, ce qui **préserve la dernière progression connue** au lieu
+  de la remettre à zéro.
+
+Découplage des couches : `app/jobs/jdr.py` écrit la métadonnée au niveau du
+job RQ (`_ProgressReporter` + callback `(chunks_done, chunks_total)` passé à
+`_transcribe_with_optional_chunking`) ; `router.py` ne fait que projeter et
+valider la métadonnée via `_project_progress_meta`. Le contrat OpenAPI public
+est régénéré dans [`docs/context/api/openapi.json`](../context/api/openapi.json).
+
+Voir [`specs/010-job-progress-phase/`](../../specs/010-job-progress-phase/)
+pour la spec, le plan et les décisions de recherche complètes.
+
 ## 5. Hôte GPU LAN (transcription locale)
 
 Topologie cible (mémoire `infrastructure_topology.md`) :
