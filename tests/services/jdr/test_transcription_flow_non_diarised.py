@@ -204,6 +204,31 @@ async def test_transcribe_non_diarised_writes_chunks(
     assert ctx.audio_file.exists()
 
 
+async def test_transcribe_non_diarised_does_not_require_llm_api_key(
+    db_engine, monkeypatch, tmp_path
+):
+    def _fail_if_called():
+        raise AssertionError("non-diarised transcription must not build LLM adapter")
+
+    ctx = await _seed(
+        db_engine, monkeypatch, tmp_path, mode=TranscriptionMode.NON_DIARISED
+    )
+    monkeypatch.setattr("app.jobs.jdr.settings.LLM_API_KEY", "")
+    monkeypatch.setattr("app.jobs.jdr.get_llm_adapter", _fail_if_called)
+    _patch_adapter(monkeypatch, _LongMockAdapter())
+
+    await _transcribe_session(ctx.session_id)
+
+    async with ctx.sessionmaker() as db:
+        chunks = (
+            await db.execute(
+                select(Chunk).where(Chunk.session_id == ctx.session_id)
+            )
+        ).scalars().all()
+
+    assert chunks
+
+
 async def test_transcribe_non_diarised_no_chunking_when_short(
     db_engine, monkeypatch, tmp_path
 ):

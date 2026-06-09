@@ -10,6 +10,11 @@
 .gitleaks.toml
 .github
 
+# Docker metadata
+Dockerfile*
+.dockerignore
+docker-compose*.yml
+
 # Python
 __pycache__
 *.pyc
@@ -17,6 +22,7 @@ __pycache__
 *.pyd
 *.egg-info
 *.log*
+coverage
 .venv
 venv
 .pytest_cache

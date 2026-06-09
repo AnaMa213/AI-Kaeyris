@@ -314,6 +314,21 @@ _RQ_STATUS_TO_JOB_STATUS: dict[str, JobStatus] = {
 }
 
 
+def _failure_reason_from_job(job: Job) -> str | None:
+    if not job.is_failed:
+        return None
+    result = job.latest_result()
+    exc_info = getattr(result, "exc_string", None) if result else None
+    exc_info = exc_info or getattr(job, "_exc_info", None)
+    if exc_info:
+        # RQ stores the full traceback; expose only the last meaningful line.
+        for line in reversed(str(exc_info).splitlines()):
+            line = line.strip()
+            if line:
+                return line[:500]
+    return "Job failed without a recorded error."
+
+
 def _ensure_aware(dt):
     """RQ stores naive UTC datetimes; expose them as timezone-aware."""
     if dt is None:
@@ -1958,11 +1973,7 @@ async def get_job(
     rq_status = job.get_status(refresh=True)
     status_value = _RQ_STATUS_TO_JOB_STATUS.get(rq_status, JobStatus.FAILED)
 
-    failure_reason: str | None = None
-    if job.is_failed and getattr(job, "exc_info", None):
-        # RQ keeps the full traceback; keep just the last line to avoid
-        # leaking too much internal detail to the client.
-        failure_reason = str(job.exc_info).strip().splitlines()[-1][:500]
+    failure_reason = _failure_reason_from_job(job)
 
     # BD-10: best-effort transcription progress lives on the RQ job metadata.
     # Validate it here so malformed/expired values fall back to null instead

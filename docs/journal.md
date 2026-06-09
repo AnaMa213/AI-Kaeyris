@@ -597,3 +597,37 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
 - Progression instrumentée sur le seul chemin de transcription ; les autres
   jobs (narrative/elements/povs/summary) renvoient `phase`/`progress_percent`
   à `null`.
+
+---
+
+## 2026-06-09 - BD-11 : Connectivite LLM depuis le worker
+
+### Ce qui a ete fait
+
+- Ajout de `host.docker.internal:host-gateway` sur les services Compose `api`
+  et `worker` pour que les jobs puissent joindre un provider local lance sur
+  la machine hote, y compris sous Linux.
+- Durcissement de la factory `LLMAdapter` : si un conteneur tente d'utiliser un
+  `LLM_BASE_URL` loopback (`localhost`, `127.x`, etc.), l'erreur de config est
+  explicite au lieu de devenir un `APIConnectionError` opaque dans le job.
+- `GET /services/jdr/jobs/{id}` garantit maintenant un `failure_reason` non
+  vide pour un job RQ echoue, sans exposer toute la traceback.
+- Tests ajoutes sur la propagation de `LLM_BASE_URL`, la projection de job
+  summary echoue, et la non-regression transcription.
+
+### Ce que j'ai appris
+
+- **La connectivite reelle est celle du worker, pas celle du navigateur ni de
+  l'hote** : en Docker, `localhost` change de sens a chaque conteneur.
+- **Un echec provider doit etre visible via le contrat existant** : le frontend
+  poll deja `GET /jobs/{id}`, donc un `failure_reason` stable suffit sans
+  nouvelle API.
+- **La validation de config doit rester au bord adapter/config** : le service
+  JDR garde sa dependance sur `LLMAdapter`, sans connaitre le fournisseur.
+
+### Limitations acceptees
+
+- Pas de healthcheck LLM synchrone : appeler un provider peut couter cher ou
+  ralentir le demarrage.
+- Pas de nouvelle table d'erreurs : RQ reste la source de verite du statut
+  recent, avec projection API existante.

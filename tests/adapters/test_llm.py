@@ -73,6 +73,30 @@ def test_build_factory_allows_empty_key_for_local(monkeypatch):
     assert adapter.provider == "ollama"
 
 
+def test_build_factory_passes_explicit_base_url(monkeypatch):
+    base_url = "http://host.docker.internal:11434/v1"
+    monkeypatch.setattr("app.adapters.llm.settings.LLM_PROVIDER", "ollama")
+    monkeypatch.setattr("app.adapters.llm.settings.LLM_API_KEY", "")
+    monkeypatch.setattr("app.adapters.llm.settings.LLM_BASE_URL", base_url)
+
+    adapter = build_llm_adapter()
+
+    assert isinstance(adapter, OpenAICompatibleLLMAdapter)
+    assert adapter.base_url == base_url
+
+
+def test_build_factory_rejects_loopback_base_url_in_container(monkeypatch):
+    monkeypatch.setattr("app.adapters.llm.settings.LLM_PROVIDER", "ollama")
+    monkeypatch.setattr("app.adapters.llm.settings.LLM_API_KEY", "")
+    monkeypatch.setattr(
+        "app.adapters.llm.settings.LLM_BASE_URL", "http://localhost:11434/v1"
+    )
+    monkeypatch.setattr("app.adapters.llm._running_in_container", lambda: True)
+
+    with pytest.raises(RuntimeError, match="worker container"):
+        build_llm_adapter()
+
+
 def test_get_llm_adapter_caches(monkeypatch):
     monkeypatch.setattr("app.adapters.llm.settings.LLM_PROVIDER", "mock")
     a = get_llm_adapter()
@@ -126,6 +150,19 @@ async def test_transient_errors_are_remapped(exc):
     adapter = _adapter_with_failing_client(exc)
     with pytest.raises(TransientLLMError):
         await adapter.complete(system="s", user="u", max_tokens=10)
+
+
+async def test_connection_error_message_keeps_error_type():
+    adapter = _adapter_with_failing_client(
+        APIConnectionError(request=cast(object, None))  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(TransientLLMError) as exc_info:
+        await adapter.complete(system="s", user="u", max_tokens=10)
+
+    message = str(exc_info.value)
+    assert "APIConnectionError" in message
+    assert message.strip()
 
 
 @pytest.mark.parametrize(

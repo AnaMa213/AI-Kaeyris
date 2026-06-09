@@ -7,7 +7,9 @@ Together AI, OpenAI direct) by parameterising base_url + api_key + model.
 
 import time
 from functools import lru_cache
+from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlparse
 
 from openai import (
     APIConnectionError,
@@ -88,6 +90,28 @@ _DEFAULT_BASE_URLS: dict[str, str | None] = {
     "vllm": "http://localhost:8000/v1",
     "together": "https://api.together.xyz/v1",
 }
+_LOOPBACK_HOSTS = {"localhost", "0.0.0.0", "::1"}
+
+
+def _running_in_container() -> bool:
+    """Best-effort Docker/container detection for actionable config errors."""
+    return Path("/.dockerenv").exists()
+
+
+def _is_loopback_base_url(base_url: str) -> bool:
+    host = urlparse(base_url).hostname
+    return bool(host) and (host in _LOOPBACK_HOSTS or host.startswith("127."))
+
+
+def _resolve_base_url(provider: str) -> str | None:
+    base_url = settings.LLM_BASE_URL.strip() or _DEFAULT_BASE_URLS[provider]
+    if base_url and _running_in_container() and _is_loopback_base_url(base_url):
+        raise RuntimeError(
+            "LLM_BASE_URL points to a loopback host from inside the worker "
+            "container. Use a Docker-reachable host such as "
+            "http://host.docker.internal:<port>/v1 or a Compose service name."
+        )
+    return base_url
 
 
 class OpenAICompatibleLLMAdapter:
@@ -109,6 +133,7 @@ class OpenAICompatibleLLMAdapter:
     ) -> None:
         self.provider = provider
         self.model = model
+        self.base_url = base_url
         client_kwargs: dict[str, object] = {
             "api_key": api_key,
             "timeout": timeout_seconds,
@@ -243,7 +268,7 @@ def build_llm_adapter() -> LLMAdapter:
             "Set LLM_PROVIDER=mock for tests."
         )
 
-    base_url = settings.LLM_BASE_URL or _DEFAULT_BASE_URLS[provider]
+    base_url = _resolve_base_url(provider)
     return OpenAICompatibleLLMAdapter(
         provider=provider,
         model=settings.LLM_MODEL,

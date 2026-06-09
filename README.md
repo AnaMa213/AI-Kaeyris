@@ -175,6 +175,13 @@ LLM_BASE_URL=http://host.docker.internal:11434/v1
 LLM_API_KEY=ollama-noop
 ```
 
+En Compose, les appels LLM partent du conteneur `worker`. `localhost`
+designerait donc le worker lui-meme, pas ta machine hote. Pour un provider local
+qui tourne sur l'hote, utilise `host.docker.internal` ; `docker-compose.yml`
+declare explicitement `host-gateway` pour que ce nom fonctionne aussi sous
+Linux. Pour un provider lance comme service Compose, utilise son nom de service
+(`http://ollama:11434/v1` par exemple).
+
 Le code métier ne référence **jamais** un nom de fournisseur — il appelle `LLMAdapter.complete()`. Le prompt système (style narratif, formel, technique…) est défini par chaque service dans son propre module. Détails dans [`docs/memo.md`](./docs/memo.md) et [`docs/Jalon4.md`](./docs/Jalon4.md).
 
 ## Async jobs et rate limiting
