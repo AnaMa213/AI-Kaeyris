@@ -151,6 +151,7 @@ async def test_purge_after_audio_uploaded_deletes_file_and_resets_state(
         select(Session).where(Session.id == session_id)
     )
     assert session_row is not None
+    await db_session.refresh(session_row)
     assert session_row.state == SessionState.CREATED
     assert session_row.current_job_id is None
     audio_row = await db_session.scalar(
@@ -331,6 +332,11 @@ async def test_purge_clears_transcription_chunks_artifacts_and_current_job(
     raw_leftover = tmp_path / ".tmp" / "audio-reduce" / str(session_id) / "raw.m4a"
     raw_leftover.parent.mkdir(parents=True, exist_ok=True)
     raw_leftover.write_bytes(b"raw-leftover")
+    session_before_purge = await db_session.scalar(
+        select(Session).where(Session.id == session_id)
+    )
+    assert session_before_purge is not None
+    session_before_purge.edited_transcript_md = "Old manual transcription"
     db_session.add(
         Transcription(
             session_id=session_id,
@@ -382,8 +388,10 @@ async def test_purge_clears_transcription_chunks_artifacts_and_current_job(
         select(Session).where(Session.id == session_id)
     )
     assert session_row is not None
+    await db_session.refresh(session_row)
     assert session_row.state == SessionState.CREATED
     assert session_row.current_job_id is None
+    assert session_row.edited_transcript_md is None
 
     audio_row = await db_session.scalar(
         select(AudioSource).where(AudioSource.session_id == session_id)

@@ -373,6 +373,14 @@ async def _transcribe_session(
     if report_progress is not None:
         report_progress("done", 100)
 
+
+def _edited_transcript_source(session_row: Session) -> str | None:
+    content = session_row.edited_transcript_md
+    if content is None:
+        return None
+    return content if content.strip() else None
+
+
 async def _load_session_source_document(
     session_id: UUID,
     *,
@@ -402,8 +410,12 @@ async def _load_session_source_document(
                 f"Session {session_id} is not transcribed "
                 f"(state={session_row.state.value}); "
                 f"cannot generate {artefact_label}."
-            )
+        )
         campaign_context = session_row.campaign_context
+
+        edited_source = _edited_transcript_source(session_row)
+        if edited_source is not None:
+            return edited_source, campaign_context
 
         if session_row.transcription_mode is TranscriptionMode.NON_DIARISED:
             chunks = await ChunkRepository(db).list_for_session(session_id)
@@ -671,15 +683,15 @@ _SUMMARY_CHUNK_SEPARATOR = "\n\n---\n\n"
 async def _generate_summary(session_id: UUID) -> None:
     """Map-reduce session summary for `non_diarised` sessions (FR-006/007).
 
-    Step 0: load + validate (mode, state, ≥1 chunk).
+    Step 0: load + validate (mode, state, source text).
     Step 1 (reset transaction): NULL every chunks.summary_text + DELETE
         artifacts(kind IN ('narrative', 'elements') OR kind LIKE 'pov:%').
         Committed before any LLM call so that DB locks don't span the
         long LLM phase (research.md §2). The old `summary` artifact
         survives this step — it's only overwritten at the end.
-    Step 2 (map): one LLM call per chunk, in `ordre` ASC, persisted
-        inline via ChunkRepository.update_summary_text. One commit per
-        chunk to keep transactions short.
+    Step 2 (map): one LLM call per automatic or transient edited chunk, in
+        `ordre` ASC. Automatic chunk summaries are persisted inline; transient
+        chunks derived from an edited transcription never rewrite jdr_chunks.
     Step 3 (reduce): if > 1 chunk, consolidate the partial summaries
         via one more LLM call. Otherwise the single partial summary is
         used as-is.
@@ -704,14 +716,30 @@ async def _generate_summary(session_id: UUID) -> None:
                 f"Session {session_id} is not transcribed "
                 f"(state={session_row.state.value}); cannot generate summary."
             )
-        chunks = await ChunkRepository(db).list_for_session(session_id)
-        if not chunks:
-            raise PermanentJobError(
-                f"Session {session_id} has no chunks; cannot generate summary."
+        edited_source = _edited_transcript_source(session_row)
+        uses_edited_source = edited_source is not None
+        if uses_edited_source:
+            edited_chunks = chunk_text(
+                edited_source,
+                max_chars=settings.KAEYRIS_CHUNK_MAX_CHARS,
             )
-        # Capture light projection (id, ordre, text) so we don't hold ORM
-        # objects across DB sessions.
-        chunk_data = [(c.id, c.ordre, c.text) for c in chunks]
+            if not edited_chunks:
+                raise PermanentJobError(
+                    f"Session {session_id} has a blank edited transcription; "
+                    "cannot generate summary."
+                )
+            chunk_data = [
+                (None, ordre, text) for ordre, text in enumerate(edited_chunks)
+            ]
+        else:
+            chunks = await ChunkRepository(db).list_for_session(session_id)
+            if not chunks:
+                raise PermanentJobError(
+                    f"Session {session_id} has no chunks; cannot generate summary."
+                )
+            # Capture light projection (id, ordre, text) so we don't hold ORM
+            # objects across DB sessions.
+            chunk_data = [(c.id, c.ordre, c.text) for c in chunks]
 
     # --- Step 1 : reset transaction (cascade FR-011) ------------------------
     from sqlalchemy import delete as sa_delete
@@ -749,11 +777,12 @@ async def _generate_summary(session_id: UUID) -> None:
         except PermanentLLMError as exc:
             raise PermanentJobError(str(exc)) from exc
         partial_summaries.append(partial)
-        async with sessionmaker() as db:
-            await ChunkRepository(db).update_summary_text(
-                chunk_id, summary_text=partial
-            )
-            await db.commit()
+        if chunk_id is not None:
+            async with sessionmaker() as db:
+                await ChunkRepository(db).update_summary_text(
+                    chunk_id, summary_text=partial
+                )
+                await db.commit()
 
     # --- Step 3 : reduce ----------------------------------------------------
     if len(partial_summaries) == 1:

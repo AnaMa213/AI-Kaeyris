@@ -325,6 +325,7 @@ class Session(Base):
     campaign_context: Mapped[str | None] = mapped_column(
         String(8000), nullable=True
     )
+    edited_transcript_md: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_job_id: Mapped[str | None] = mapped_column(
         String(64),
         ForeignKey("jdr_jobs.id", ondelete="SET NULL"),

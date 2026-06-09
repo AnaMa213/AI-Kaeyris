@@ -152,6 +152,10 @@ class AudioUploadTooLargeError(Exception):
         self.limit_bytes = limit_bytes
 
 
+class SessionNotTranscribedForEditError(Exception):
+    """A transcription edit was attempted before transcription completed."""
+
+
 # ---------------------------------------------------------------------------
 # Campaigns (BD-6)
 # ---------------------------------------------------------------------------
@@ -314,6 +318,36 @@ async def list_session_chunks(
     sémantiquement bizarre — une session diarised n'aura jamais de chunks).
     """
     return await ChunkRepository(db).list_for_session(session.id)
+
+
+async def get_session_for_transcription_edit(
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    gm_key_id: UUID,
+    campaign_id: UUID | None = None,
+) -> Session | None:
+    return await SessionRepository(db).get_for_gm(
+        session_id, gm_key_id, campaign_id
+    )
+
+
+async def save_session_transcription_edit(
+    db: AsyncSession,
+    *,
+    session: Session,
+    content_md: str,
+) -> Session:
+    if session.state != SessionState.TRANSCRIBED:
+        raise SessionNotTranscribedForEditError(
+            f"Session {session.id} is not transcribed."
+        )
+    updated = await SessionRepository(db).update_edited_transcript(
+        session, content_md=content_md
+    )
+    await db.commit()
+    await db.refresh(updated)
+    return updated
 
 
 # ---------------------------------------------------------------------------
@@ -927,6 +961,7 @@ async def purge_audio_for_session(
     await TranscriptionRepository(db).delete_for_session(session.id)
     await ChunkRepository(db).delete_for_session(session.id)
     await ArtifactRepository(db).delete_for_session(session.id)
+    await repo.clear_edited_transcript(session.id)
     await repo.clear_current_job_id(session.id)
     await repo.update_state(session.id, SessionState.CREATED)
     await db.commit()

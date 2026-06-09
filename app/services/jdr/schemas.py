@@ -215,6 +215,28 @@ class TranscriptionOut(JdrSchema):
     completed_at: datetime
 
 
+class TranscriptionEditIn(JdrSchema):
+    """Payload accepted by ``PUT /services/jdr/sessions/{id}/transcription``."""
+
+    content_md: str = Field(..., min_length=1)
+
+    @field_validator("content_md")
+    @classmethod
+    def reject_blank_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Edited transcription cannot be blank.")
+        return value
+
+
+class TranscriptionEditOut(JdrSchema):
+    """Projection returned after persisting an edited transcription."""
+
+    session_id: UUID
+    content_md: str
+    is_edited: bool = True
+    updated_at: datetime
+
+
 # ---------------------------------------------------------------------------
 # PJ — Personnages-joueurs (US3)
 # ---------------------------------------------------------------------------

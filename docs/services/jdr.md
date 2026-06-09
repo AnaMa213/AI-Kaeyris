@@ -110,6 +110,13 @@ Les API keys historiques restent supportées pour les clients machine. Pour comp
 - `POST /services/jdr/sessions` exige maintenant `campaign_id`. `GET /services/jdr/sessions?campaign_id=...` filtre explicitement par campagne ; sans query param, la liste non filtrée reste disponible pour compatibilité.
 - Les PJ sont scoppés par campagne depuis BD-7. `POST /services/jdr/pjs` accepte un `campaign_id` optionnel, retombe sur la campagne par défaut du GM web si absent, et accepte `user_id` optionnel pour lier le PJ à un compte. `GET /services/jdr/pjs?campaign_id=...` filtre une campagne après contrôle de membership ; sans filtre, il retourne les PJ des campagnes visibles par l'utilisateur. `PATCH /services/jdr/pjs/{pj_id}` renomme un PJ et met à jour son lien `user_id` ; un `user_id: null` explicite délie le PJ, tandis qu'un champ absent ne modifie pas le lien.
 
+**Transcription editable BD-13** :
+- `PUT /services/jdr/sessions/{session_id}/transcription` persiste un override Markdown manuel (`content_md`) pour une session `transcribed` appartenant au GM courant.
+- `GET /services/jdr/sessions/{session_id}/transcription.md` renvoie l'override exact s'il existe ; sinon le rendu automatique historique reste utilisé.
+- L'override est stocké au niveau session et ne modifie jamais les sources automatiques (`jdr_transcriptions.segments_json`, `jdr_chunks.text`).
+- Les générations lancées après édition préfèrent ce Markdown corrigé comme source. En mode `non_diarised`, le summary découpe l'override en chunks transitoires pour le map-reduce, sans réécrire `jdr_chunks.text`.
+- Pas de reset/delete dans BD-13 : remplacer l'override se fait par un nouveau `PUT`.
+
 **Bascule transcription cloud → local** (sans modifier le code) :
 ```ini
 TRANSCRIPTION_PROVIDER=local
@@ -138,8 +145,8 @@ Pipeline alternatif opt-in, posé via `transcription_mode: "non_diarised"` à la
     (cascade: NULL'ifie summary_text + DELETE narrative/elements/pov:*
      dans une transaction unique AVANT les LLM calls — FR-011)
   ↓
-[POST /artifacts/{narrative|elements|povs}] -> consomment chunks.summary_text
-    (refusé 409 no-summary si summary pas généré au préalable — FR-010)
+[POST /artifacts/{narrative|elements|povs}] -> consomment l'override BD-13 si présent,
+    sinon chunks.summary_text (refus 409 no-summary si aucune source exploitable)
 ```
 
 Le mode `diarised` (défaut) reste strictement inchangé Jalon 5 (`/mapping`, `/transcription`, `/artifacts/*` historiques).
@@ -156,12 +163,13 @@ Le mode `diarised` (défaut) reste strictement inchangé Jalon 5 (`/mapping`, `/
 
 | Endpoint | mode diarised | mode non_diarised |
 |---|---|---|
-| `GET /transcription[.md]` | 200 | **409 wrong-mode** → utiliser `/chunks` |
+| `GET /transcription` | 200 | **409 wrong-mode** → utiliser `/chunks` |
+| `GET /transcription.md` | 200, ou override BD-13 si présent | override BD-13 si présent, sinon **409 wrong-mode** → utiliser `/chunks` |
 | `PUT/GET /mapping` | 200 | **409 wrong-mode** → utiliser `/players` |
 | `GET /chunks` | **409 wrong-mode** → utiliser `/transcription` | 200 |
 | `POST/GET /players` | **409 wrong-mode** → utiliser `/mapping` | 200 |
 | `POST/GET /artifacts/summary[.md]` | **409 wrong-mode** (hors scope sub-jalon) | 200 |
-| `POST /artifacts/{narrative,elements,povs}` | 200 (Jalon 5) | 200 si `summary` existe, sinon **409 no-summary** |
+| `POST /artifacts/{narrative,elements,povs}` | 200 (Jalon 5) | 200 si `summary` ou override BD-13 existe, sinon **409 no-summary** |
 
 ### Configuration
 

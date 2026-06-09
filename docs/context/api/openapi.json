@@ -1406,6 +1406,52 @@
         "title": "SystemRole",
         "type": "string"
       },
+      "TranscriptionEditIn": {
+        "description": "Payload accepted by ``PUT /services/jdr/sessions/{id}/transcription``.",
+        "properties": {
+          "content_md": {
+            "minLength": 1,
+            "title": "Content Md",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content_md"
+        ],
+        "title": "TranscriptionEditIn",
+        "type": "object"
+      },
+      "TranscriptionEditOut": {
+        "description": "Projection returned after persisting an edited transcription.",
+        "properties": {
+          "content_md": {
+            "title": "Content Md",
+            "type": "string"
+          },
+          "is_edited": {
+            "default": true,
+            "title": "Is Edited",
+            "type": "boolean"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "content_md",
+          "updated_at"
+        ],
+        "title": "TranscriptionEditOut",
+        "type": "object"
+      },
       "TranscriptionMode": {
         "description": "Per-session transcription posture — see feature 002 data-model.md §2.\n\n- ``DIARISED`` (default): Jalon 5 pipeline, segments stored in\n  ``jdr_transcriptions`` with speaker labels.\n- ``NON_DIARISED``: chunked transcription stored in ``jdr_chunks``,\n  no speaker labels, downstream artefacts consume per-chunk summaries.",
         "enum": [
@@ -3312,7 +3358,7 @@
         ]
       },
       "post": {
-        "description": "Enqueue the map-reduce summary job for a non_diarised session.\n\nPre-conditions:\n- session must belong to the MJ (404 otherwise)\n- session must be in non_diarised mode (409 wrong-mode)\n- session must be in state=transcribed (409 session-not-transcribed)\n- session must have at least 1 chunk (409 no-chunks)\n\nSide effect documented under FR-011: each new summary job resets\nchunks.summary_text and cascade-deletes existing narrative /\nelements / pov:* artefacts for the session. The atomicity is\nenforced by ``_generate_summary`` (see research.md §2).",
+        "description": "Enqueue the map-reduce summary job for a non_diarised session.\n\nPre-conditions:\n- session must belong to the MJ (404 otherwise)\n- session must be in non_diarised mode (409 wrong-mode)\n- session must be in state=transcribed (409 session-not-transcribed)\n- session must have at least 1 chunk, unless it has an edited Markdown\n  transcription override (409 no-chunks)\n\nSide effect documented under FR-011: each new summary job resets\nchunks.summary_text and cascade-deletes existing narrative /\nelements / pov:* artefacts for the session. The atomicity is\nenforced by ``_generate_summary`` (see research.md §2).",
         "operationId": "post_summary_services_jdr_sessions__session_id__artifacts_summary_post",
         "parameters": [
           {
@@ -3845,6 +3891,62 @@
           }
         ],
         "summary": "Fetch the diarised transcription of a session.",
+        "tags": [
+          "jdr"
+        ]
+      },
+      "put": {
+        "operationId": "put_transcription_edit_services_jdr_sessions__session_id__transcription_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TranscriptionEditIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptionEditOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Persist the edited Markdown transcription for a session.",
         "tags": [
           "jdr"
         ]

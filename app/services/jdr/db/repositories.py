@@ -508,6 +508,21 @@ class SessionRepository(_BaseRepository):
     async def clear_current_job_id(self, session_id: UUID) -> None:
         await self.set_current_job_id(session_id, None)
 
+    async def update_edited_transcript(
+        self, session: Session, *, content_md: str
+    ) -> Session:
+        session.edited_transcript_md = content_md
+        await self._session.flush()
+        await self._session.refresh(session)
+        return session
+
+    async def clear_edited_transcript(self, session_id: UUID) -> None:
+        await self._session.execute(
+            update(Session)
+            .where(Session.id == session_id)
+            .values(edited_transcript_md=None)
+        )
+
 
 class TranscriptionRepository(_BaseRepository):
     """``jdr_transcriptions`` access. Used by US1 (write) and every other

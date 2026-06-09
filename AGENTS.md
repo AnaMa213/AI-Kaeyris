@@ -265,7 +265,7 @@ Deux fichiers dans `docs/`, complémentaires et tenus à jour par Codex :
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-[`specs/012-pj-update/plan.md`](specs/012-pj-update/plan.md).
+[`specs/013-transcription-edit/plan.md`](specs/013-transcription-edit/plan.md).
 Companion artifacts in the same directory: `spec.md`, `research.md`,
 `data-model.md`, `contracts/`, `quickstart.md`.
 <!-- SPECKIT END -->

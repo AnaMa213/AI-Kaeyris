@@ -132,12 +132,20 @@ alembic history                     # historique des migrations
 | `POST /services/jdr/pjs` | Crée un PJ scoppé campagne ; `campaign_id` et `user_id` sont optionnels |
 | `GET /services/jdr/pjs?campaign_id=<uuid>` | Liste les PJ d'une campagne ou, sans filtre, ceux des campagnes visibles |
 | `PATCH /services/jdr/pjs/<pj_id>` | Renomme un PJ ou modifie son `user_id`; `user_id: null` délie explicitement |
+| `PUT /services/jdr/sessions/{id}/transcription` | Persiste l'override Markdown corrigé BD-13 pour une session `transcribed` |
+| `GET /services/jdr/sessions/{id}/transcription.md` | Renvoie l'override Markdown s'il existe, sinon le rendu automatique |
 
 | BD-9 | Action |
 |---|---|
 | `KAEYRIS_AUDIO_MAX_UPLOAD_BYTES` | Limite raw upload ; defaut `524288000` bytes (500 MiB) |
 | `POST /services/jdr/sessions/{id}/audio` | Stocke `.tmp/audio-reduce/<session_id>/raw.m4a`, renvoie `AudioUploadOut` + job `transcription` |
 | Worker transcription | Prepare `audios/<session_id>.m4a` via `ffmpeg`, supprime le raw, puis appelle l'adapter |
+
+| BD-13 | Action |
+|---|---|
+| Colonne `jdr_sessions.edited_transcript_md` | Override Markdown nullable ; `NULL` = fallback automatique |
+| `content_md` vide/blanc | Refusé en `422`, pas de reset implicite |
+| Générations après édition | Utilisent l'override comme source ; les chunks/segments automatiques restent intacts |
 
 ```powershell
 curl -X POST http://localhost:8000/services/jdr/campaigns `
