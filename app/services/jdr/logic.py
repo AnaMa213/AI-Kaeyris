@@ -15,6 +15,7 @@ import os
 import secrets
 import shutil
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,8 @@ from uuid import UUID
 
 from argon2 import PasswordHasher
 from redis import Redis
+from rq.exceptions import NoSuchJobError
+from rq.job import Job as RQJob
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile
@@ -65,6 +68,9 @@ logger = get_logger(__name__)
 _CHUNK_SIZE = 64 * 1024  # 64 KiB streaming reads
 ACCEPTED_AUDIO_MIMES: frozenset[str] = frozenset(
     {"audio/mp4", "audio/m4a", "audio/x-m4a"}
+)
+_ACTIVE_RQ_JOB_STATUSES: frozenset[str] = frozenset(
+    {"queued", "deferred", "scheduled", "started"}
 )
 
 
@@ -132,6 +138,10 @@ class AudioPurgeBlockedError(Exception):
     ``state == transcribing`` is the only refused state: a worker may have
     the file open and be writing derived rows.
     """
+
+
+class SessionDeleteBlockedError(Exception):
+    """The session cannot be deleted while active work may still write to it."""
 
 
 class NoAudioToPurgeError(Exception):
@@ -441,6 +451,81 @@ async def get_session(
     return await SessionRepository(db).get_for_gm(
         session_id, gm_key_id, campaign_id
     )
+
+
+async def delete_session(
+    db: AsyncSession,
+    *,
+    session: Session,
+    redis_client: Redis,
+) -> None:
+    repo = SessionRepository(db)
+    _ensure_session_deletable(session=session, redis_client=redis_client)
+    audio = await repo.get_audio_source(session.id)
+    _delete_session_audio_files(session=session, audio=audio)
+    await repo.delete(session)
+    await db.commit()
+
+
+def _ensure_session_deletable(*, session: Session, redis_client: Redis) -> None:
+    if session.state is SessionState.TRANSCRIBING:
+        raise SessionDeleteBlockedError(
+            f"Session {session.id} is currently transcribing."
+        )
+    if session.current_job_id is None:
+        return
+    if _is_rq_job_active(redis_client, session.current_job_id):
+        raise SessionDeleteBlockedError(
+            f"Session {session.id} has active job {session.current_job_id}."
+        )
+
+
+def _is_rq_job_active(redis_client: Redis, job_id: str) -> bool:
+    try:
+        job = RQJob.fetch(job_id, connection=redis_client)
+    except NoSuchJobError:
+        return False
+    return job.get_status(refresh=True) in _ACTIVE_RQ_JOB_STATUSES
+
+
+def _delete_session_audio_files(
+    *, session: Session, audio: AudioSource | None
+) -> None:
+    if audio is not None and audio.purged_at is None:
+        full_path = Path(settings.KAEYRIS_DATA_DIR) / audio.path
+        try:
+            full_path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning(
+                "session.delete_audio_unlink_failed",
+                session_id=str(session.id),
+                audio_path=str(full_path),
+                error=str(exc),
+            )
+    best_effort_remove_tree(
+        _raw_audio_reduce_dir(session.id),
+        event="session.delete_raw_rmtree_failed",
+    )
+
+
+async def enqueue_session_job(
+    db: AsyncSession,
+    *,
+    session: Session,
+    redis_client: Redis,
+    kind: JobKind,
+    job_func: Callable[..., object],
+) -> str:
+    queue = get_default_queue(redis_client)
+    job = enqueue_job(queue, job_func, session.id, transient_errors=True)
+    await JobRepository(db).upsert_status(
+        job.id,
+        kind=kind,
+        session_id=session.id,
+        status=JobStatus.QUEUED,
+    )
+    await SessionRepository(db).set_current_job_id(session.id, job.id)
+    return job.id
 
 
 # ---------------------------------------------------------------------------

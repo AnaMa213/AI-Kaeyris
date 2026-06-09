@@ -125,6 +125,7 @@ alembic history                     # historique des migrations
 | `DELETE /services/jdr/campaigns/{campaign_id}` | Supprime seulement une campagne vide ; `409` si elle contient des sessions |
 | `POST /services/jdr/sessions` | Exige `campaign_id` dans le body |
 | `GET /services/jdr/sessions?campaign_id=<uuid>` | Filtre les sessions d'une campagne après vérification de membership |
+| `DELETE /services/jdr/sessions/{id}` | Supprime session + dépendances ; `204`, `404 session-not-found`, `409 session-delete-blocked` si transcription ou job RQ courant actif |
 | `SessionOut.current_job_id` | Job de transcription courant/récent ; reste renseigné jusqu'au DELETE audio |
 | `GET /services/jdr/sessions/{id}/audio` | Sert l'audio source non purgé ; supporte `Range: bytes=...` pour le player |
 | `DELETE /services/jdr/sessions/{id}/audio` | Reset idempotent vers `created`, purge audio, dérivés et `current_job_id`; `409` si `transcribing` |

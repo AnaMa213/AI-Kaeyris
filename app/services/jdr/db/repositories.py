@@ -523,6 +523,10 @@ class SessionRepository(_BaseRepository):
             .values(edited_transcript_md=None)
         )
 
+    async def delete(self, session: Session) -> None:
+        await self._session.delete(session)
+        await self._session.flush()
+
 
 class TranscriptionRepository(_BaseRepository):
     """``jdr_transcriptions`` access. Used by US1 (write) and every other

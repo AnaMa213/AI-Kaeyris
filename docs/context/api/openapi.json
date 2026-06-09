@@ -2880,6 +2880,51 @@
       }
     },
     "/services/jdr/sessions/{session_id}": {
+      "delete": {
+        "operationId": "delete_session_services_jdr_sessions__session_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Session not found or not visible to the current GM."
+          },
+          "409": {
+            "description": "Session has active work and cannot be deleted yet."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Delete one of the MJ's sessions.",
+        "tags": [
+          "jdr"
+        ]
+      },
       "get": {
         "operationId": "get_session_services_jdr_sessions__session_id__get",
         "parameters": [
