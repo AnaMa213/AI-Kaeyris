@@ -95,6 +95,7 @@ from app.services.jdr.schemas import (
     PjCreate,
     PjMini,
     PjOut,
+    PjUpdate,
     PlayerCreate,
     PlayerOut,
     PlayerSessionItem,
@@ -193,6 +194,14 @@ class PjForbiddenAppError(AppError):
     status_code = status.HTTP_403_FORBIDDEN
     error_type = "pj-forbidden"
     title = "Forbidden"
+
+
+class InvalidUserAssignmentError(AppError):
+    """The ``user_id`` assigned to a PJ does not reference an existing user."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "invalid-user"
+    title = "Invalid user"
 
 
 class InvalidPlayerEnrolmentError(AppError):
@@ -790,7 +799,7 @@ async def create_pj(
     except (PjForbiddenError, CampaignAccessError) as exc:
         raise PjForbiddenAppError(detail=str(exc)) from exc
     except PjAssignmentError as exc:
-        raise PjNotFoundError(detail=str(exc)) from exc
+        raise InvalidUserAssignmentError(detail=str(exc)) from exc
     return PjOut.model_validate(pj)
 
 
@@ -820,6 +829,39 @@ async def list_pjs(
 # ---------------------------------------------------------------------------
 # Speaker ↔ PJ mapping (US3 — sub-lot 5a)
 # ---------------------------------------------------------------------------
+
+
+@router.patch(
+    "/pjs/{pj_id}",
+    response_model=PjOut,
+    summary="Partially update a PJ owned by the current MJ.",
+)
+async def update_pj(
+    pj_id: UUID,
+    payload: PjUpdate,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> PjOut:
+    try:
+        pj = await logic.update_pj(
+            db,
+            pj_id=pj_id,
+            gm_key_id=auth.id,
+            name=payload.name,
+            user_id=payload.user_id,
+            update_name="name" in payload.model_fields_set,
+            update_user_id="user_id" in payload.model_fields_set,
+            requester_user_id=auth.user_id,
+        )
+    except DuplicatePjError as exc:
+        raise DuplicatePjConflictError(detail=str(exc)) from exc
+    except PjAssignmentError as exc:
+        raise InvalidUserAssignmentError(detail=str(exc)) from exc
+    except (PjForbiddenError, CampaignAccessError) as exc:
+        raise PjNotFoundError(detail=str(exc)) from exc
+    if pj is None:
+        raise PjNotFoundError(detail=f"PJ {pj_id} not found.")
+    return PjOut.model_validate(pj)
 
 
 @router.put(

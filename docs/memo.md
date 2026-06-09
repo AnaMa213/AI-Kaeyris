@@ -131,6 +131,7 @@ alembic history                     # historique des migrations
 | `KAEYRIS_AUDIO_MAX_UPLOAD_BYTES` | Limite raw upload BD-9 avant reduce serveur ; défaut 500 MiB |
 | `POST /services/jdr/pjs` | Crée un PJ scoppé campagne ; `campaign_id` et `user_id` sont optionnels |
 | `GET /services/jdr/pjs?campaign_id=<uuid>` | Liste les PJ d'une campagne ou, sans filtre, ceux des campagnes visibles |
+| `PATCH /services/jdr/pjs/<pj_id>` | Renomme un PJ ou modifie son `user_id`; `user_id: null` délie explicitement |
 
 | BD-9 | Action |
 |---|---|
