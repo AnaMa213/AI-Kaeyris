@@ -83,6 +83,7 @@ async def _seed_chunks_session(
     chunk_texts: list[str],
     state: SessionState = SessionState.TRANSCRIBED,
     mode: TranscriptionMode = TranscriptionMode.NON_DIARISED,
+    edited_transcript_md: str | None = None,
 ) -> SummaryCtx:
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
     monkeypatch.setattr("app.jobs.jdr.get_sessionmaker", lambda: sm)
@@ -108,6 +109,7 @@ async def _seed_chunks_session(
                 gm_key_id=gm_id,
                 state=state,
                 transcription_mode=mode,
+                edited_transcript_md=edited_transcript_md,
             )
         )
         for i, text in enumerate(chunk_texts):
@@ -235,6 +237,115 @@ async def test_generate_summary_single_chunk_skips_reduce(
         )
     assert artifact is not None
     assert artifact.content_json == {"text": "Le seul résumé de la session."}
+
+
+async def test_generate_summary_uses_edited_markdown_source(
+    db_engine, monkeypatch
+):
+    ctx = await _seed_chunks_session(
+        db_engine,
+        monkeypatch,
+        chunk_texts=["Texte automatique qui ne doit pas être envoyé."],
+        edited_transcript_md="## Correction\n\nTexte corrigé distinctif.",
+    )
+    async with ctx.sessionmaker() as db:
+        chunk = await db.scalar(
+            select(Chunk).where(Chunk.session_id == ctx.session_id)
+        )
+        assert chunk is not None
+        chunk.summary_text = "Résumé périmé du chunk automatique."
+        await db.commit()
+
+    stub = _SequencedStubLLM(responses=["Résumé du texte corrigé."])
+    _patch_llm(monkeypatch, stub)
+
+    from app.jobs.jdr import _generate_summary
+
+    await _generate_summary(ctx.session_id)
+
+    assert len(stub.calls) == 1
+    assert "Texte corrigé distinctif" in stub.calls[0]["user"]
+    assert "Texte automatique" not in stub.calls[0]["user"]
+
+    async with ctx.sessionmaker() as db:
+        chunk = await db.scalar(
+            select(Chunk).where(Chunk.session_id == ctx.session_id)
+        )
+        artifact = await db.scalar(
+            select(Artifact).where(
+                Artifact.session_id == ctx.session_id,
+                Artifact.kind == "summary",
+            )
+        )
+    assert chunk is not None
+    assert chunk.text == "Texte automatique qui ne doit pas être envoyé."
+    assert chunk.summary_text is None
+    assert artifact is not None
+    assert artifact.content_json == {"text": "Résumé du texte corrigé."}
+
+
+async def test_generate_summary_falls_back_to_automatic_chunks_without_edit(
+    ctx_1_chunk, monkeypatch
+):
+    stub = _SequencedStubLLM(responses=["Résumé depuis le chunk auto."])
+    _patch_llm(monkeypatch, stub)
+
+    from app.jobs.jdr import _generate_summary
+
+    await _generate_summary(ctx_1_chunk.session_id)
+
+    assert len(stub.calls) == 1
+    assert "Une session entière" in stub.calls[0]["user"]
+
+
+async def test_generation_source_helper_prefers_edited_markdown(
+    db_engine, monkeypatch
+):
+    ctx = await _seed_chunks_session(
+        db_engine,
+        monkeypatch,
+        chunk_texts=["Chunk automatique sans summary_text."],
+        edited_transcript_md="Texte édité pour les dérivés.",
+    )
+
+    from app.jobs.jdr import _load_session_source_document
+
+    source_text, _ = await _load_session_source_document(
+        ctx.session_id, artefact_label="narrative"
+    )
+
+    assert source_text == "Texte édité pour les dérivés."
+
+
+async def test_generation_source_helper_uses_latest_edited_markdown(
+    db_engine, monkeypatch
+):
+    ctx = await _seed_chunks_session(
+        db_engine,
+        monkeypatch,
+        chunk_texts=["Chunk automatique."],
+        edited_transcript_md="Première version corrigée.",
+    )
+
+    from app.jobs.jdr import _load_session_source_document
+
+    source_text, _ = await _load_session_source_document(
+        ctx.session_id, artefact_label="elements"
+    )
+    assert source_text == "Première version corrigée."
+
+    async with ctx.sessionmaker() as db:
+        session_row = await db.scalar(
+            select(Session).where(Session.id == ctx.session_id)
+        )
+        assert session_row is not None
+        session_row.edited_transcript_md = "Deuxième version corrigée."
+        await db.commit()
+
+    source_text, _ = await _load_session_source_document(
+        ctx.session_id, artefact_label="elements"
+    )
+    assert source_text == "Deuxième version corrigée."
 
 
 # ---------------------------------------------------------------------------

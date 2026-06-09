@@ -107,6 +107,8 @@ from app.services.jdr.schemas import (
     SessionPlayersOut,
     SessionUpdate,
     SummaryArtifactOut,
+    TranscriptionEditIn,
+    TranscriptionEditOut,
     TranscriptionOut,
     TranscriptionSegmentOut,
 )
@@ -142,6 +144,10 @@ class SessionNotTranscribedError(AppError):
     status_code = status.HTTP_409_CONFLICT
     error_type = "session-not-transcribed"
     title = "Session not transcribed"
+
+
+class TranscriptionEditNotTranscribedError(SessionNotTranscribedError):
+    """Saving an edit requires an already completed transcription."""
 
 
 class JobNotFoundError(AppError):
@@ -345,6 +351,10 @@ def _ensure_aware(dt):
     if dt.tzinfo is None:
         return dt.replace(tzinfo=UTC)
     return dt
+
+
+def _has_edited_transcription(session_row: SessionModel) -> bool:
+    return bool((session_row.edited_transcript_md or "").strip())
 
 
 # Closed phase vocabulary mirrored from JobOut (BD-10). Kept here so the route
@@ -1095,6 +1105,37 @@ async def get_transcription(
     )
 
 
+@router.put(
+    "/sessions/{session_id}/transcription",
+    response_model=TranscriptionEditOut,
+    summary="Persist the edited Markdown transcription for a session.",
+)
+async def put_transcription_edit(
+    session_id: UUID,
+    payload: TranscriptionEditIn,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> TranscriptionEditOut:
+    campaign_id = await _campaign_id_for_auth(db, auth)
+    session = await logic.get_session_for_transcription_edit(
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
+    )
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    try:
+        updated = await logic.save_session_transcription_edit(
+            db, session=session, content_md=payload.content_md
+        )
+    except logic.SessionNotTranscribedForEditError as exc:
+        raise TranscriptionEditNotTranscribedError(detail=str(exc)) from exc
+    return TranscriptionEditOut(
+        session_id=updated.id,
+        content_md=updated.edited_transcript_md or "",
+        is_edited=True,
+        updated_at=updated.updated_at,
+    )
+
+
 @router.get(
     "/sessions/{session_id}/transcription.md",
     response_class=Response,
@@ -1111,6 +1152,17 @@ async def get_transcription_md(
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    if session.edited_transcript_md is not None:
+        if session.state != SessionState.TRANSCRIBED:
+            raise TranscriptionNotReadyError(
+                detail=(
+                    f"Transcription for session {session_id} is not available yet."
+                ),
+            )
+        return Response(
+            content=session.edited_transcript_md,
+            media_type="text/markdown; charset=utf-8",
+        )
     if session.transcription_mode is TranscriptionMode.NON_DIARISED:
         raise WrongModeError(
             detail=(
@@ -1162,7 +1214,7 @@ async def post_narrative(
         )
     if session_row.transcription_mode is TranscriptionMode.NON_DIARISED:
         summary_row = await ArtifactRepository(db).get(session_id, "summary")
-        if summary_row is None:
+        if summary_row is None and not _has_edited_transcription(session_row):
             raise NoSummaryError(
                 detail=(
                     f"Session {session_id} has no global summary yet. "
@@ -1277,7 +1329,7 @@ async def post_elements(
         )
     if session_row.transcription_mode is TranscriptionMode.NON_DIARISED:
         summary_row = await ArtifactRepository(db).get(session_id, "summary")
-        if summary_row is None:
+        if summary_row is None and not _has_edited_transcription(session_row):
             raise NoSummaryError(
                 detail=(
                     f"Session {session_id} has no global summary yet. "
@@ -1399,7 +1451,8 @@ async def post_summary(
     - session must belong to the MJ (404 otherwise)
     - session must be in non_diarised mode (409 wrong-mode)
     - session must be in state=transcribed (409 session-not-transcribed)
-    - session must have at least 1 chunk (409 no-chunks)
+    - session must have at least 1 chunk, unless it has an edited Markdown
+      transcription override (409 no-chunks)
 
     Side effect documented under FR-011: each new summary job resets
     chunks.summary_text and cascade-deletes existing narrative /
@@ -1427,7 +1480,7 @@ async def post_summary(
             ),
         )
     chunks = await logic.list_session_chunks(db, session=session_row)
-    if not chunks:
+    if not chunks and not _has_edited_transcription(session_row):
         raise NoChunksError(
             detail=(
                 f"Session {session_id} has no chunks; transcription job "
@@ -1561,9 +1614,10 @@ async def post_povs(
             ),
         )
     if session_row.transcription_mode is TranscriptionMode.NON_DIARISED:
-        # Non-diarised : exiger un summary global + un /players non-vide.
+        # Non-diarised: require either a global summary or an edited transcription,
+        # plus a non-empty /players list before generating POV artifacts.
         summary_row = await ArtifactRepository(db).get(session_id, "summary")
-        if summary_row is None:
+        if summary_row is None and not _has_edited_transcription(session_row):
             raise NoSummaryError(
                 detail=(
                     f"Session {session_id} has no global summary yet. "

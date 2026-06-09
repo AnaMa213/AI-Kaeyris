@@ -661,3 +661,33 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
 - Pas de suppression de PJ : il faudra definir separement l'impact sur les
   mappings diarises et les listes `players` non_diarised.
 - Pas de migration : `jdr_pjs.user_id` existait deja comme FK nullable.
+
+---
+
+## 2026-06-09 - BD-13 : Edition persistante de transcription
+
+### Ce qui a ete fait
+
+- Ajout de `jdr_sessions.edited_transcript_md` via migration Alembic.
+- Ajout de `PUT /services/jdr/sessions/{session_id}/transcription` pour
+  persister un Markdown corrige sur une session deja `transcribed`.
+- `GET /services/jdr/sessions/{session_id}/transcription.md` renvoie maintenant
+  l'override exact s'il existe, puis retombe sur le rendu automatique.
+- Les jobs de generation preferent l'override comme source ; le summary
+  non_diarised le chunk transitoirement sans modifier `jdr_chunks.text`.
+- Contrat OpenAPI et documentation JDR/memo mis a jour.
+
+### Ce que j'ai appris
+
+- **Un override separe protege la source brute** : les chunks/segments restent
+  auditables, tandis que le GM peut corriger le texte utile au produit.
+- **Une edition qui n'alimente pas les generations est cosmetique** : le point
+  critique etait donc le helper de source cote jobs, pas seulement le `PUT`.
+- **PUT est adapte quand le client remplace tout le document edite** : le
+  payload n'est pas un patch partiel, il devient la nouvelle projection Markdown.
+
+### Limitations acceptees
+
+- Pas de reset/delete explicite de l'override dans BD-13.
+- Pas d'historique de versions : seule la derniere correction est conservee.
+- Pas d'edition structuree des segments, chunks ou labels locuteurs.
