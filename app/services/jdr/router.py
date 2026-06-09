@@ -11,11 +11,15 @@ Role-based authorisation is expressed at the route level via
 ``require_api_key`` (FastAPI caches the dependency per request).
 """
 
+import asyncio
+import json
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi.responses import StreamingResponse
 from redis import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -360,6 +364,9 @@ def _has_edited_transcription(session_row: SessionModel) -> bool:
 # Closed phase vocabulary mirrored from JobOut (BD-10). Kept here so the route
 # can reject anything else before it ever reaches Pydantic validation.
 _VALID_JOB_PHASES = frozenset({"reducing", "transcribing", "done", "failed"})
+_JOB_EVENTS_POLL_INTERVAL_SECONDS = 1.0
+_TERMINAL_JOB_STATUSES = frozenset({JobStatus.SUCCEEDED, JobStatus.FAILED})
+_JOB_NO_LONGER_AVAILABLE_REASON = "Job is no longer available."
 
 
 def _project_progress_meta(meta: dict) -> tuple[str | None, int | None]:
@@ -384,6 +391,154 @@ def _project_progress_meta(meta: dict) -> tuple[str | None, int | None]:
         progress_percent = None
 
     return phase, progress_percent
+
+
+def _fetch_jdr_job(*, job_id: str, redis_client: Redis) -> Job:
+    try:
+        return Job.fetch(job_id, connection=redis_client)
+    except NoSuchJobError as exc:
+        raise JobNotFoundError(detail=f"Job {job_id} not found.") from exc
+
+
+def _resolve_job_identity(*, job_id: str, job: Job) -> tuple[JobKind, UUID]:
+    # Resolve kind from the function name. Unknown functions => 404, not 500.
+    kind = _FUNC_NAME_TO_KIND.get(job.func_name)
+    if kind is None:
+        raise JobNotFoundError(
+            detail=f"Job {job_id} is not a recognised JDR job."
+        )
+
+    # Pull the session_id from the first positional arg.
+    args = job.args or ()
+    if not args:
+        raise JobNotFoundError(
+            detail=f"Job {job_id} has no session_id argument."
+        )
+    raw_session_id = args[0]
+    try:
+        session_id = raw_session_id if isinstance(raw_session_id, UUID) else UUID(
+            str(raw_session_id)
+        )
+    except (TypeError, ValueError) as exc:
+        raise JobNotFoundError(
+            detail=f"Job {job_id} has a malformed session_id."
+        ) from exc
+
+    return kind, session_id
+
+
+def _project_rq_job_out(*, job: Job, kind: JobKind, session_id: UUID) -> JobOut:
+    rq_status = job.get_status(refresh=True)
+    status_value = _RQ_STATUS_TO_JOB_STATUS.get(rq_status, JobStatus.FAILED)
+
+    # BD-10: best-effort transcription progress lives on the RQ job metadata.
+    # Validate it here so malformed/expired values fall back to null instead
+    # of turning a valid job into a 500 (US2).
+    meta = job.get_meta(refresh=True) or {}
+    phase, progress_percent = _project_progress_meta(meta)
+
+    return JobOut(
+        id=job.id,
+        kind=kind,
+        session_id=session_id,
+        status=status_value,
+        failure_reason=_failure_reason_from_job(job),
+        queued_at=_ensure_aware(job.created_at) or datetime.now(UTC),
+        started_at=_ensure_aware(getattr(job, "started_at", None)),
+        ended_at=_ensure_aware(getattr(job, "ended_at", None)),
+        phase=phase,
+        progress_percent=progress_percent,
+    )
+
+
+async def _project_job_out(
+    *,
+    job_id: str,
+    auth: AuthenticatedKey,
+    db: AsyncSession,
+    redis_client: Redis,
+) -> JobOut:
+    """Project an RQ job into the public JobOut shape used by polling and SSE."""
+    job = _fetch_jdr_job(job_id=job_id, redis_client=redis_client)
+    kind, session_id = _resolve_job_identity(job_id=job_id, job=job)
+
+    # Cross-tenant guard: hide other MJ's jobs as if they didn't exist.
+    campaign_id = await _campaign_id_for_auth(db, auth)
+    session_row = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
+    )
+    if session_row is None:
+        raise JobNotFoundError(detail=f"Job {job_id} not found.")
+
+    return _project_rq_job_out(job=job, kind=kind, session_id=session_id)
+
+
+def _refresh_visible_job_out(
+    *, job_id: str, kind: JobKind, session_id: UUID, redis_client: Redis
+) -> JobOut:
+    job = _fetch_jdr_job(job_id=job_id, redis_client=redis_client)
+    return _project_rq_job_out(job=job, kind=kind, session_id=session_id)
+
+
+def _job_no_longer_available_out(initial_job_out: JobOut) -> JobOut:
+    return JobOut(
+        id=initial_job_out.id,
+        kind=initial_job_out.kind,
+        session_id=initial_job_out.session_id,
+        status=JobStatus.FAILED,
+        failure_reason=_JOB_NO_LONGER_AVAILABLE_REASON,
+        queued_at=initial_job_out.queued_at,
+        started_at=initial_job_out.started_at,
+        ended_at=datetime.now(UTC),
+        phase=initial_job_out.phase,
+        progress_percent=initial_job_out.progress_percent,
+    )
+
+
+def _job_event_payload(job_out: JobOut) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "status": job_out.status.value,
+        "phase": job_out.phase,
+        "progress_percent": job_out.progress_percent,
+    }
+    if job_out.status is JobStatus.FAILED and job_out.failure_reason:
+        payload["failure_reason"] = job_out.failure_reason
+    return payload
+
+
+def _format_job_sse_frame(payload: dict[str, object]) -> str:
+    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return f"event: progress\ndata: {data}\n\n"
+
+
+async def _sleep_between_job_events(seconds: float) -> None:
+    await asyncio.sleep(seconds)
+
+
+async def _job_event_stream(
+    *,
+    initial_job_out: JobOut,
+    job_id: str,
+    redis_client: Redis,
+) -> AsyncIterator[str]:
+    job_out = initial_job_out
+    while True:
+        yield _format_job_sse_frame(_job_event_payload(job_out))
+        if job_out.status in _TERMINAL_JOB_STATUSES:
+            break
+        await _sleep_between_job_events(_JOB_EVENTS_POLL_INTERVAL_SECONDS)
+        try:
+            job_out = _refresh_visible_job_out(
+                job_id=job_id,
+                kind=initial_job_out.kind,
+                session_id=initial_job_out.session_id,
+                redis_client=redis_client,
+            )
+        except JobNotFoundError:
+            yield _format_job_sse_frame(
+                _job_event_payload(_job_no_longer_available_out(initial_job_out))
+            )
+            break
 
 
 async def _campaign_id_for_auth(
@@ -2030,62 +2185,55 @@ async def get_job(
     tenant access (a GM polling another GM's job) returns 404 so the
     endpoint never confirms the existence of a foreign job.
     """
-    try:
-        job = Job.fetch(job_id, connection=redis_client)
-    except NoSuchJobError as exc:
-        raise JobNotFoundError(detail=f"Job {job_id} not found.") from exc
-
-    # Resolve kind from the function name. Unknown functions => 404, not 500.
-    kind = _FUNC_NAME_TO_KIND.get(job.func_name)
-    if kind is None:
-        raise JobNotFoundError(
-            detail=f"Job {job_id} is not a recognised JDR job."
-        )
-
-    # Pull the session_id from the first positional arg.
-    args = job.args or ()
-    if not args:
-        raise JobNotFoundError(
-            detail=f"Job {job_id} has no session_id argument."
-        )
-    raw_session_id = args[0]
-    try:
-        session_id = raw_session_id if isinstance(raw_session_id, UUID) else UUID(
-            str(raw_session_id)
-        )
-    except (TypeError, ValueError) as exc:
-        raise JobNotFoundError(
-            detail=f"Job {job_id} has a malformed session_id."
-        ) from exc
-
-    # Cross-tenant guard: hide other MJ's jobs as if they didn't exist.
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
+    return await _project_job_out(
+        job_id=job_id, auth=auth, db=db, redis_client=redis_client
     )
-    if session_row is None:
-        raise JobNotFoundError(detail=f"Job {job_id} not found.")
 
-    rq_status = job.get_status(refresh=True)
-    status_value = _RQ_STATUS_TO_JOB_STATUS.get(rq_status, JobStatus.FAILED)
 
-    failure_reason = _failure_reason_from_job(job)
+@router.get(
+    "/jobs/{job_id}/events",
+    response_class=StreamingResponse,
+    responses={
+        status.HTTP_200_OK: {
+            "description": (
+                "Server-Sent Events stream. Each frame uses `event: progress` "
+                "and a JSON `data` payload with status, phase, progress_percent, "
+                "and failure_reason when a failure reason is available."
+            ),
+            "content": {
+                "text/event-stream": {
+                    "schema": {"type": "string"},
+                    "example": (
+                        "event: progress\n"
+                        'data: {"status":"running","phase":null,'
+                        '"progress_percent":null}\n\n'
+                    ),
+                }
+            },
+        }
+    },
+    summary="Stream live status events for a JDR-service async job.",
+)
+async def get_job_events(
+    job_id: str,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    redis_client: Annotated[Redis, Depends(get_redis)],
+) -> StreamingResponse:
+    """Stream the same public job status projection used by GET /jobs/{job_id}.
 
-    # BD-10: best-effort transcription progress lives on the RQ job metadata.
-    # Validate it here so malformed/expired values fall back to null instead
-    # of turning a valid job into a 500 (US2).
-    meta = job.get_meta(refresh=True) or {}
-    phase, progress_percent = _project_progress_meta(meta)
-
-    return JobOut(
-        id=job.id,
-        kind=kind,
-        session_id=session_id,
-        status=status_value,
-        failure_reason=failure_reason,
-        queued_at=_ensure_aware(job.created_at) or datetime.now(UTC),
-        started_at=_ensure_aware(getattr(job, "started_at", None)),
-        ended_at=_ensure_aware(getattr(job, "ended_at", None)),
-        phase=phase,
-        progress_percent=progress_percent,
+    We validate visibility before opening the stream so unknown or foreign jobs
+    keep the existing HTTP 404 behavior instead of becoming in-stream failures.
+    """
+    initial_job_out = await _project_job_out(
+        job_id=job_id, auth=auth, db=db, redis_client=redis_client
+    )
+    return StreamingResponse(
+        _job_event_stream(
+            initial_job_out=initial_job_out,
+            job_id=job_id,
+            redis_client=redis_client,
+        ),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
     )

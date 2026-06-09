@@ -147,6 +147,12 @@ alembic history                     # historique des migrations
 | `content_md` vide/blanc | Refusé en `422`, pas de reset implicite |
 | Générations après édition | Utilisent l'override comme source ; les chunks/segments automatiques restent intacts |
 
+| BD-14 | Action |
+|---|---|
+| `GET /services/jdr/jobs/{job_id}` | Polling fallback stable ; projection `JobOut` complete |
+| `GET /services/jdr/jobs/{job_id}/events` | Stream SSE `text/event-stream`, frames `event: progress`, fermeture sur `succeeded`/`failed` |
+| Auth live jobs | Meme logique que polling : GM requis, `401`, `403`, `404 job-not-found` sans fuite cross-tenant |
+
 ```powershell
 curl -X POST http://localhost:8000/services/jdr/campaigns `
   -H "Content-Type: application/json" `

@@ -186,9 +186,9 @@ Voir [ADR 0007](../adr/0007-non-diarised-mode.md) pour le détail des décisions
 
 ## 4ter. Suivi de progression des jobs (BD-10)
 
-`GET /services/jdr/jobs/{job_id}` reste l'unique surface de polling du front
-(pas de SSE/WebSocket en v1). La projection `JobOut` est enrichie de deux
-champs **best-effort** lus depuis la métadonnée du job RQ
+`GET /services/jdr/jobs/{job_id}` reste la surface de polling et le fallback
+stable du front. La projection `JobOut` expose deux champs **best-effort** lus
+depuis la métadonnée du job RQ
 (`job.meta` / `save_meta()`, [doc RQ](https://python-rq.org/docs/jobs/)) :
 
 | Champ | Type | Valeurs |
@@ -220,6 +220,35 @@ est régénéré dans [`docs/context/api/openapi.json`](../context/api/openapi.j
 
 Voir [`specs/010-job-progress-phase/`](../../specs/010-job-progress-phase/)
 pour la spec, le plan et les décisions de recherche complètes.
+
+### Evenements SSE de jobs (BD-14)
+
+`GET /services/jdr/jobs/{job_id}/events` ajoute un suivi live en
+`text/event-stream` pour les jobs RQ recents. Le format suit Server-Sent Events
+([MDN](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)) :
+
+```text
+event: progress
+data: {"status":"running","phase":null,"progress_percent":null}
+```
+
+Regles de contrat :
+
+- Chaque frame porte `event: progress` et un payload JSON avec `status`,
+  `phase`, `progress_percent`, et `failure_reason` seulement quand un job
+  `failed` expose une raison lisible.
+- La stream reutilise la meme projection `JobOut` que le polling : les jobs de
+  transcription conservent `phase`/`progress_percent`, les jobs d'artefact ne
+  recoivent pas de progression synthetique.
+- La stream se ferme apres l'evenement terminal `succeeded` ou `failed`.
+- Si le job devient indisponible apres l'ouverture du flux, la stream emet une
+  derniere frame `failed` avec `failure_reason="Job is no longer available."`,
+  puis se ferme ; le client peut alors retomber sur le polling.
+- Authentification et visibilite restent identiques a `GET /jobs/{job_id}` :
+  GM requis, `401` sans credential, `403` pour une cle player, `404
+  job-not-found` pour un job inconnu ou appartenant a un autre GM.
+- En cas de coupure reseau ou de client ne supportant pas SSE, le front peut
+  revenir a `GET /services/jdr/jobs/{job_id}` sans changer de modele de donnees.
 
 ## 5. Hôte GPU LAN (transcription locale)
 

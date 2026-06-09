@@ -2208,6 +2208,55 @@
         ]
       }
     },
+    "/services/jdr/jobs/{job_id}/events": {
+      "get": {
+        "description": "Stream the same public job status projection used by GET /jobs/{job_id}.\n\nWe validate visibility before opening the stream so unknown or foreign jobs\nkeep the existing HTTP 404 behavior instead of becoming in-stream failures.",
+        "operationId": "get_job_events_services_jdr_jobs__job_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "example": "event: progress\ndata: {\"status\":\"running\",\"phase\":null,\"progress_percent\":null}\n\n",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Server-Sent Events stream. Each frame uses `event: progress` and a JSON `data` payload with status, phase, progress_percent, and failure_reason when a failure reason is available."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Stream live status events for a JDR-service async job.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
     "/services/jdr/live/sessions": {
       "post": {
         "description": "Always raises 501 ``live-not-implemented``.\n\nThe Pydantic body is validated first so a malformed payload still\nreturns 422, keeping the published contract honest even when the\nimplementation lands later.",
