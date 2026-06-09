@@ -228,6 +228,13 @@ class PjCreate(JdrSchema):
     user_id: UUID | None = None
 
 
+class PjUpdate(JdrSchema):
+    """Partial payload accepted by ``PATCH /services/jdr/pjs/{pj_id}``."""
+
+    name: str = Field(default=None, min_length=1, max_length=255)
+    user_id: UUID | None = None
+
+
 class PjOut(JdrSchema):
     """Public projection of ``jdr_pjs`` rows."""
 

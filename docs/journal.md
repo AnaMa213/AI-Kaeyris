@@ -631,3 +631,33 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
   ralentir le demarrage.
 - Pas de nouvelle table d'erreurs : RQ reste la source de verite du statut
   recent, avec projection API existante.
+
+---
+
+## 2026-06-09 - BD-12 : Edition des PJ
+
+### Ce qui a ete fait
+
+- Ajout de `PATCH /services/jdr/pjs/{pj_id}` pour renommer un PJ et modifier
+  son lien optionnel `user_id`.
+- Ajout de `PjUpdate` avec semantics PATCH : champ absent = pas de changement,
+  `user_id: null` = deliaison explicite.
+- Alignement du contrat `POST` et `PATCH /pjs` : un `user_id` inconnu retourne
+  maintenant `422 invalid-user`.
+- Regeneration du contrat public `docs/context/api/openapi.json` avec le nouvel
+  endpoint et le schema `PjUpdate`.
+
+### Ce que j'ai appris
+
+- **PATCH a besoin de connaitre la presence des champs** : pour un champ nullable,
+  `null` et absent ne veulent pas dire la meme chose. `model_fields_set` evite
+  de transformer un rename-only en unlink accidentel.
+- **Corriger le contrat adjacent peut etre plus honnete que le copier** : le
+  handoff demandait `invalid-user`; conserver l'ancien mapping `pj-not-found`
+  aurait rendu les erreurs d'affectation utilisateur ambigues.
+
+### Limitations acceptees
+
+- Pas de suppression de PJ : il faudra definir separement l'impact sur les
+  mappings diarises et les listes `players` non_diarised.
+- Pas de migration : `jdr_pjs.user_id` existait deja comme FK nullable.

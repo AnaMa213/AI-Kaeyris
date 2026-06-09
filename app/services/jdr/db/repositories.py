@@ -366,6 +366,16 @@ class PjRepository(_BaseRepository):
             stmt = stmt.where(Pj.campaign_id == campaign_id)
         return await self._session.scalar(stmt)
 
+    async def flush_update(self, row: Pj) -> None:
+        attempted_name = row.name
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            raise DuplicatePjNameError(
+                f"GM already has a PJ named {attempted_name!r}."
+            ) from exc
+
 
 class SessionRepository(_BaseRepository):
     """``jdr_sessions`` + ``jdr_audio_sources`` (1-1 with sessions).

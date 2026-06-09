@@ -931,6 +931,31 @@
         "title": "PjOut",
         "type": "object"
       },
+      "PjUpdate": {
+        "description": "Partial payload accepted by ``PATCH /services/jdr/pjs/{pj_id}``.",
+        "properties": {
+          "name": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          }
+        },
+        "title": "PjUpdate",
+        "type": "object"
+      },
       "PlayerCreate": {
         "description": "Body for ``POST /services/jdr/players``.",
         "properties": {
@@ -1151,6 +1176,17 @@
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "current_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Job Id"
           },
           "id": {
             "format": "uuid",
@@ -2502,6 +2538,64 @@
         ]
       }
     },
+    "/services/jdr/pjs/{pj_id}": {
+      "patch": {
+        "operationId": "update_pj_services_jdr_pjs__pj_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pj_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pj Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PjUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PjOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Partially update a PJ owned by the current MJ.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
     "/services/jdr/players": {
       "post": {
         "description": "Create a player key bound to one of the GM's PJs.\n\nThe plaintext token is returned exactly once — store it now, the\nserver only keeps the Argon2 hash.",
@@ -3308,7 +3402,7 @@
     },
     "/services/jdr/sessions/{session_id}/audio": {
       "delete": {
-        "description": "Drop the audio file on disk and reset the session to ``created``.\n\nUse cases (matches data-model.md §3 retry arrow\n``transcription_failed → audio_uploaded`` and the analogous\ncancel-before-transcription path):\n\n- The MJ uploaded the wrong file and wants to re-upload before the\n  worker picks it up.\n- Transcription failed and the MJ wants to try again with a different\n  audio (or after the upstream provider has recovered).\n\nRefused (409) when ``state ∈ {transcribing, transcribed}``: see\n``logic.purge_audio_for_session`` for the rationale.",
+        "description": "Drop the audio file on disk and reset the session to ``created``.\n\nUse cases:\n\n- The MJ uploaded the wrong file and wants to replace it.\n- The MJ wants to restart from a clean audio/transcription state.\n\nRefused (409) when ``state == transcribing``: see\n``logic.purge_audio_for_session`` for the rationale.",
         "operationId": "delete_audio_services_jdr_sessions__session_id__audio_delete",
         "parameters": [
           {
@@ -3343,6 +3437,50 @@
           }
         ],
         "summary": "Purge a session's audio file and reset the session so a new upload can be sent.",
+        "tags": [
+          "jdr"
+        ]
+      },
+      "get": {
+        "operationId": "get_audio_services_jdr_sessions__session_id__audio_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Retrieve the source audio for a session.",
         "tags": [
           "jdr"
         ]

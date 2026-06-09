@@ -108,7 +108,7 @@ Les API keys historiques restent supportées pour les clients machine. Pour comp
 - `GET/PATCH/DELETE /services/jdr/campaigns/{campaign_id}` exigent l'appartenance à la campagne ; `PATCH` et `DELETE` exigent le rôle `gm`.
 - La suppression est volontairement prudente : une campagne contenant au moins une session retourne `409` et n'est pas supprimée.
 - `POST /services/jdr/sessions` exige maintenant `campaign_id`. `GET /services/jdr/sessions?campaign_id=...` filtre explicitement par campagne ; sans query param, la liste non filtrée reste disponible pour compatibilité.
-- Les PJ sont scoppés par campagne depuis BD-7. `POST /services/jdr/pjs` accepte un `campaign_id` optionnel, retombe sur la campagne par défaut du GM web si absent, et accepte `user_id` optionnel pour lier le PJ à un compte. `GET /services/jdr/pjs?campaign_id=...` filtre une campagne après contrôle de membership ; sans filtre, il retourne les PJ des campagnes visibles par l'utilisateur.
+- Les PJ sont scoppés par campagne depuis BD-7. `POST /services/jdr/pjs` accepte un `campaign_id` optionnel, retombe sur la campagne par défaut du GM web si absent, et accepte `user_id` optionnel pour lier le PJ à un compte. `GET /services/jdr/pjs?campaign_id=...` filtre une campagne après contrôle de membership ; sans filtre, il retourne les PJ des campagnes visibles par l'utilisateur. `PATCH /services/jdr/pjs/{pj_id}` renomme un PJ et met à jour son lien `user_id` ; un `user_id: null` explicite délie le PJ, tandis qu'un champ absent ne modifie pas le lien.
 
 **Bascule transcription cloud → local** (sans modifier le code) :
 ```ini

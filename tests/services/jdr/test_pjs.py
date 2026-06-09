@@ -61,6 +61,15 @@ async def _seed_web_gm(db_session, *, username: str = "gm"):
     return user, campaign, token
 
 
+async def _create_pj(client: AsyncClient, *, name: str, user_id: str | None = None):
+    payload: dict[str, str] = {"name": name}
+    if user_id is not None:
+        payload["user_id"] = user_id
+    response = await client.post("/services/jdr/pjs", json=payload)
+    assert response.status_code == 201
+    return response.json()
+
+
 # ---------------------------------------------------------------------------
 # POST /pjs
 # ---------------------------------------------------------------------------
@@ -150,6 +159,23 @@ async def test_post_pj_rejects_empty_name_with_422(
             headers={"Authorization": f"Bearer {plain}"},
         )
     assert response.status_code == 422
+
+
+async def test_post_pj_rejects_unknown_user_id_with_invalid_user(
+    db_session, make_db_session_dep
+):
+    _user, _campaign, token = await _seed_web_gm(db_session, username="gm-bad-user")
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token)
+        response = await client.post(
+            "/services/jdr/pjs",
+            json={"name": "Boromir", "user_id": str(uuid4())},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["type"].endswith("/invalid-user")
 
 
 async def test_post_pj_rejects_player_role_with_403(
@@ -256,3 +282,266 @@ async def test_pj_endpoints_require_auth(make_db_session_dep):
         get_resp = await client.get("/services/jdr/pjs")
     assert post_resp.status_code in (401, 403)
     assert get_resp.status_code in (401, 403)
+
+
+# ---------------------------------------------------------------------------
+# PATCH /pjs/{pj_id}
+# ---------------------------------------------------------------------------
+
+
+async def test_patch_pj_renames_owned_pj(db_session, make_db_session_dep):
+    _user, _campaign, token = await _seed_web_gm(db_session, username="gm-rename")
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token)
+        pj = await _create_pj(client, name="Aragorn")
+        response = await client.patch(
+            f"/services/jdr/pjs/{pj['id']}",
+            json={"name": "Grand-Pas"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == pj["id"]
+    assert body["name"] == "Grand-Pas"
+    assert body["campaign_id"] == pj["campaign_id"]
+    assert body["user_id"] is None
+
+
+async def test_patch_pj_renames_only_target_pj(db_session, make_db_session_dep):
+    _user, _campaign, token = await _seed_web_gm(
+        db_session, username="gm-rename-target"
+    )
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token)
+        target = await _create_pj(client, name="Legolas")
+        other = await _create_pj(client, name="Gimli")
+        response = await client.patch(
+            f"/services/jdr/pjs/{target['id']}",
+            json={"name": "Legolas Vertefeuille"},
+        )
+        listing = await client.get("/services/jdr/pjs")
+
+    assert response.status_code == 200
+    names_by_id = {item["id"]: item["name"] for item in listing.json()["items"]}
+    assert names_by_id[target["id"]] == "Legolas Vertefeuille"
+    assert names_by_id[other["id"]] == "Gimli"
+
+
+async def test_patch_pj_rejects_duplicate_name_for_same_gm(
+    db_session, make_db_session_dep
+):
+    _user, _campaign, token = await _seed_web_gm(db_session, username="gm-patch-dup")
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token)
+        target = await _create_pj(client, name="Merry")
+        await _create_pj(client, name="Pippin")
+        response = await client.patch(
+            f"/services/jdr/pjs/{target['id']}",
+            json={"name": "Pippin"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["type"].endswith("/duplicate-pj")
+
+
+async def test_patch_pj_links_existing_user(db_session, make_db_session_dep):
+    _gm, _campaign, token = await _seed_web_gm(db_session, username="gm-link")
+    player = await make_user(db_session, username="player-link", profile=Profile.USER)
+    await db_session.commit()
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token)
+        pj = await _create_pj(client, name="Eowyn")
+        response = await client.patch(
+            f"/services/jdr/pjs/{pj['id']}",
+            json={"user_id": str(player.id)},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["user_id"] == str(player.id)
+
+
+async def test_patch_pj_clears_user_link_with_explicit_null(
+    db_session, make_db_session_dep
+):
+    _gm, _campaign, token = await _seed_web_gm(db_session, username="gm-unlink")
+    player = await make_user(db_session, username="player-unlink", profile=Profile.USER)
+    await db_session.commit()
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token)
+        pj = await _create_pj(client, name="Eomer", user_id=str(player.id))
+        response = await client.patch(
+            f"/services/jdr/pjs/{pj['id']}",
+            json={"user_id": None},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["user_id"] is None
+
+
+async def test_patch_pj_omitted_user_id_preserves_existing_link(
+    db_session, make_db_session_dep
+):
+    _gm, _campaign, token = await _seed_web_gm(db_session, username="gm-preserve")
+    player = await make_user(db_session, username="player-preserve", profile=Profile.USER)
+    await db_session.commit()
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token)
+        pj = await _create_pj(client, name="Sam", user_id=str(player.id))
+        response = await client.patch(
+            f"/services/jdr/pjs/{pj['id']}",
+            json={"name": "Samsagace"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "Samsagace"
+    assert response.json()["user_id"] == str(player.id)
+
+
+async def test_patch_pj_rejects_unknown_user_id_with_invalid_user(
+    db_session, make_db_session_dep
+):
+    _gm, _campaign, token = await _seed_web_gm(db_session, username="gm-patch-bad-user")
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token)
+        pj = await _create_pj(client, name="Faramir")
+        response = await client.patch(
+            f"/services/jdr/pjs/{pj['id']}",
+            json={"user_id": str(uuid4())},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["type"].endswith("/invalid-user")
+
+
+async def test_patch_pj_empty_body_is_noop(db_session, make_db_session_dep):
+    _gm, _campaign, token = await _seed_web_gm(db_session, username="gm-noop")
+    player = await make_user(db_session, username="player-noop", profile=Profile.USER)
+    await db_session.commit()
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token)
+        pj = await _create_pj(client, name="Bilbon", user_id=str(player.id))
+        response = await client.patch(f"/services/jdr/pjs/{pj['id']}", json={})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == pj["id"]
+    assert body["name"] == "Bilbon"
+    assert body["user_id"] == str(player.id)
+
+
+async def test_patch_pj_foreign_pj_returns_404(db_session, make_db_session_dep):
+    _user_a, _campaign_a, token_a = await _seed_web_gm(
+        db_session, username="gm-foreign-a"
+    )
+    _user_b, _campaign_b, token_b = await _seed_web_gm(
+        db_session, username="gm-foreign-b"
+    )
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token_a)
+        pj = await _create_pj(client, name="Theoden")
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token_b)
+        response = await client.patch(
+            f"/services/jdr/pjs/{pj['id']}",
+            json={"name": "Intrusion"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["type"].endswith("/pj-not-found")
+
+
+async def test_patch_pj_foreign_attempt_leaves_original_unchanged(
+    db_session, make_db_session_dep
+):
+    _user_a, _campaign_a, token_a = await _seed_web_gm(
+        db_session, username="gm-unchanged-a"
+    )
+    _user_b, _campaign_b, token_b = await _seed_web_gm(
+        db_session, username="gm-unchanged-b"
+    )
+    player = await make_user(db_session, username="player-unchanged", profile=Profile.USER)
+    await db_session.commit()
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token_a)
+        pj = await _create_pj(client, name="Elrond", user_id=str(player.id))
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token_b)
+        forbidden = await client.patch(
+            f"/services/jdr/pjs/{pj['id']}",
+            json={"name": "Intrusion", "user_id": None},
+        )
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token_a)
+        listing = await client.get("/services/jdr/pjs")
+
+    assert forbidden.status_code == 404
+    unchanged = next(item for item in listing.json()["items"] if item["id"] == pj["id"])
+    assert unchanged["name"] == "Elrond"
+    assert unchanged["user_id"] == str(player.id)
+
+
+async def test_patch_pj_rejects_player_role_and_missing_auth(
+    db_session, make_db_session_dep
+):
+    _user, _campaign, token = await _seed_web_gm(db_session, username="gm-patch-auth")
+    plain = "player-patch-pj"
+    db_session.add(
+        ApiKey(
+            name=f"player-{uuid4().hex[:8]}",
+            hash=PasswordHasher().hash(plain),
+            role=Role.PLAYER,
+            status=ApiKeyStatus.ACTIVE,
+        )
+    )
+    await db_session.commit()
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token)
+        pj = await _create_pj(client, name="Auth target")
+        client.cookies.clear()
+        missing_auth = await client.patch(
+            f"/services/jdr/pjs/{pj['id']}",
+            json={"name": "Nope"},
+        )
+        player_resp = await client.patch(
+            f"/services/jdr/pjs/{pj['id']}",
+            json={"name": "Nope"},
+            headers={"Authorization": f"Bearer {plain}"},
+        )
+
+    assert missing_auth.status_code in (401, 403)
+    assert player_resp.status_code in (401, 403)
+
+
+async def test_patch_pj_is_present_in_openapi(make_db_session_dep):
+    app = _make_jdr_app(make_db_session_dep)
+    schema = app.openapi()
+
+    path = schema["paths"]["/services/jdr/pjs/{pj_id}"]
+    assert "patch" in path
+    patch = path["patch"]
+    assert patch["responses"]["200"]["content"]["application/json"]["schema"][
+        "$ref"
+    ].endswith("/PjOut")
+    body_ref = patch["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    assert body_ref.endswith("/PjUpdate")
+    pj_update = schema["components"]["schemas"]["PjUpdate"]
+    assert set(pj_update["properties"]) == {"name", "user_id"}

@@ -625,6 +625,58 @@ class EnrollPlayerResult:
     plaintext_token: str
 
 
+async def update_pj(
+    db: AsyncSession,
+    *,
+    pj_id: UUID,
+    gm_key_id: UUID,
+    name: str | None = None,
+    user_id: UUID | None = None,
+    update_name: bool = False,
+    update_user_id: bool = False,
+    campaign_id: UUID | None = None,
+    requester_user_id: UUID | None = None,
+) -> Pj | None:
+    """Partially update an owned PJ.
+
+    ``update_user_id`` preserves the PATCH distinction between an omitted
+    field and an explicit ``null`` value, which unlinks the user.
+    """
+    repo = PjRepository(db)
+    pj = await repo.find_by_id_owned_by(pj_id, gm_key_id, campaign_id)
+    if pj is None:
+        return None
+
+    if requester_user_id is not None:
+        from app.services.jdr.campaign_context import require_campaign_gm
+
+        await require_campaign_gm(
+            db,
+            user_id=requester_user_id,
+            campaign_id=pj.campaign_id,
+        )
+
+    if update_user_id and user_id is not None:
+        from app.core.models import User
+
+        assigned_user = await db.get(User, user_id)
+        if assigned_user is None:
+            raise PjAssignmentError(f"User {user_id} not found.")
+
+    if update_name:
+        pj.name = name
+    if update_user_id:
+        pj.user_id = user_id
+
+    try:
+        await repo.flush_update(pj)
+    except DuplicatePjNameError as exc:
+        raise DuplicatePjError(str(exc)) from exc
+    await db.commit()
+    await db.refresh(pj)
+    return pj
+
+
 async def enroll_player(
     db: AsyncSession,
     *,
