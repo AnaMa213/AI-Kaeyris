@@ -691,3 +691,37 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
 - Pas de reset/delete explicite de l'override dans BD-13.
 - Pas d'historique de versions : seule la derniere correction est conservee.
 - Pas d'edition structuree des segments, chunks ou labels locuteurs.
+
+---
+
+## 2026-06-09 - BD-14 : Suivi live SSE des jobs artefacts
+
+### Ce qui a ete fait
+
+- Ajout de `GET /services/jdr/jobs/{job_id}/events` en `text/event-stream`.
+- La stream emet des frames `event: progress` avec `status`, `phase`,
+  `progress_percent`, et `failure_reason` quand un job echoue avec une raison.
+- Le polling `GET /services/jdr/jobs/{job_id}` et le SSE partagent la meme
+  projection `JobOut`, donc les progres transcription restent coherents et les
+  jobs artefacts gardent `phase` / `progress_percent` a `null`.
+- Les regles d'acces sont identiques au polling : GM requis, 401 sans auth, 403
+  pour un token player, 404 pour job inconnu ou cross-tenant.
+- OpenAPI, doc service et memo mis a jour.
+
+### Ce que j'ai appris
+
+- **Un flux live peut rester une projection, pas une nouvelle source de verite** :
+  RQ garde le statut, `JobOut` reste le contrat, SSE ne fait que le pousser.
+- **Le fallback polling est une assurance produit simple** : si la connexion
+  SSE tombe, le front peut relire le meme modele avec `GET /jobs/{id}`.
+- **Ne pas inventer de progression vaut mieux qu'une jauge flatteuse** : les
+  jobs artefacts n'ont pas encore de granularite fiable, donc `null` reste plus
+  honnete qu'un pourcentage synthetique.
+
+### Limitations acceptees
+
+- Pas de Redis pub/sub, pas d'historique d'evenements et pas de reprise par
+  `Last-Event-ID`.
+- Polling interne cote API pour rafraichir l'etat RQ ; suffisant pour le besoin
+  local actuel, a reevaluer si le volume de clients augmente.
+- Pas de progression fine pour narrative/elements/povs/summary dans BD-14.
