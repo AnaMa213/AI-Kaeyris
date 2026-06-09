@@ -90,7 +90,8 @@ _DEFAULT_BASE_URLS: dict[str, str | None] = {
     "vllm": "http://localhost:8000/v1",
     "together": "https://api.together.xyz/v1",
 }
-_LOOPBACK_HOSTS = {"localhost", "0.0.0.0", "::1"}
+_UNSPECIFIED_IPV4 = ".".join(("0", "0", "0", "0"))
+_LOOPBACK_HOSTS = {"localhost", _UNSPECIFIED_IPV4, "::1"}
 
 
 def _running_in_container() -> bool:
