@@ -36,7 +36,6 @@ from app.core.db import get_db_session
 from app.core.errors import AppError
 from app.core.rate_limit import enforce_rate_limit
 from app.core.redis_client import get_redis
-from app.jobs import enqueue_job, get_default_queue
 from app.jobs.jdr import (
     generate_elements_job,
     generate_narrative_job,
@@ -124,6 +123,14 @@ class SessionNotFoundError(AppError):
     status_code = status.HTTP_404_NOT_FOUND
     error_type = "session-not-found"
     title = "Session not found"
+
+
+class SessionDeleteBlockedError(AppError):
+    """Returned when a session still has active work and cannot be deleted."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "session-delete-blocked"
+    title = "Session delete blocked"
 
 
 class TranscriptionNotReadyError(AppError):
@@ -877,6 +884,40 @@ async def patch_session(
     return SessionOut.model_validate(updated)
 
 
+@router.delete(
+    "/sessions/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Session not found or not visible to the current GM."
+        },
+        status.HTTP_409_CONFLICT: {
+            "description": "Session has active work and cannot be deleted yet."
+        },
+    },
+    summary="Delete one of the MJ's sessions.",
+)
+async def delete_session(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    redis_client: Annotated[Redis, Depends(get_redis)],
+) -> Response:
+    campaign_id = await _campaign_id_for_auth(db, auth)
+    session = await logic.get_session(
+        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
+    )
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    try:
+        await logic.delete_session(
+            db, session=session, redis_client=redis_client
+        )
+    except logic.SessionDeleteBlockedError as exc:
+        raise SessionDeleteBlockedError(detail=str(exc)) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 # ---------------------------------------------------------------------------
 # Chunks (feature 002 — non_diarised mode)
 # ---------------------------------------------------------------------------
@@ -1377,12 +1418,15 @@ async def post_narrative(
                 ),
             )
 
-    queue = get_default_queue(redis_client)
-    job = enqueue_job(
-        queue, generate_narrative_job, session_id, transient_errors=True
+    job_id = await logic.enqueue_session_job(
+        db,
+        session=session_row,
+        redis_client=redis_client,
+        kind=JobKind.NARRATIVE,
+        job_func=generate_narrative_job,
     )
     return JobQueuedOut(
-        id=job.id,
+        id=job_id,
         kind=JobKind.NARRATIVE,
         session_id=session_id,
         status=JobStatus.QUEUED,
@@ -1492,12 +1536,15 @@ async def post_elements(
                 ),
             )
 
-    queue = get_default_queue(redis_client)
-    job = enqueue_job(
-        queue, generate_elements_job, session_id, transient_errors=True
+    job_id = await logic.enqueue_session_job(
+        db,
+        session=session_row,
+        redis_client=redis_client,
+        kind=JobKind.ELEMENTS,
+        job_func=generate_elements_job,
     )
     return JobQueuedOut(
-        id=job.id,
+        id=job_id,
         kind=JobKind.ELEMENTS,
         session_id=session_id,
         status=JobStatus.QUEUED,
@@ -1643,12 +1690,15 @@ async def post_summary(
             ),
         )
 
-    queue = get_default_queue(redis_client)
-    job = enqueue_job(
-        queue, generate_summary_job, session_id, transient_errors=True
+    job_id = await logic.enqueue_session_job(
+        db,
+        session=session_row,
+        redis_client=redis_client,
+        kind=JobKind.SUMMARY,
+        job_func=generate_summary_job,
     )
     return JobQueuedOut(
-        id=job.id,
+        id=job_id,
         kind=JobKind.SUMMARY,
         session_id=session_id,
         status=JobStatus.QUEUED,
@@ -1798,12 +1848,15 @@ async def post_povs(
                 ),
             )
 
-    queue = get_default_queue(redis_client)
-    job = enqueue_job(
-        queue, generate_povs_job, session_id, transient_errors=True
+    job_id = await logic.enqueue_session_job(
+        db,
+        session=session_row,
+        redis_client=redis_client,
+        kind=JobKind.POVS,
+        job_func=generate_povs_job,
     )
     return JobQueuedOut(
-        id=job.id,
+        id=job_id,
         kind=JobKind.POVS,
         session_id=session_id,
         status=JobStatus.QUEUED,

@@ -725,3 +725,44 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
 - Polling interne cote API pour rafraichir l'etat RQ ; suffisant pour le besoin
   local actuel, a reevaluer si le volume de clients augmente.
 - Pas de progression fine pour narrative/elements/povs/summary dans BD-14.
+
+---
+
+## 2026-06-09 - BD-15 : Suppression persistante d'une session
+
+### Ce qui a ete fait
+
+- Ajout de `DELETE /services/jdr/sessions/{session_id}` avec reponse `204`.
+- La suppression retire la session des lectures directes/listes et des comptes
+  de sessions de campagne.
+- Les donnees session-scopees sont supprimees avec l'aggregate : audio source,
+  transcription, chunks, mapping, players, artefacts, jobs et override Markdown.
+- Le fichier audio stocke et le repertoire raw temporaire sont purges en
+  best-effort ; un fichier deja absent ne bloque pas la suppression.
+- Les sessions avec transcription ou job RQ courant actif retournent
+  `409 session-delete-blocked` et restent intactes.
+- Les endpoints de generation d'artefacts enregistrent maintenant leur job
+  courant sur la session, afin que la suppression ne puisse pas courir contre
+  une ecriture worker en attente.
+- OpenAPI, doc service et memo mis a jour.
+
+### Ce que j'ai appris
+
+- **Supprimer un aggregate lourd demande une politique de travail actif** :
+  sans contrat fiable d'annulation worker, refuser en `409` est plus honnete
+  que promettre une annulation silencieuse.
+- **RQ est la source observable du statut live** : `jdr_jobs` aide a exposer
+  les jobs, mais peut rester stale ; la suppression bloque donc les statuts RQ
+  actifs et laisse passer les jobs termines, manquants ou expires.
+- **La DB reste la source de verite, le fichier est un effet de bord** :
+  l'unlink est necessaire en succes nominal, mais un fichier deja absent ne
+  doit pas rendre la session impossible a supprimer.
+- **Les relations reutilisables doivent survivre** : les PJ restent en base ;
+  seules leurs relations a la session supprimee disparaissent.
+
+### Limitations acceptees
+
+- Pas de soft delete, corbeille, restauration ou audit trail dans BD-15.
+- Pas de suppression en masse.
+- Pas d'annulation RQ : l'utilisateur doit attendre la fin ou l'echec du job
+  actif avant suppression.
