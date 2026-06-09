@@ -507,6 +507,16 @@ ollama serve                       # tourne sur localhost:11434
 # Puis docker compose up : depuis le conteneur, host.docker.internal:11434 résout vers l'host
 ```
 
+### Verifier la connectivite LLM vue par Compose
+
+| Commande | Pourquoi |
+|---|---|
+| `docker compose exec api python -c "from app.core.config import settings; print(settings.LLM_PROVIDER, settings.LLM_BASE_URL)"` | verifier la config lue par l'API |
+| `docker compose exec worker python -c "from app.core.config import settings; print(settings.LLM_PROVIDER, settings.LLM_BASE_URL)"` | verifier la meme config cote worker, la ou les jobs summary tournent |
+| `LLM_BASE_URL=http://host.docker.internal:11434/v1` | joindre un provider local lance sur l'hote depuis un conteneur |
+| `LLM_BASE_URL=http://ollama:11434/v1` | joindre un provider local lance comme service Compose |
+| Ne pas utiliser `http://localhost:...` dans Compose | `localhost` pointe vers le conteneur courant, pas vers l'hote |
+
 ---
 
 ## Workflow git

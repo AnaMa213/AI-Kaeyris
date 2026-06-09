@@ -21,6 +21,11 @@ services:
       - ./data:/app/data
     env_file:
       - .env
+    # Lets containers reach services running on the host (e.g. local Ollama).
+    # On Linux this explicit gateway is required; Docker Desktop already
+    # provides the name, so this is harmless there.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       REDIS_URL: redis://redis:6379/0
       # CORS dev — autorise le front Next.js sur localhost:3000.
@@ -47,6 +52,9 @@ services:
       - ./data:/app/data
     env_file:
       - .env
+    # Same host gateway as the API: summary jobs run in the worker process.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       REDIS_URL: redis://redis:6379/0
     depends_on:

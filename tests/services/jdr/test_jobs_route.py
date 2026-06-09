@@ -24,10 +24,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from app.core.db import get_db_session
 from app.core.errors import register_exception_handlers
 from app.core.redis_client import get_redis
-from rq.job import Job
+from rq.job import Job, JobStatus as RQJobStatus
 
 from app.jobs import enqueue_job, get_default_queue
-from app.jobs.jdr import generate_narrative_job, transcribe_session_job
+from app.jobs.jdr import (
+    generate_narrative_job,
+    generate_summary_job,
+    transcribe_session_job,
+)
 from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
@@ -119,6 +123,15 @@ def _set_job_meta(redis_client: fakeredis.FakeStrictRedis, job_id: str, **meta: 
     job.save_meta()
 
 
+def _mark_job_failed(
+    redis_client: fakeredis.FakeStrictRedis, job_id: str, exc_info: str
+) -> None:
+    job = Job.fetch(job_id, connection=redis_client)
+    job.set_status(RQJobStatus.FAILED)
+    job._exc_info = exc_info
+    job.save()
+
+
 # ---------------------------------------------------------------------------
 # Schema / contract (BD-10 — Foundational)
 # ---------------------------------------------------------------------------
@@ -208,6 +221,26 @@ async def test_get_job_for_narrative_kind(ctx, make_db_session_dep):
 # ---------------------------------------------------------------------------
 # US1 — real transcription progress projection (BD-10)
 # ---------------------------------------------------------------------------
+
+
+async def test_get_job_for_summary_kind(ctx, make_db_session_dep):
+    queue = get_default_queue(ctx.redis_client)
+    job = enqueue_job(queue, generate_summary_job, ctx.session_id)
+
+    app = _make_jdr_app(make_db_session_dep, ctx.redis_client)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/services/jdr/jobs/{job.id}",
+            headers={"Authorization": f"Bearer {ctx.plain_token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["kind"] == "summary"
+    assert body["session_id"] == str(ctx.session_id)
+    assert body["status"] == "queued"
+    assert body["failure_reason"] is None
 
 
 async def test_get_job_running_transcription_exposes_progress(
@@ -350,6 +383,34 @@ async def test_get_job_failed_preserves_last_progress(
 # ---------------------------------------------------------------------------
 # Not found / forbidden cases
 # ---------------------------------------------------------------------------
+
+
+async def test_get_failed_summary_job_exposes_failure_reason(
+    ctx, make_db_session_dep
+):
+    queue = get_default_queue(ctx.redis_client)
+    job = enqueue_job(queue, generate_summary_job, ctx.session_id)
+    _mark_job_failed(
+        ctx.redis_client,
+        job.id,
+        "Traceback\napp.jobs.TransientJobError: APIConnectionError: Connection error.",
+    )
+
+    app = _make_jdr_app(make_db_session_dep, ctx.redis_client)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/services/jdr/jobs/{job.id}",
+            headers={"Authorization": f"Bearer {ctx.plain_token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["kind"] == "summary"
+    assert body["status"] == "failed"
+    assert body["failure_reason"] == (
+        "app.jobs.TransientJobError: APIConnectionError: Connection error."
+    )
 
 
 async def test_get_unknown_job_returns_404(ctx, make_db_session_dep):

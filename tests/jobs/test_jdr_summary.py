@@ -19,7 +19,8 @@ from argon2 import PasswordHasher
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
-from app.adapters.llm import LLMAdapter
+from app.adapters.llm import LLMAdapter, TransientLLMError
+from app.jobs import TransientJobError
 from app.adapters.transcription import (
     TranscriptionResult,
     TranscriptionSegment,
@@ -59,6 +60,16 @@ class _SequencedStubLLM:
         if idx < len(self._responses):
             return self._responses[idx]
         return self._responses[-1] if self._responses else ""
+
+
+class _RaisingStubLLM:
+    """Raises the configured error on every LLM call."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def complete(self, *, system: str, user: str, max_tokens: int) -> str:
+        raise self._exc
 
 
 def _patch_llm(monkeypatch, adapter: LLMAdapter) -> None:
@@ -224,6 +235,62 @@ async def test_generate_summary_single_chunk_skips_reduce(
         )
     assert artifact is not None
     assert artifact.content_json == {"text": "Le seul résumé de la session."}
+
+
+# ---------------------------------------------------------------------------
+# BD-11 - LLM connectivity failure mapping
+# ---------------------------------------------------------------------------
+
+
+async def test_generate_summary_remaps_transient_llm_error(
+    ctx_1_chunk, monkeypatch
+):
+    _patch_llm(
+        monkeypatch,
+        _RaisingStubLLM(TransientLLMError("APIConnectionError: Connection error.")),
+    )
+
+    from app.jobs.jdr import _generate_summary
+
+    with pytest.raises(TransientJobError, match="APIConnectionError"):
+        await _generate_summary(ctx_1_chunk.session_id)
+
+
+async def test_generate_summary_failure_does_not_overwrite_existing_summary(
+    ctx_1_chunk, monkeypatch
+):
+    async with ctx_1_chunk.sessionmaker() as db:
+        db.add(
+            Artifact(
+                session_id=ctx_1_chunk.session_id,
+                kind="summary",
+                content_json={"text": "ancien resume global"},
+                model_used="old-model",
+            )
+        )
+        await db.commit()
+
+    _patch_llm(
+        monkeypatch,
+        _RaisingStubLLM(TransientLLMError("APIConnectionError: Connection error.")),
+    )
+
+    from app.jobs.jdr import _generate_summary
+
+    with pytest.raises(TransientJobError):
+        await _generate_summary(ctx_1_chunk.session_id)
+
+    async with ctx_1_chunk.sessionmaker() as db:
+        artifact = await db.scalar(
+            select(Artifact).where(
+                Artifact.session_id == ctx_1_chunk.session_id,
+                Artifact.kind == "summary",
+            )
+        )
+
+    assert artifact is not None
+    assert artifact.content_json == {"text": "ancien resume global"}
+    assert artifact.model_used == "old-model"
 
 
 # ---------------------------------------------------------------------------

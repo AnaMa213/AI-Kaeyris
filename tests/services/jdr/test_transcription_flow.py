@@ -236,6 +236,16 @@ async def test_transcribe_job_happy_path(ctx, monkeypatch):
     assert ctx.audio_file.exists()
 
 
+async def test_transcribe_job_does_not_instantiate_llm_adapter(ctx, monkeypatch):
+    def _fail_if_called():
+        raise AssertionError("transcription must not build the LLM adapter")
+
+    monkeypatch.setattr("app.jobs.jdr.get_llm_adapter", _fail_if_called)
+    _patch_transcription_adapter(monkeypatch, _DeterministicAdapter())
+
+    await _transcribe_session(ctx.session_id)
+
+
 # ---------------------------------------------------------------------------
 # Job: error mapping
 # ---------------------------------------------------------------------------
