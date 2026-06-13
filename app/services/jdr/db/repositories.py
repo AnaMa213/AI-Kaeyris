@@ -50,10 +50,10 @@ if TYPE_CHECKING:
 
 
 class DuplicatePjNameError(Exception):
-    """A PJ with this name already exists for this MJ.
+    """A PJ with this name already exists in this campaign.
 
     Raised by :meth:`PjRepository.create` when the
-    ``(owner_gm_key_id, name)`` uniqueness constraint trips. The route
+    ``(campaign_id, name)`` uniqueness constraint trips. The route
     maps this to HTTP 409.
     """
 
@@ -319,12 +319,12 @@ class PjRepository(_BaseRepository):
         try:
             await self._session.flush()
         except IntegrityError as exc:
-            # The (owner_gm_key_id, name) uniqueness constraint trips.
+            # The (campaign_id, name) uniqueness constraint trips.
             # Roll back the partial flush so the caller's outer commit
             # doesn't choke on a poisoned session.
             await self._session.rollback()
             raise DuplicatePjNameError(
-                f"GM already has a PJ named {name!r}."
+                f"This campaign already has a PJ named {name!r}."
             ) from exc
         await self._session.refresh(row)
         return row
@@ -373,7 +373,7 @@ class PjRepository(_BaseRepository):
         except IntegrityError as exc:
             await self._session.rollback()
             raise DuplicatePjNameError(
-                f"GM already has a PJ named {attempted_name!r}."
+                f"This campaign already has a PJ named {attempted_name!r}."
             ) from exc
 
 

@@ -232,7 +232,9 @@ class Pj(Base):
 
     __tablename__ = "jdr_pjs"
     __table_args__ = (
-        UniqueConstraint("owner_gm_key_id", "name", name="owner_name"),
+        # PJ names are unique *within a campaign* (BD-7 scoping), not per MJ:
+        # the same name may exist in two different campaigns of the same GM.
+        UniqueConstraint("campaign_id", "name", name="uq_jdr_pjs_campaign_name"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -493,8 +495,21 @@ class Job(Base):
     __tablename__ = "jdr_jobs"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # native_enum=False + values_callable: store the lowercase *value*
+    # ("summary"), not the member name ("SUMMARY"). This matches every other
+    # enum column in this module and avoids a native Postgres ENUM type that
+    # has to be ALTER'd each time a JobKind/JobStatus member is added (the
+    # native type silently accepted unknown values on SQLite but rejected them
+    # on Postgres — see migration 0011).
     kind: Mapped[JobKind] = mapped_column(
-        Enum(JobKind, name="jdr_job_kind"), nullable=False
+        Enum(
+            JobKind,
+            name="jdr_job_kind",
+            native_enum=False,
+            length=32,
+            values_callable=_enum_values,
+        ),
+        nullable=False,
     )
     session_id: Mapped[uuid.UUID] = mapped_column(
         Uuid,
@@ -503,7 +518,13 @@ class Job(Base):
         index=True,
     )
     status: Mapped[JobStatus] = mapped_column(
-        Enum(JobStatus, name="jdr_job_status"),
+        Enum(
+            JobStatus,
+            name="jdr_job_status",
+            native_enum=False,
+            length=16,
+            values_callable=_enum_values,
+        ),
         nullable=False,
         default=JobStatus.QUEUED,
     )

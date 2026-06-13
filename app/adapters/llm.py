@@ -92,6 +92,7 @@ _DEFAULT_BASE_URLS: dict[str, str | None] = {
 }
 _UNSPECIFIED_IPV4 = ".".join(("0", "0", "0", "0"))
 _LOOPBACK_HOSTS = {"localhost", _UNSPECIFIED_IPV4, "::1"}
+_LOCAL_PROVIDERS = {"ollama", "vllm"}
 
 
 def _running_in_container() -> bool:
@@ -113,6 +114,27 @@ def _resolve_base_url(provider: str) -> str | None:
             "http://host.docker.internal:<port>/v1 or a Compose service name."
         )
     return base_url
+
+
+def _llm_connectivity_error_message(
+    *,
+    exc: Exception,
+    provider: str,
+    model: str,
+    base_url: str | None,
+) -> str:
+    endpoint = base_url or "OpenAI SDK default endpoint"
+    message = (
+        f"{type(exc).__name__}: cannot reach LLM provider {provider!r} "
+        f"(model={model!r}, base_url={endpoint!r}): {exc}"
+    )
+    if provider in _LOCAL_PROVIDERS:
+        message += (
+            " Verify the local LLM server is running and reachable from the "
+            "worker container. For a host-local server, use a Docker-reachable "
+            "address such as http://host.docker.internal:<port>/v1."
+        )
+    return message
 
 
 class OpenAICompatibleLLMAdapter:
@@ -162,12 +184,17 @@ class OpenAICompatibleLLMAdapter:
                     ],
                     max_tokens=max_tokens,
                 )
-            except (
-                APITimeoutError,
-                APIConnectionError,
-                RateLimitError,
-                InternalServerError,
-            ) as exc:
+            except (APITimeoutError, APIConnectionError) as exc:
+                outcome = "transient"
+                raise TransientLLMError(
+                    _llm_connectivity_error_message(
+                        exc=exc,
+                        provider=self.provider,
+                        model=self.model,
+                        base_url=self.base_url,
+                    )
+                ) from exc
+            except (RateLimitError, InternalServerError) as exc:
                 outcome = "transient"
                 raise TransientLLMError(f"{type(exc).__name__}: {exc}") from exc
             except (

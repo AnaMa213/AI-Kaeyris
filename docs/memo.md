@@ -100,6 +100,13 @@ alembic current                     # version DB courante
 alembic history                     # historique des migrations
 ```
 
+Le stack **dev** tourne sur **Postgres** (parité prod, et évite le `database is
+locked` SQLite entre l'API et le worker). `docker compose up` applique les
+migrations automatiquement via le service one-shot `migrations` avant de démarrer
+api/worker. La base vit dans le volume nommé `postgres-data` ; `docker compose
+down -v` la repart à zéro. SQLite reste le défaut hors-Docker (tests in-memory,
+`uvicorn` sur l'hôte). Voir [ADR 0014](adr/0014-postgres-dev-stack.md).
+
 ### Mode `non_diarised` (sub-jalon 5.5) — variables et endpoints clés
 
 | Var env | Default | Rôle |
