@@ -766,3 +766,39 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
 - Pas de suppression en masse.
 - Pas d'annulation RQ : l'utilisateur doit attendre la fin ou l'echec du job
   actif avant suppression.
+
+## 2026-06-11 — Fix « database is locked » : Postgres dans le stack dev
+
+### Ce qui a été fait
+
+- Le stack dev (`docker-compose.yml`) tourne maintenant sur PostgreSQL au lieu
+  d'un fichier SQLite partagé : ajout des services `postgres` (volume nommé +
+  healthcheck) et `migrations` (one-shot `alembic upgrade head`), healthcheck
+  Redis, `DATABASE_URL` Postgres sur `api`/`worker`, image `ai-kaeyris:dev`
+  partagée, gating via `depends_on` (postgres healthy → migrations completed →
+  api/worker).
+- Aucun code applicatif modifié : `config.py` lit déjà `DATABASE_URL` de l'env,
+  `migrations/env.py` le câble déjà. `.env.example` et docs (memo, jdr) mis à
+  jour ; ADR 0014 ajouté.
+
+### Ce que j'ai appris
+
+- **SQLite ne supporte pas deux processus écrivains** : API + worker sur le même
+  fichier = `database is locked`. Le polling BD-10 (barre de progression) n'a pas
+  créé le bug, il l'a révélé en augmentant la contention. La cause était une
+  limite d'architecture, pas la feature.
+- **La parité dev/prod paie** : un compose prod déjà câblé sur Postgres + un
+  `migrations/env.py` agnostique ont permis un fix de config pure, sans toucher au
+  code — preuve qu'isoler l'accès DB derrière une seule variable d'env (12-Factor)
+  rend ce genre de bascule trivial.
+- **Défauts dev vs prod** : le compose dev pose des identifiants Postgres par
+  défaut (`up` qui marche tout de suite), là où la prod refuse tout défaut pour
+  échouer bruyamment sur un secret manquant.
+
+### Limitations acceptées
+
+- La base Postgres dev démarre vide : pas de reprise des données SQLite, il faut
+  re-`/auth/setup`. Anticipe une partie du Jalon 8 en dev (déviation assumée de la
+  roadmap pour la parité + le fix).
+- Filet SQLite (WAL + busy_timeout) pour le run local hors Docker laissé en option
+  non implémentée — à décider si le workflow hôte le nécessite.

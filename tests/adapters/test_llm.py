@@ -107,13 +107,20 @@ def test_get_llm_adapter_caches(monkeypatch):
 # ---- Error mapping (OpenAICompatibleLLMAdapter) ---------------------------
 
 
-def _adapter_with_failing_client(exc_to_raise: Exception) -> OpenAICompatibleLLMAdapter:
+def _adapter_with_failing_client(
+    exc_to_raise: Exception,
+    *,
+    provider: str = "deepinfra",
+    model: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
+    api_key: str = "dummy",
+    base_url: str | None = "https://api.deepinfra.com/v1/openai",
+) -> OpenAICompatibleLLMAdapter:
     """Build an adapter whose underlying SDK raises ``exc_to_raise``."""
     adapter = OpenAICompatibleLLMAdapter(
-        provider="deepinfra",
-        model="meta-llama/Meta-Llama-3.1-8B-Instruct",
-        api_key="dummy",
-        base_url="https://api.deepinfra.com/v1/openai",
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
     )
     failing = AsyncMock(side_effect=exc_to_raise)
     adapter._client.chat.completions.create = failing  # type: ignore[method-assign]
@@ -153,8 +160,13 @@ async def test_transient_errors_are_remapped(exc):
 
 
 async def test_connection_error_message_keeps_error_type():
+    api_key = "secret-key-that-must-not-leak"
     adapter = _adapter_with_failing_client(
-        APIConnectionError(request=cast(object, None))  # type: ignore[arg-type]
+        APIConnectionError(request=cast(object, None)),  # type: ignore[arg-type]
+        provider="ollama",
+        model="qwen2.5:14b-instruct-q4_K_M",
+        api_key=api_key,
+        base_url="http://host.docker.internal:11434/v1",
     )
 
     with pytest.raises(TransientLLMError) as exc_info:
@@ -162,6 +174,11 @@ async def test_connection_error_message_keeps_error_type():
 
     message = str(exc_info.value)
     assert "APIConnectionError" in message
+    assert "ollama" in message
+    assert "qwen2.5:14b-instruct-q4_K_M" in message
+    assert "http://host.docker.internal:11434/v1" in message
+    assert "worker container" in message
+    assert api_key not in message
     assert message.strip()
 
 

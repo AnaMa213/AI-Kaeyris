@@ -88,7 +88,7 @@ class AudioAlreadyUploadedError(Exception):
 
 
 class DuplicatePjError(Exception):
-    """A PJ with this name already exists for this MJ.
+    """A PJ with this name already exists in this campaign.
 
     Surface for the route layer — wraps the repository-level
     :class:`DuplicatePjNameError` so the route only knows about
@@ -677,11 +677,11 @@ async def create_pj(
     campaign_id: UUID | None = None,
     requester_user_id: UUID | None = None,
 ) -> Pj:
-    """Create a PJ scoped to the current MJ.
+    """Create a PJ scoped to a campaign.
 
-    Raises :class:`DuplicatePjError` if the MJ already has a PJ with the
-    same name (uniqueness ``(owner_gm_key_id, name)`` on
-    :class:`Pj`).
+    Raises :class:`DuplicatePjError` if the campaign already has a PJ with
+    the same name (uniqueness ``(campaign_id, name)`` on :class:`Pj`). The
+    same name may be reused in a different campaign.
     """
     resolved_campaign_id = campaign_id
     if requester_user_id is not None:

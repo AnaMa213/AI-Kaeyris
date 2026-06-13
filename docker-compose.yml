@@ -1,4 +1,48 @@
+# Dev stack — runs on Postgres (not SQLite) for dev/prod parity and to avoid
+# the SQLite single-writer "database is locked" between the API and the worker
+# (12-Factor §X, CLAUDE.md §2.7). Source code and ./data are bind-mounted for
+# hot-reload; the database lives in a named volume.
+#
+# Boot order (depends_on + healthcheck):
+#   postgres → migrations → api
+#                       └→ worker
+#   redis ─────────────────┘
+
+# Shared image build — api/worker/migrations run the same image, built once.
+x-app-build: &app-build
+  context: .
+  dockerfile: docker/Dockerfile
+
+# Single source of truth for the dev Postgres URL (async driver).
+# Dev defaults (kaeyris/kaeyris/kaeyris) so `docker compose up` works without
+# editing .env; override POSTGRES_* in .env to change them. The PROD compose
+# deliberately has NO defaults (12-Factor: fail loudly) — this is dev only.
+x-postgres-url: &postgres-url >-
+  postgresql+asyncpg://${POSTGRES_USER:-kaeyris}:${POSTGRES_PASSWORD:-kaeyris}@postgres:5432/${POSTGRES_DB:-kaeyris}
+
 services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      # Bound to 127.0.0.1 only: reachable by host GUI clients (DBeaver…)
+      # but NOT exposed on the LAN. Host port 5433 → container 5432, to avoid
+      # clashing with a local Postgres / Windows-reserved 5432.
+      - "127.0.0.1:5433:5432"
+    environment:
+      # Dev defaults (override via .env). Must match the URL anchor above.
+      POSTGRES_USER: ${POSTGRES_USER:-kaeyris}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kaeyris}
+      POSTGRES_DB: ${POSTGRES_DB:-kaeyris}
+    volumes:
+      # Named volume — fast native fs inside the VM, survives `up`/`down`.
+      # `down -v` wipes it (fresh DB).
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kaeyris} -d ${POSTGRES_DB:-kaeyris}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   redis:
     image: redis:7-alpine
     # No host port mapping: Redis is reachable only from the Compose
@@ -6,18 +50,45 @@ services:
     volumes:
       - redis-data:/data
     command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  migrations:
+    # One-shot: applies Alembic migrations against Postgres and exits 0.
+    # api/worker wait on this via depends_on.service_completed_successfully.
+    build: *app-build
+    image: ai-kaeyris:dev
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: *postgres-url
+    volumes:
+      # Bind source + migrations so new revisions apply without a rebuild.
+      - ./app:/app/app
+      - ./migrations:/app/migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
 
   api:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
+    build: *app-build
+    image: ai-kaeyris:dev
     ports:
       - "8000:8000"
     volumes:
       # Source code: hot-reload without rebuild.
       - ./app:/app/app
-      # Local data dir (SQLite DB, audios during transcription).
-      # Shared with the worker and visible on the host for inspection.
+      # Migrations: kept in sync so `docker compose exec api alembic ...`
+      # sees freshly added revisions without a rebuild.
+      - ./migrations:/app/migrations
+      # Local data dir (audios during transcription). Shared with the worker
+      # and visible on the host for inspection. The SQLite DB no longer lives
+      # here — the dev stack uses Postgres.
       - ./data:/app/data
     env_file:
       - .env
@@ -27,6 +98,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
+      # Override the .env SQLite default — the Docker stack runs on Postgres.
+      DATABASE_URL: *postgres-url
       REDIS_URL: redis://redis:6379/0
       # CORS dev — autorise le front Next.js sur localhost:3000.
       # Override du .env (vide par défaut, prod-safe). Ajouter d'autres
@@ -34,21 +107,24 @@ services:
       # le .env quand nécessaire, séparées par des virgules.
       CORS_ALLOWED_ORIGINS: http://localhost:3000
     depends_on:
-      - redis
+      migrations:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     # Watch ONLY the source tree. Without --reload-dir, watchfiles walks the
     # whole working tree including the bind-mounted /app/data, which holds
-    # pytest tmp dirs and the SQLite DB. A single subdir with restrictive
-    # permissions (typical on Docker Desktop Windows bind mounts) makes the
-    # underlying Rust watcher crash with EACCES and uvicorn dies. Restricting
-    # the watch to /app/app fixes the root cause and is also faster.
+    # pytest tmp dirs. A single subdir with restrictive permissions (typical
+    # on Docker Desktop Windows bind mounts) makes the underlying Rust watcher
+    # crash with EACCES and uvicorn dies. Restricting the watch to /app/app
+    # fixes the root cause and is also faster.
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/app"]
 
   worker:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
+    build: *app-build
+    image: ai-kaeyris:dev
     volumes:
       - ./app:/app/app
+      - ./migrations:/app/migrations
       - ./data:/app/data
     env_file:
       - .env
@@ -56,10 +132,15 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
+      DATABASE_URL: *postgres-url
       REDIS_URL: redis://redis:6379/0
     depends_on:
-      - redis
+      migrations:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     command: ["rq", "worker", "default", "--url", "redis://redis:6379/0"]
 
 volumes:
   redis-data:
+  postgres-data:

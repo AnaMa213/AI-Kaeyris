@@ -2,8 +2,8 @@
 
 POST /pjs creates a PJ owned by the current MJ. GET /pjs lists only the
 PJs of the current MJ (FR-014 isolation discipline). The
-``(owner_gm_key_id, name)`` uniqueness constraint translates to 409
-``duplicate-pj``.
+``(campaign_id, name)`` uniqueness constraint (per-campaign, BD-7 scoping)
+translates to 409 ``duplicate-pj``.
 """
 
 from collections.abc import Callable
@@ -97,10 +97,11 @@ async def test_post_pj_returns_201_with_pj_payload(
     assert "created_at" in body
 
 
-async def test_post_pj_rejects_duplicate_name_for_same_gm(
+async def test_post_pj_rejects_duplicate_name_in_same_campaign(
     db_session, make_db_session_dep
 ):
-    """``(owner_gm_key_id, name)`` is unique — second insert -> 409."""
+    """``(campaign_id, name)`` is unique — second insert in the same campaign
+    -> 409."""
     _user, _campaign, token = await _seed_web_gm(db_session)
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
@@ -118,6 +119,46 @@ async def test_post_pj_rejects_duplicate_name_for_same_gm(
 
     assert second.status_code == 409
     assert second.json()["type"].endswith("/duplicate-pj")
+
+
+async def test_post_pj_allows_same_name_in_another_campaign_same_gm(
+    db_session, make_db_session_dep
+):
+    """BD fix: PJ name uniqueness is per-campaign, not per-MJ. The same GM can
+    reuse a name in a different one of their campaigns; the same name in the
+    SAME campaign is still rejected."""
+    user, _campaign1, token = await _seed_web_gm(db_session, username="gm-multi")
+    # A second campaign owned + GM'd by the same user.
+    campaign2 = await make_campaign(
+        db_session, owner=user, name="gm-multi-campaign-2"
+    )
+    await make_membership(db_session, user=user, campaign=campaign2)
+    await db_session.commit()
+
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set(settings.SESSION_COOKIE_NAME, token)
+        # Same name in the default campaign...
+        first = await client.post(
+            "/services/jdr/pjs", json={"name": "Boromir"}
+        )
+        assert first.status_code == 201
+        # ...and in the second campaign → now allowed.
+        cross = await client.post(
+            "/services/jdr/pjs",
+            json={"name": "Boromir", "campaign_id": str(campaign2.id)},
+        )
+        assert cross.status_code == 201, cross.text
+        assert cross.json()["campaign_id"] == str(campaign2.id)
+        # But a duplicate within the second campaign is still rejected.
+        dup = await client.post(
+            "/services/jdr/pjs",
+            json={"name": "Boromir", "campaign_id": str(campaign2.id)},
+        )
+
+    assert dup.status_code == 409
+    assert dup.json()["type"].endswith("/duplicate-pj")
 
 
 async def test_post_pj_allows_same_name_for_different_gms(

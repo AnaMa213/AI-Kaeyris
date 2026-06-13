@@ -356,15 +356,28 @@ async def test_generation_source_helper_uses_latest_edited_markdown(
 async def test_generate_summary_remaps_transient_llm_error(
     ctx_1_chunk, monkeypatch
 ):
+    llm_error_message = (
+        "APIConnectionError: cannot reach LLM provider 'ollama' "
+        "(model='qwen2.5:14b-instruct-q4_K_M', "
+        "base_url='http://host.docker.internal:11434/v1'): Connection error. "
+        "Verify the local LLM server is running and reachable from the worker "
+        "container."
+    )
     _patch_llm(
         monkeypatch,
-        _RaisingStubLLM(TransientLLMError("APIConnectionError: Connection error.")),
+        _RaisingStubLLM(TransientLLMError(llm_error_message)),
     )
 
     from app.jobs.jdr import _generate_summary
 
-    with pytest.raises(TransientJobError, match="APIConnectionError"):
+    with pytest.raises(TransientJobError) as exc_info:
         await _generate_summary(ctx_1_chunk.session_id)
+
+    message = str(exc_info.value)
+    assert "APIConnectionError" in message
+    assert "ollama" in message
+    assert "host.docker.internal:11434" in message
+    assert "worker container" in message
 
 
 async def test_generate_summary_failure_does_not_overwrite_existing_summary(

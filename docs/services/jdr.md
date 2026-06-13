@@ -64,16 +64,21 @@ L'utilisateur prompt embarque la transcription formatée segment par segment, et
 ## 4. Instructions opérationnelles
 
 ```bash
-# 1) Préparer la DB
-alembic upgrade head
-
-# 2) Lancer l'API + un worker RQ (deux processus)
-uvicorn app.main:app --reload
-rq worker default --url redis://localhost:6379/0
-
-# OU tout-en-un via Docker Compose (api + worker + redis)
+# Option A — tout-en-un via Docker Compose (recommandé) : postgres + redis +
+# migrations (auto) + api + worker. Le stack dev tourne sur Postgres (parité
+# prod), ce qui évite le `database is locked` SQLite entre l'API et le worker.
 docker compose up --build
+# `docker compose down -v` repart d'une base vide.
+
+# Option B — run local hors Docker (toujours sur SQLite par défaut) :
+alembic upgrade head                              # préparer la DB
+uvicorn app.main:app --reload                     # API
+rq worker default --url redis://localhost:6379/0  # worker RQ (autre terminal)
 ```
+
+> Première bascule vers Postgres : la base démarre **vide** (les données du
+> fichier SQLite ne sont pas reprises). Recréer le premier GM via le bloc
+> « reseed local/staging » ci-dessous (`/auth/setup`).
 
 **Bootstrap d'une clé MJ** (au premier démarrage uniquement, voir ADR 0006 §3) :
 ```powershell
