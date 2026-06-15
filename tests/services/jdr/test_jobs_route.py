@@ -509,21 +509,21 @@ async def test_job_events_validates_visibility_once_then_refreshes_redis_only(
     queue = get_default_queue(ctx.redis_client)
     job = enqueue_job(queue, generate_elements_job, ctx.session_id)
     _mark_job_status(ctx.redis_client, job.id, RQJobStatus.STARTED)
-    get_session_calls = 0
-    original_get_session = jdr_router_module.logic.get_session
+    resolver_calls = 0
+    original_resolver = jdr_router_module.resolve_session_for_gm
 
-    async def counting_get_session(*args: Any, **kwargs: Any):
-        nonlocal get_session_calls
-        get_session_calls += 1
-        return await original_get_session(*args, **kwargs)
+    async def counting_resolver(*args: Any, **kwargs: Any):
+        nonlocal resolver_calls
+        resolver_calls += 1
+        return await original_resolver(*args, **kwargs)
 
     async def complete_after_first_event(_seconds: float) -> None:
         _mark_job_status(ctx.redis_client, job.id, RQJobStatus.FINISHED)
 
     monkeypatch.setattr(
-        jdr_router_module.logic,
-        "get_session",
-        counting_get_session,
+        jdr_router_module,
+        "resolve_session_for_gm",
+        counting_resolver,
     )
     monkeypatch.setattr(
         "app.services.jdr.router._sleep_between_job_events",
@@ -544,7 +544,7 @@ async def test_job_events_validates_visibility_once_then_refreshes_redis_only(
         {"status": "running", "phase": None, "progress_percent": None},
         {"status": "succeeded", "phase": None, "progress_percent": None},
     ]
-    assert get_session_calls == 1
+    assert resolver_calls == 1
 
 
 async def test_job_events_releases_db_connection_before_streaming(
