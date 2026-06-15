@@ -134,6 +134,22 @@ class SessionDeleteBlockedError(AppError):
     title = "Session delete blocked"
 
 
+class TranscriptionNotStuckError(AppError):
+    """Recovery requested but the session is not wedged in ``transcribing``."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "transcription-not-stuck"
+    title = "Transcription not stuck"
+
+
+class TranscriptionStillActiveError(AppError):
+    """Recovery refused because the transcription job is still running."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "transcription-still-active"
+    title = "Transcription still active"
+
+
 class TranscriptionNotReadyError(AppError):
     """Session exists but the transcription has not been produced yet."""
 
@@ -1305,6 +1321,51 @@ async def put_transcription_edit(
     )
 
 
+@router.post(
+    "/sessions/{session_id}/transcription/recover",
+    response_model=SessionOut,
+    responses={
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Session not found or not visible to the current GM."
+        },
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "Session is not stuck in 'transcribing', or its transcription "
+                "job is still running."
+            )
+        },
+    },
+    summary="Recover a session wedged in 'transcribing' after a lost worker.",
+)
+async def recover_stuck_transcription(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    redis_client: Annotated[Redis, Depends(get_redis)],
+) -> SessionOut:
+    """Force the failed transition a crashed transcription worker never reached.
+
+    When a worker dies mid-run the session can stay ``transcribing`` forever
+    while its RQ job is gone from Redis. This GM-only action verifies the job
+    is truly no longer active and moves the session to ``transcription_failed``
+    so the audio can be replaced (or the session deleted). Refused with 409
+    when the session is not in ``transcribing`` (``transcription-not-stuck``)
+    or the job is still running (``transcription-still-active``).
+    """
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    try:
+        updated = await logic.recover_stuck_transcription(
+            db, session=session, redis_client=redis_client
+        )
+    except logic.TranscriptionNotStuckError as exc:
+        raise TranscriptionNotStuckError(detail=str(exc)) from exc
+    except logic.TranscriptionStillActiveError as exc:
+        raise TranscriptionStillActiveError(detail=str(exc)) from exc
+    return SessionOut.model_validate(updated)
+
+
 @router.get(
     "/sessions/{session_id}/transcription.md",
     response_class=Response,
@@ -2236,6 +2297,14 @@ async def get_job_events(
     initial_job_out = await _project_job_out(
         job_id=job_id, auth=auth, db=db, redis_client=redis_client
     )
+    # Visibility is validated; the stream loop below reads only Redis. Release the
+    # pooled DB connection NOW instead of holding it (idle-in-transaction) for the
+    # whole job. A StreamingResponse keeps request-scoped `Depends` alive until the
+    # body finishes, so without this close every open SSE pins one of the ~15 pool
+    # connections for minutes and saturates the pool (see investigation
+    # db-paralysis-long-jobs). `get_db_session` teardown still runs after the
+    # stream; committing a closed session is a no-op for these read-only queries.
+    await db.close()
     return StreamingResponse(
         _job_event_stream(
             initial_job_out=initial_job_out,

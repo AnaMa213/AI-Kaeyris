@@ -31,6 +31,16 @@ class Settings(BaseSettings):
     # implied by the URL scheme (sqlite+aiosqlite, postgresql+asyncpg).
     DATABASE_URL: str = "sqlite+aiosqlite:///./data/kaeyris.db"
 
+    # Connection-pool sizing. Applied ONLY when DATABASE_URL is PostgreSQL
+    # (SQLite/aiosqlite uses StaticPool/NullPool and rejects these kwargs).
+    # Bound the pool explicitly so a burst of long-lived requests cannot grow
+    # connections without limit. Keep DB_POOL_SIZE * worker_count <= the
+    # PostgreSQL `max_connections` (tight on the Pi 5 deploy, Jalon 8).
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 10
+    DB_POOL_TIMEOUT: int = 30
+    DB_POOL_PRE_PING: bool = True
+
     # JDR service — see ADR 0006.
     # Local data directory: audios while being transcribed, then purged
     # (FR-004), and the SQLite file when DATABASE_URL points there.

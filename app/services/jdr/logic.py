@@ -144,6 +144,23 @@ class SessionDeleteBlockedError(Exception):
     """The session cannot be deleted while active work may still write to it."""
 
 
+class TranscriptionNotStuckError(Exception):
+    """Recovery was requested but the session is not stuck in ``transcribing``.
+
+    Surfaced by :func:`recover_stuck_transcription`. The route maps this to
+    HTTP 409 ``transcription-not-stuck`` - there is nothing to recover.
+    """
+
+
+class TranscriptionStillActiveError(Exception):
+    """Recovery was refused because the transcription job is still running.
+
+    Surfaced by :func:`recover_stuck_transcription` when the current job is
+    still active in RQ: the worker is alive, so resetting the session would
+    race it. The route maps this to HTTP 409 ``transcription-still-active``.
+    """
+
+
 class NoAudioToPurgeError(Exception):
     """The session has no audio source on record — nothing to delete."""
 
@@ -486,6 +503,63 @@ def _is_rq_job_active(redis_client: Redis, job_id: str) -> bool:
     except NoSuchJobError:
         return False
     return job.get_status(refresh=True) in _ACTIVE_RQ_JOB_STATUSES
+
+
+async def recover_stuck_transcription(
+    db: AsyncSession,
+    *,
+    session: Session,
+    redis_client: Redis,
+) -> Session:
+    """Recover a session wedged in ``transcribing`` after its worker died.
+
+    A transcription worker flips the session to ``transcribing`` before the
+    heavy lifting and only reaches ``transcribed`` / ``transcription_failed``
+    at the very end. If the worker process is killed mid-run (OOM, container
+    restart, hard crash) the RQ job vanishes from Redis while the session is
+    left ``transcribing`` forever - the UI shows an endless "still processing"
+    state and the session can neither be deleted nor have its audio replaced.
+
+    This performs the failure transition the dead worker never reached:
+
+    - refuses with :class:`TranscriptionNotStuckError` if the session is not
+      in ``transcribing`` (nothing to recover);
+    - refuses with :class:`TranscriptionStillActiveError` if the current job
+      is still active in RQ (the worker is alive - do not race it);
+    - otherwise moves the session to ``transcription_failed`` and marks the
+      orphaned job row ``failed`` so the GM can replace the audio, retry, or
+      delete the session.
+
+    Returns the refreshed session row.
+    """
+    if session.state is not SessionState.TRANSCRIBING:
+        raise TranscriptionNotStuckError(
+            f"Session {session.id} is not stuck in transcribing "
+            f"(state={session.state.value})."
+        )
+    if session.current_job_id is not None and _is_rq_job_active(
+        redis_client, session.current_job_id
+    ):
+        raise TranscriptionStillActiveError(
+            f"Session {session.id} still has an active transcription job."
+        )
+
+    repo = SessionRepository(db)
+    await repo.update_state(session.id, SessionState.TRANSCRIPTION_FAILED)
+    if session.current_job_id is not None:
+        await JobRepository(db).upsert_status(
+            session.current_job_id,
+            kind=JobKind.TRANSCRIPTION,
+            session_id=session.id,
+            status=JobStatus.FAILED,
+            failure_reason=(
+                "Transcription interrupted unexpectedly "
+                "(worker lost before completion)."
+            ),
+        )
+    await db.commit()
+    await db.refresh(session)
+    return session
 
 
 def _delete_session_audio_files(
