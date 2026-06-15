@@ -36,6 +36,8 @@ from app.services.jdr.db.models import (
     CampaignMember,
     CampaignRole,
     Job,
+    ModelProvider,
+    ModelSettings,
     Pj,
     Session,
     SessionPjMapping,
@@ -850,3 +852,49 @@ class SessionPlayerRepository(_BaseRepository):
             self._session.add(row)
         await self._session.flush()
         return rows
+
+
+class ModelSettingsRepository(_BaseRepository):
+    """Per-web-user AI provider settings (BD-18 / FR-22)."""
+
+    async def get_for_user(self, user_id: UUID) -> ModelSettings | None:
+        return await self._session.get(ModelSettings, user_id)
+
+    async def upsert_for_user(
+        self,
+        *,
+        user_id: UUID,
+        transcription_provider: ModelProvider | None = None,
+        summary_provider: ModelProvider | None = None,
+        transcription_local_path: str | None = None,
+        summary_local_path: str | None = None,
+        transcription_cloud_model: str | None = None,
+        summary_cloud_model: str | None = None,
+        deepinfra_api_key: str | None = None,
+    ) -> ModelSettings:
+        row = await self.get_for_user(user_id)
+        if row is None:
+            row = ModelSettings(user_id=user_id)
+            self._session.add(row)
+
+        if transcription_provider is not None:
+            row.transcription_provider = transcription_provider
+        if summary_provider is not None:
+            row.summary_provider = summary_provider
+        if transcription_local_path is not None:
+            row.transcription_local_path = transcription_local_path
+        if summary_local_path is not None:
+            row.summary_local_path = summary_local_path
+        if transcription_cloud_model is not None:
+            row.transcription_cloud_model = transcription_cloud_model
+        if summary_cloud_model is not None:
+            row.summary_cloud_model = summary_cloud_model
+        # Write-only secret: only store when a non-empty key is provided; an
+        # empty string means "keep the existing key" (the frontend never sends
+        # an empty value to clear it).
+        if deepinfra_api_key:
+            row.deepinfra_api_key = deepinfra_api_key
+
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row

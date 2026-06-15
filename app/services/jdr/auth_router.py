@@ -58,7 +58,8 @@ from app.services.jdr.campaign_context import (
     resolve_campaign_scope_for_auth,
 )
 from app.services.jdr.db.models import CampaignRole
-from app.services.jdr.db.repositories import CampaignRepository
+from app.services.jdr.db.repositories import CampaignRepository, ModelSettingsRepository
+from app.services.jdr.schemas import ModelSettingsOut, ModelSettingsPatch
 
 logger = get_logger(__name__)
 
@@ -367,6 +368,67 @@ async def get_users(
     return UserListOut(
         items=[UserOut.model_validate(user) for user in await list_users(db)]
     )
+
+
+def _model_settings_out(row) -> ModelSettingsOut:
+    if row is None:
+        return ModelSettingsOut()
+    return ModelSettingsOut(
+        transcription_provider=row.transcription_provider,
+        summary_provider=row.summary_provider,
+        transcription_local_path=row.transcription_local_path,
+        summary_local_path=row.summary_local_path,
+        transcription_cloud_model=row.transcription_cloud_model,
+        summary_cloud_model=row.summary_cloud_model,
+        # Expose only whether a key exists, never the key itself.
+        deepinfra_api_key_set=bool(row.deepinfra_api_key),
+    )
+
+
+@router.get(
+    "/services/jdr/settings/models",
+    response_model=ModelSettingsOut,
+    summary="Return the current admin's JDR AI model provider settings.",
+)
+async def get_model_settings(
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ModelSettingsOut:
+    user = await _require_admin_user(db, auth)
+    row = await ModelSettingsRepository(db).get_for_user(user.id)
+    return _model_settings_out(row)
+
+
+@router.patch(
+    "/services/jdr/settings/models",
+    response_model=ModelSettingsOut,
+    summary="Update the current admin's JDR AI model provider settings.",
+)
+async def patch_model_settings(
+    payload: ModelSettingsPatch,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ModelSettingsOut:
+    user = await _require_admin_user(db, auth)
+    row = await ModelSettingsRepository(db).upsert_for_user(
+        user_id=user.id,
+        transcription_provider=payload.transcription_provider,
+        summary_provider=payload.summary_provider,
+        transcription_local_path=payload.transcription_local_path,
+        summary_local_path=payload.summary_local_path,
+        transcription_cloud_model=payload.transcription_cloud_model,
+        summary_cloud_model=payload.summary_cloud_model,
+        deepinfra_api_key=payload.deepinfra_api_key,
+    )
+    # NOTE: never log payload.deepinfra_api_key — it is a secret.
+    logger.info(
+        "jdr.settings.models_updated",
+        user_id=str(user.id),
+        transcription_provider=row.transcription_provider.value,
+        summary_provider=row.summary_provider.value,
+        deepinfra_api_key_set=bool(row.deepinfra_api_key),
+    )
+    return _model_settings_out(row)
 
 
 @router.patch("/services/jdr/users/{user_id}", response_model=UserOut)

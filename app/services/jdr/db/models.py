@@ -98,6 +98,14 @@ class TranscriptionMode(str, enum.Enum):
     NON_DIARISED = "non_diarised"
 
 
+class ModelProvider(str, enum.Enum):
+    """Per-account AI provider selector exposed by settings endpoints."""
+
+    CLOUD = "cloud"
+    LOCAL = "local"
+    OLLAMA = "ollama"
+
+
 class JobStatus(str, enum.Enum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -606,3 +614,72 @@ class SessionPlayer(Base):
         "Session", back_populates="session_players"
     )
     pj: Mapped[Pj] = relationship("Pj", foreign_keys=[pj_id])
+
+
+class ModelSettings(Base):
+    """Per-web-user AI model provider choices for JDR workflows.
+
+    This stores only FR-22 provider selection. Local model paths, cloud API
+    keys, and model registries are separate follow-up work.
+    """
+
+    __tablename__ = "jdr_model_settings"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("core_users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    transcription_provider: Mapped[ModelProvider] = mapped_column(
+        Enum(
+            ModelProvider,
+            name="jdr_model_provider",
+            native_enum=False,
+            length=16,
+            values_callable=_enum_values,
+        ),
+        nullable=False,
+        default=ModelProvider.CLOUD,
+        server_default=ModelProvider.CLOUD.value,
+    )
+    summary_provider: Mapped[ModelProvider] = mapped_column(
+        Enum(
+            ModelProvider,
+            name="jdr_model_provider",
+            native_enum=False,
+            length=16,
+            values_callable=_enum_values,
+        ),
+        nullable=False,
+        default=ModelProvider.CLOUD,
+        server_default=ModelProvider.CLOUD.value,
+    )
+    transcription_local_path: Mapped[str | None] = mapped_column(
+        String(1024), nullable=True, default=None
+    )
+    summary_local_path: Mapped[str | None] = mapped_column(
+        String(1024), nullable=True, default=None
+    )
+    # Story 6.4 / FR-24: per-category DeepInfra cloud model ids, used when the
+    # corresponding provider is "cloud".
+    transcription_cloud_model: Mapped[str | None] = mapped_column(
+        String(200), nullable=True, default=None
+    )
+    summary_cloud_model: Mapped[str | None] = mapped_column(
+        String(200), nullable=True, default=None
+    )
+    # Account-level DeepInfra API key. Write-only: stored here but NEVER
+    # serialized back to any response (ModelSettingsOut exposes only the
+    # ``deepinfra_api_key_set`` boolean derived from this column).
+    deepinfra_api_key: Mapped[str | None] = mapped_column(
+        String(512), nullable=True, default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+    )
