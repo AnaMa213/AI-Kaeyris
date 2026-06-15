@@ -96,6 +96,12 @@ Au premier démarrage, l'app importe cette entrée dans `jdr_api_keys` avec `rol
 
 Les API keys historiques restent supportées pour les clients machine. Pour compatibilité avec les tables JDR existantes, chaque compte web reçoit aussi une clé JDR interne non exposée : les ownership FKs continuent donc de pointer vers `jdr_api_keys`. Le rôle API-key legacy `player` reste réservé aux tokens joueur `/me/*` ; les memberships web de campagne utilisent `gm|pj`.
 
+**Settings modèles IA BD-18 / FR-22** :
+- `GET /services/jdr/settings/models` retourne les choix de provider du compte administrateur web courant. Par défaut : `transcription_provider="cloud"` et `summary_provider="cloud"`.
+- `PATCH /services/jdr/settings/models` accepte un patch partiel avec `transcription_provider` et/ou `summary_provider`, valeurs autorisées : `cloud`, `local`, `ollama`.
+- Ces settings sont scopés au compte web (`core_users.id`) et réservés aux administrateurs connectés par cookie. Les API keys machine et les comptes `system_role="user"` sont refusés.
+- Scope volontairement limité : BD-18 stocke ici seulement la sélection de provider. Chemin de modèle local, clé cloud DeepInfra et registre de modèles restent des contrats ultérieurs.
+
 **Reseed local/staging BD-7 après purge** :
 1. Purger la base locale/staging, puis appliquer `alembic upgrade head`.
 2. Appeler `POST /services/jdr/auth/setup` pour créer le premier administrateur.

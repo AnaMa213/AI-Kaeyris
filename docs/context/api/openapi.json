@@ -690,6 +690,58 @@
         "title": "MeOut",
         "type": "object"
       },
+      "ModelProvider": {
+        "description": "Per-account AI provider selector exposed by settings endpoints.",
+        "enum": [
+          "cloud",
+          "local",
+          "ollama"
+        ],
+        "title": "ModelProvider",
+        "type": "string"
+      },
+      "ModelSettingsOut": {
+        "properties": {
+          "summary_provider": {
+            "$ref": "#/components/schemas/ModelProvider",
+            "default": "cloud",
+            "description": "Provider for LLM summary: cloud, local, or ollama."
+          },
+          "transcription_provider": {
+            "$ref": "#/components/schemas/ModelProvider",
+            "default": "cloud",
+            "description": "Provider for transcription: cloud, local, or ollama."
+          }
+        },
+        "title": "ModelSettingsOut",
+        "type": "object"
+      },
+      "ModelSettingsPatch": {
+        "properties": {
+          "summary_provider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelProvider"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transcription_provider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelProvider"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "ModelSettingsPatch",
+        "type": "object"
+      },
       "NarrativeArtifactOut": {
         "description": "Public projection of an ``Artifact(kind='narrative')`` row.",
         "properties": {
@@ -4139,6 +4191,76 @@
         "summary": "Recover a session wedged in 'transcribing' after a lost worker.",
         "tags": [
           "jdr"
+        ]
+      }
+    },
+    "/services/jdr/settings/models": {
+      "get": {
+        "operationId": "get_model_settings_services_jdr_settings_models_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelSettingsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Return the current admin's JDR AI model provider settings.",
+        "tags": [
+          "jdr-auth"
+        ]
+      },
+      "patch": {
+        "operationId": "patch_model_settings_services_jdr_settings_models_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelSettingsPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelSettingsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Update the current admin's JDR AI model provider settings.",
+        "tags": [
+          "jdr-auth"
         ]
       }
     },

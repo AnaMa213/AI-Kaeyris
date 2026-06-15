@@ -23,6 +23,7 @@ from app.core.datetime_serialization import ensure_aware_utc, serialize_datetime
 from app.services.jdr.db.models import (
     JobKind,
     JobStatus,
+    ModelProvider,
     SessionMode,
     SessionState,
     TranscriptionMode,
@@ -84,6 +85,66 @@ class CampaignOut(JdrSchema):
     session_count: int
     last_session_at: datetime | None = None
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Account-level AI model settings (BD-18 / FR-22)
+# ---------------------------------------------------------------------------
+
+
+class ModelSettingsOut(JdrSchema):
+    transcription_provider: ModelProvider = Field(
+        ModelProvider.CLOUD,
+        description="Provider for transcription: cloud, local, or ollama.",
+    )
+    summary_provider: ModelProvider = Field(
+        ModelProvider.CLOUD,
+        description="Provider for LLM summary: cloud, local, or ollama.",
+    )
+    transcription_local_path: str | None = Field(
+        None,
+        max_length=1024,
+        description="Custom local model path used when transcription_provider is local.",
+    )
+    summary_local_path: str | None = Field(
+        None,
+        max_length=1024,
+        description="Custom local model path used when summary_provider is local.",
+    )
+    transcription_cloud_model: str | None = Field(
+        None,
+        max_length=200,
+        description="DeepInfra cloud model id used when transcription_provider is cloud.",
+    )
+    summary_cloud_model: str | None = Field(
+        None,
+        max_length=200,
+        description="DeepInfra cloud model id used when summary_provider is cloud.",
+    )
+    deepinfra_api_key_set: bool = Field(
+        False,
+        description=(
+            "True iff a DeepInfra API key is stored for this user. The key "
+            "itself is never returned."
+        ),
+    )
+
+
+class ModelSettingsPatch(JdrSchema):
+    transcription_provider: ModelProvider | None = None
+    summary_provider: ModelProvider | None = None
+    transcription_local_path: str | None = Field(None, max_length=1024)
+    summary_local_path: str | None = Field(None, max_length=1024)
+    transcription_cloud_model: str | None = Field(None, max_length=200)
+    summary_cloud_model: str | None = Field(None, max_length=200)
+    deepinfra_api_key: str | None = Field(
+        None,
+        max_length=512,
+        description=(
+            "Write-only. When provided non-empty, stores/replaces the user's "
+            "DeepInfra API key. Never serialized back in any response."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
