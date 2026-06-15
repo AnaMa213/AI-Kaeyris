@@ -4087,6 +4087,61 @@
         ]
       }
     },
+    "/services/jdr/sessions/{session_id}/transcription/recover": {
+      "post": {
+        "description": "Force the failed transition a crashed transcription worker never reached.\n\nWhen a worker dies mid-run the session can stay ``transcribing`` forever\nwhile its RQ job is gone from Redis. This GM-only action verifies the job\nis truly no longer active and moves the session to ``transcription_failed``\nso the audio can be replaced (or the session deleted). Refused with 409\nwhen the session is not in ``transcribing`` (``transcription-not-stuck``)\nor the job is still running (``transcription-still-active``).",
+        "operationId": "recover_stuck_transcription_services_jdr_sessions__session_id__transcription_recover_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Session not found or not visible to the current GM."
+          },
+          "409": {
+            "description": "Session is not stuck in 'transcribing', or its transcription job is still running."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Recover a session wedged in 'transcribing' after a lost worker.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
     "/services/jdr/users": {
       "get": {
         "operationId": "get_users_services_jdr_users_get",

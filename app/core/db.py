@@ -50,12 +50,19 @@ class Base(DeclarativeBase):
 @lru_cache(maxsize=1)
 def get_engine() -> AsyncEngine:
     """Process-wide async engine. Cached so the connection pool is reused."""
-    return create_async_engine(
-        settings.DATABASE_URL,
-        # echo=False to keep stdout clean; flip to True locally for SQL debug.
-        echo=False,
-        future=True,
-    )
+    # echo=False to keep stdout clean; flip to True locally for SQL debug.
+    kwargs: dict[str, object] = {"echo": False, "future": True}
+    # Pool sizing is meaningful only for the PostgreSQL QueuePool. SQLite via
+    # aiosqlite uses StaticPool/NullPool and raises on pool_size/max_overflow,
+    # so guard these kwargs strictly by dialect (keeps the SQLite dev path intact).
+    if settings.DATABASE_URL.startswith("postgresql"):
+        kwargs |= {
+            "pool_size": settings.DB_POOL_SIZE,
+            "max_overflow": settings.DB_MAX_OVERFLOW,
+            "pool_timeout": settings.DB_POOL_TIMEOUT,
+            "pool_pre_ping": settings.DB_POOL_PRE_PING,
+        }
+    return create_async_engine(settings.DATABASE_URL, **kwargs)
 
 
 @lru_cache(maxsize=1)
