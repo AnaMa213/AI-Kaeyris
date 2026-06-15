@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
 from app.core.errors import register_exception_handlers
-from app.core.models import User
+from app.core.models import Profile, User
 from app.core.redis_client import get_redis
 from app.services.jdr.auth_router import router as auth_router
 from app.services.jdr.db.models import (
@@ -22,6 +22,7 @@ from app.services.jdr.db.models import (
     ApiKeyStatus,
     Artifact,
     Campaign,
+    CampaignRole,
     Pj,
     Role,
     Session,
@@ -29,6 +30,14 @@ from app.services.jdr.db.models import (
     SessionState,
 )
 from app.services.jdr.router import router as jdr_router
+from tests.services.jdr.campaign_fixtures import (
+    make_campaign,
+    make_membership,
+    make_pj,
+    make_session,
+    make_user,
+    make_web_session,
+)
 
 
 def _make_app(
@@ -57,7 +66,7 @@ async def _setup_admin(client: AsyncClient, db_session: AsyncSession) -> tuple[U
     return admin, campaign
 
 
-async def test_sessions_are_created_listed_and_loaded_in_active_campaign_only(
+async def test_sessions_require_membership_for_foreign_campaign_rows(
     db_session,
     make_db_session_dep,
 ):
@@ -105,6 +114,117 @@ async def test_sessions_are_created_listed_and_loaded_in_active_campaign_only(
     assert [item["title"] for item in listed.json()["items"]] == ["Visible"]
     assert hidden_detail.status_code == 403
     assert hidden_patch.status_code == 404
+
+
+async def test_gm_session_actions_use_session_campaign_not_default_campaign(
+    tmp_path,
+    db_session,
+    make_db_session_dep,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.services.jdr.logic.settings.KAEYRIS_DATA_DIR", str(tmp_path)
+    )
+    gm = await make_user(db_session, username="gm", profile=Profile.GM)
+    campaign_a = await make_campaign(db_session, owner=gm, name="A")
+    campaign_b = await make_campaign(db_session, owner=gm, name="B")
+    await make_membership(
+        db_session, user=gm, campaign=campaign_a, role=CampaignRole.GM
+    )
+    await make_membership(
+        db_session, user=gm, campaign=campaign_b, role=CampaignRole.GM
+    )
+    assert gm.default_campaign_id == campaign_a.id
+
+    patch_session = await make_session(
+        db_session, owner=gm, campaign=campaign_b, title="Patch me"
+    )
+    delete_session = await make_session(
+        db_session, owner=gm, campaign=campaign_b, title="Delete me"
+    )
+    audio_session = await make_session(
+        db_session, owner=gm, campaign=campaign_b, title="Audio me"
+    )
+    mapping_session = await make_session(
+        db_session, owner=gm, campaign=campaign_b, title="Map me"
+    )
+    mapping_session.state = SessionState.TRANSCRIBED
+    narrative_session = await make_session(
+        db_session, owner=gm, campaign=campaign_b, title="Narrate me"
+    )
+    narrative_session.state = SessionState.TRANSCRIBED
+    pj = await make_pj(db_session, owner=gm, campaign=campaign_b, name="Aelar")
+    token = await make_web_session(db_session, user=gm)
+
+    app = _make_app(make_db_session_dep, fakeredis.FakeStrictRedis())
+    transport = ASGITransport(app=app)
+    audio_bytes = b"\x00\x00\x00\x20ftypM4A " + b"\x00" * 256
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set("session", token)
+        patched = await client.patch(
+            f"/services/jdr/sessions/{patch_session.id}",
+            json={"title": "Patched outside active campaign"},
+        )
+        uploaded = await client.post(
+            f"/services/jdr/sessions/{audio_session.id}/audio",
+            files={"audio": ("session.m4a", audio_bytes, "audio/mp4")},
+        )
+        fetched_audio = await client.get(
+            f"/services/jdr/sessions/{audio_session.id}/audio"
+        )
+        mapped = await client.put(
+            f"/services/jdr/sessions/{mapping_session.id}/mapping",
+            json={"mapping": {"speaker_1": str(pj.id)}},
+        )
+        queued = await client.post(
+            f"/services/jdr/sessions/{narrative_session.id}/artifacts/narrative"
+        )
+        job_id = queued.json()["id"] if queued.status_code == 202 else "missing"
+        job_status = await client.get(f"/services/jdr/jobs/{job_id}")
+        deleted = await client.delete(
+            f"/services/jdr/sessions/{delete_session.id}"
+        )
+
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["title"] == "Patched outside active campaign"
+    assert uploaded.status_code == 202, uploaded.text
+    assert fetched_audio.status_code == 200, fetched_audio.text
+    assert fetched_audio.content == audio_bytes
+    assert mapped.status_code == 200, mapped.text
+    assert mapped.json()["mapping"] == {"speaker_1": str(pj.id)}
+    assert queued.status_code == 202, queued.text
+    assert job_status.status_code == 200, job_status.text
+    assert deleted.status_code == 204, deleted.text
+
+
+async def test_pj_campaign_member_cannot_mutate_session(
+    db_session,
+    make_db_session_dep,
+):
+    gm = await make_user(db_session, username="gm-owner", profile=Profile.GM)
+    player = await make_user(
+        db_session, username="campaign-player", profile=Profile.USER
+    )
+    campaign = await make_campaign(db_session, owner=gm, name="Shared")
+    await make_membership(db_session, user=gm, campaign=campaign, role=CampaignRole.GM)
+    await make_membership(
+        db_session, user=player, campaign=campaign, role=CampaignRole.PJ
+    )
+    session = await make_session(db_session, owner=gm, campaign=campaign)
+    token = await make_web_session(db_session, user=player)
+    app = _make_app(make_db_session_dep, fakeredis.FakeStrictRedis())
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.cookies.set("session", token)
+        response = await client.patch(
+            f"/services/jdr/sessions/{session.id}",
+            json={"title": "Nope"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["type"].endswith("/session-not-found")
 
 
 async def test_pjs_are_created_and_listed_in_active_campaign_only(

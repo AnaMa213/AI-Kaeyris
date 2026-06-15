@@ -19,7 +19,6 @@ from app.core.db import get_db_session
 from app.core.errors import AppError
 from app.core.redis_client import get_redis
 from app.services.jdr import logic
-from app.services.jdr.campaign_context import resolve_campaign_scope_for_auth
 from app.services.jdr.db.models import Session as SessionModel
 from app.services.jdr.db.repositories import CampaignRepository
 from app.services.jdr.logic import (
@@ -31,6 +30,7 @@ from app.services.jdr.logic import (
     UnsupportedAudioMimeError,
 )
 from app.services.jdr.schemas import AudioUploadOut
+from app.services.jdr.session_access import resolve_session_for_gm
 
 _AUDIO_CACHE_CONTROL = "private, max-age=3600"
 _AUDIO_STREAM_CHUNK_SIZE = 64 * 1024
@@ -99,26 +99,17 @@ class AudioRangeNotSatisfiable(AppError):
 router = APIRouter()
 
 
-async def _campaign_id_for_auth(
-    db: AsyncSession,
-    auth: AuthenticatedKey,
-) -> UUID | None:
-    scope = await resolve_campaign_scope_for_auth(db, auth)
-    return scope.campaign_id if scope is not None else None
-
-
 async def _session_for_audio_read(
     db: AsyncSession,
     *,
     session_id: UUID,
     auth: AuthenticatedKey,
-    campaign_id: UUID | None,
 ) -> SessionModel | None:
-    session = await logic.get_session(
+    session = await resolve_session_for_gm(
         db,
         session_id=session_id,
-        gm_key_id=auth.id,
-        campaign_id=campaign_id,
+        auth=auth,
+        require_gm_role=False,
     )
     if session is not None:
         return session
@@ -128,8 +119,6 @@ async def _session_for_audio_read(
 
     row = await db.get(SessionModel, session_id)
     if row is None or row.campaign_id is None:
-        return None
-    if campaign_id is not None and row.campaign_id != campaign_id:
         return None
 
     membership = await CampaignRepository(db).get_membership(
@@ -217,10 +206,7 @@ async def post_audio(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
 ) -> AudioUploadOut:
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
-    )
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
 
@@ -266,12 +252,10 @@ async def get_audio(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Response:
-    campaign_id = await _campaign_id_for_auth(db, auth)
     session = await _session_for_audio_read(
         db,
         session_id=session_id,
         auth=auth,
-        campaign_id=campaign_id,
     )
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -337,10 +321,7 @@ async def delete_audio(
     Refused (409) when ``state == transcribing``: see
     ``logic.purge_audio_for_session`` for the rationale.
     """
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
-    )
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
 

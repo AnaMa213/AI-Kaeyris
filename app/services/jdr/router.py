@@ -80,6 +80,7 @@ from app.services.jdr.markdown import (
     render_summary_md,
     render_transcription_md,
 )
+from app.services.jdr.session_access import resolve_session_for_gm
 from app.services.jdr.schemas import (
     CampaignCreate,
     CampaignOut,
@@ -131,6 +132,22 @@ class SessionDeleteBlockedError(AppError):
     status_code = status.HTTP_409_CONFLICT
     error_type = "session-delete-blocked"
     title = "Session delete blocked"
+
+
+class TranscriptionNotStuckError(AppError):
+    """Recovery requested but the session is not wedged in ``transcribing``."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "transcription-not-stuck"
+    title = "Transcription not stuck"
+
+
+class TranscriptionStillActiveError(AppError):
+    """Recovery refused because the transcription job is still running."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "transcription-still-active"
+    title = "Transcription still active"
 
 
 class TranscriptionNotReadyError(AppError):
@@ -470,9 +487,8 @@ async def _project_job_out(
     kind, session_id = _resolve_job_identity(job_id=job_id, job=job)
 
     # Cross-tenant guard: hide other MJ's jobs as if they didn't exist.
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
+    session_row = await resolve_session_for_gm(
+        db, session_id=session_id, auth=auth
     )
     if session_row is None:
         raise JobNotFoundError(detail=f"Job {job_id} not found.")
@@ -866,10 +882,7 @@ async def patch_session(
             detail="transcription_mode is immutable after session creation.",
         )
 
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
-    )
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
 
@@ -903,10 +916,7 @@ async def delete_session(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
 ) -> Response:
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
-    )
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
     try:
@@ -940,10 +950,7 @@ async def get_session_chunks(
     Returns 404 transcription-not-ready if no chunks have been produced
     yet for the session.
     """
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
-    )
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
     if session.transcription_mode is not TranscriptionMode.NON_DIARISED:
@@ -1092,10 +1099,7 @@ async def put_session_mapping(
     deleted (data-model.md §6 invariant). A subsequent
     ``POST /artifacts/povs`` is required to regenerate them.
     """
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
-    )
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
     if session.transcription_mode is TranscriptionMode.NON_DIARISED:
@@ -1118,7 +1122,7 @@ async def put_session_mapping(
             session=session,
             mapping=payload.mapping,
             gm_key_id=auth.id,
-            campaign_id=campaign_id,
+            campaign_id=session.campaign_id,
         )
     except logic.InvalidMappingError as exc:
         raise InvalidMappingError(detail=str(exc)) from exc
@@ -1144,10 +1148,7 @@ async def get_session_mapping(
 
     409 wrong-mode if the session is non_diarised (use GET /players).
     """
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
-    )
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
     if session.transcription_mode is TranscriptionMode.NON_DIARISED:
@@ -1188,10 +1189,7 @@ async def post_session_players(
     ``invalid-player-list`` otherwise). Reserved for non_diarised
     sessions (409 ``wrong-mode`` on diarised).
     """
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
-    )
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
     if session.transcription_mode is not TranscriptionMode.NON_DIARISED:
@@ -1208,7 +1206,7 @@ async def post_session_players(
             session=session,
             pj_ids=payload.pj_ids,
             gm_key_id=auth.id,
-            campaign_id=campaign_id,
+            campaign_id=session.campaign_id,
         )
     except LogicInvalidPlayerListError as exc:
         raise InvalidPlayerListError(detail=str(exc)) from exc
@@ -1230,10 +1228,7 @@ async def get_session_players(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> SessionPlayersOut:
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
-    )
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
     if session.transcription_mode is not TranscriptionMode.NON_DIARISED:
@@ -1266,10 +1261,7 @@ async def get_transcription(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> TranscriptionOut:
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
-    )
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
     if session.transcription_mode is TranscriptionMode.NON_DIARISED:
@@ -1312,10 +1304,7 @@ async def put_transcription_edit(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> TranscriptionEditOut:
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session = await logic.get_session_for_transcription_edit(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
-    )
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
     try:
@@ -1332,6 +1321,51 @@ async def put_transcription_edit(
     )
 
 
+@router.post(
+    "/sessions/{session_id}/transcription/recover",
+    response_model=SessionOut,
+    responses={
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Session not found or not visible to the current GM."
+        },
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "Session is not stuck in 'transcribing', or its transcription "
+                "job is still running."
+            )
+        },
+    },
+    summary="Recover a session wedged in 'transcribing' after a lost worker.",
+)
+async def recover_stuck_transcription(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    redis_client: Annotated[Redis, Depends(get_redis)],
+) -> SessionOut:
+    """Force the failed transition a crashed transcription worker never reached.
+
+    When a worker dies mid-run the session can stay ``transcribing`` forever
+    while its RQ job is gone from Redis. This GM-only action verifies the job
+    is truly no longer active and moves the session to ``transcription_failed``
+    so the audio can be replaced (or the session deleted). Refused with 409
+    when the session is not in ``transcribing`` (``transcription-not-stuck``)
+    or the job is still running (``transcription-still-active``).
+    """
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    try:
+        updated = await logic.recover_stuck_transcription(
+            db, session=session, redis_client=redis_client
+        )
+    except logic.TranscriptionNotStuckError as exc:
+        raise TranscriptionNotStuckError(detail=str(exc)) from exc
+    except logic.TranscriptionStillActiveError as exc:
+        raise TranscriptionStillActiveError(detail=str(exc)) from exc
+    return SessionOut.model_validate(updated)
+
+
 @router.get(
     "/sessions/{session_id}/transcription.md",
     response_class=Response,
@@ -1342,10 +1376,7 @@ async def get_transcription_md(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Response:
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
-    )
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
     if session.edited_transcript_md is not None:
@@ -1395,9 +1426,8 @@ async def post_narrative(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
 ) -> JobQueuedOut:
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
+    session_row = await resolve_session_for_gm(
+        db, session_id=session_id, auth=auth
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -1444,9 +1474,8 @@ async def get_narrative(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> NarrativeArtifactOut:
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
+    session_row = await resolve_session_for_gm(
+        db, session_id=session_id, auth=auth
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -1478,10 +1507,7 @@ async def get_narrative_md(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Response:
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
-    )
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
     artifact = await ArtifactRepository(db).get(session_id, "narrative")
@@ -1513,9 +1539,8 @@ async def post_elements(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
 ) -> JobQueuedOut:
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
+    session_row = await resolve_session_for_gm(
+        db, session_id=session_id, auth=auth
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -1562,9 +1587,8 @@ async def get_elements(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ElementsArtifactOut:
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
+    session_row = await resolve_session_for_gm(
+        db, session_id=session_id, auth=auth
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -1612,10 +1636,7 @@ async def get_elements_md(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Response:
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
-    )
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
     artifact = await ArtifactRepository(db).get(session_id, "elements")
@@ -1661,9 +1682,8 @@ async def post_summary(
     elements / pov:* artefacts for the session. The atomicity is
     enforced by ``_generate_summary`` (see research.md §2).
     """
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
+    session_row = await resolve_session_for_gm(
+        db, session_id=session_id, auth=auth
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -1716,9 +1736,8 @@ async def get_summary(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> SummaryArtifactOut:
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
+    session_row = await resolve_session_for_gm(
+        db, session_id=session_id, auth=auth
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -1757,9 +1776,8 @@ async def get_summary_md(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> Response:
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
+    session_row = await resolve_session_for_gm(
+        db, session_id=session_id, auth=auth
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -1805,9 +1823,8 @@ async def post_povs(
     speaker-PJ mapping yet — the operator must call
     ``PUT /mapping`` first.
     """
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
+    session_row = await resolve_session_for_gm(
+        db, session_id=session_id, auth=auth
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
@@ -1909,14 +1926,13 @@ async def get_pov(
     except ValueError as exc:
         raise PjNotFoundError(detail=f"PJ {pj_id_raw} not found.") from exc
 
-    campaign_id = await _campaign_id_for_auth(db, auth)
-    session_row = await logic.get_session(
-        db, session_id=session_id, gm_key_id=auth.id, campaign_id=campaign_id
+    session_row = await resolve_session_for_gm(
+        db, session_id=session_id, auth=auth
     )
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
     pj = await _load_owned_pj_or_404(
-        db, pj_id=pj_id, gm_key_id=auth.id, campaign_id=campaign_id
+        db, pj_id=pj_id, gm_key_id=auth.id, campaign_id=session_row.campaign_id
     )
 
     artifact = await ArtifactRepository(db).get(session_id, f"pov:{pj_id}")
@@ -2281,6 +2297,14 @@ async def get_job_events(
     initial_job_out = await _project_job_out(
         job_id=job_id, auth=auth, db=db, redis_client=redis_client
     )
+    # Visibility is validated; the stream loop below reads only Redis. Release the
+    # pooled DB connection NOW instead of holding it (idle-in-transaction) for the
+    # whole job. A StreamingResponse keeps request-scoped `Depends` alive until the
+    # body finishes, so without this close every open SSE pins one of the ~15 pool
+    # connections for minutes and saturates the pool (see investigation
+    # db-paralysis-long-jobs). `get_db_session` teardown still runs after the
+    # stream; committing a closed session is a no-op for these read-only queries.
+    await db.close()
     return StreamingResponse(
         _job_event_stream(
             initial_job_out=initial_job_out,

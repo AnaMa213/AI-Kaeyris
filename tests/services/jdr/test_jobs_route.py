@@ -509,21 +509,21 @@ async def test_job_events_validates_visibility_once_then_refreshes_redis_only(
     queue = get_default_queue(ctx.redis_client)
     job = enqueue_job(queue, generate_elements_job, ctx.session_id)
     _mark_job_status(ctx.redis_client, job.id, RQJobStatus.STARTED)
-    get_session_calls = 0
-    original_get_session = jdr_router_module.logic.get_session
+    resolver_calls = 0
+    original_resolver = jdr_router_module.resolve_session_for_gm
 
-    async def counting_get_session(*args: Any, **kwargs: Any):
-        nonlocal get_session_calls
-        get_session_calls += 1
-        return await original_get_session(*args, **kwargs)
+    async def counting_resolver(*args: Any, **kwargs: Any):
+        nonlocal resolver_calls
+        resolver_calls += 1
+        return await original_resolver(*args, **kwargs)
 
     async def complete_after_first_event(_seconds: float) -> None:
         _mark_job_status(ctx.redis_client, job.id, RQJobStatus.FINISHED)
 
     monkeypatch.setattr(
-        jdr_router_module.logic,
-        "get_session",
-        counting_get_session,
+        jdr_router_module,
+        "resolve_session_for_gm",
+        counting_resolver,
     )
     monkeypatch.setattr(
         "app.services.jdr.router._sleep_between_job_events",
@@ -544,7 +544,68 @@ async def test_job_events_validates_visibility_once_then_refreshes_redis_only(
         {"status": "running", "phase": None, "progress_percent": None},
         {"status": "succeeded", "phase": None, "progress_percent": None},
     ]
-    assert get_session_calls == 1
+    assert resolver_calls == 1
+
+
+async def test_job_events_releases_db_connection_before_streaming(
+    ctx, db_engine, monkeypatch
+):
+    """Regression (investigation db-paralysis-long-jobs): the SSE handler must
+    release its pooled DB connection right after the one-time visibility check,
+    not hold it (idle-in-transaction) for the whole job. We capture the request
+    session and assert it has no open transaction by the time the Redis-only
+    refresh loop runs (a held connection == an open transaction here). The
+    stream must still emit both frames, proving the get_db_session teardown
+    stays harmless on an already-closed session.
+    """
+    queue = get_default_queue(ctx.redis_client)
+    job = enqueue_job(queue, generate_narrative_job, ctx.session_id)
+    _mark_job_status(ctx.redis_client, job.id, RQJobStatus.STARTED)
+
+    sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
+    request_sessions: list[Any] = []
+
+    async def tracking_dep():
+        async with sessionmaker() as session:
+            request_sessions.append(session)
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    in_transaction_at_refresh: list[bool] = []
+
+    async def complete_and_probe(_seconds: float) -> None:
+        # Runs between the first frame and the Redis-only refresh: by now the
+        # handler must have released the DB connection (no open transaction).
+        in_transaction_at_refresh.append(request_sessions[0].in_transaction())
+        _mark_job_status(ctx.redis_client, job.id, RQJobStatus.FINISHED)
+
+    monkeypatch.setattr(
+        "app.services.jdr.router._sleep_between_job_events",
+        complete_and_probe,
+        raising=False,
+    )
+
+    app = _make_jdr_app(tracking_dep, ctx.redis_client)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/services/jdr/jobs/{job.id}/events",
+            headers={"Authorization": f"Bearer {ctx.plain_token}"},
+        )
+
+    assert response.status_code == 200
+    assert _parse_sse_progress_events(response.text) == [
+        {"status": "running", "phase": None, "progress_percent": None},
+        {"status": "succeeded", "phase": None, "progress_percent": None},
+    ]
+    # Visibility check ran (one session created) and the connection was released
+    # before the streaming loop's Redis-only refresh.
+    assert len(request_sessions) == 1
+    assert in_transaction_at_refresh == [False]
 
 
 async def test_job_events_failed_artifact_includes_failure_reason(
