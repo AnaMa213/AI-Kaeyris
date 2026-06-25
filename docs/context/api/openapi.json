@@ -597,6 +597,89 @@
         "title": "LiveSessionInit",
         "type": "object"
       },
+      "LocalModelCategory": {
+        "description": "Model validation category exposed by BD-20.",
+        "enum": [
+          "transcription",
+          "summary"
+        ],
+        "title": "LocalModelCategory",
+        "type": "string"
+      },
+      "LocalModelValidationOut": {
+        "properties": {
+          "category": {
+            "$ref": "#/components/schemas/LocalModelCategory"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "model_format": {
+            "title": "Model Format",
+            "type": "string"
+          },
+          "model_path": {
+            "maxLength": 1024,
+            "title": "Model Path",
+            "type": "string"
+          },
+          "runtime": {
+            "title": "Runtime",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/LocalModelValidationStatus"
+          },
+          "validation_id": {
+            "title": "Validation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "validation_id",
+          "category",
+          "model_path",
+          "status",
+          "runtime",
+          "model_format",
+          "message",
+          "expires_at"
+        ],
+        "title": "LocalModelValidationOut",
+        "type": "object"
+      },
+      "LocalModelValidationRequest": {
+        "properties": {
+          "category": {
+            "$ref": "#/components/schemas/LocalModelCategory"
+          },
+          "model_path": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Model Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "model_path"
+        ],
+        "title": "LocalModelValidationRequest",
+        "type": "object"
+      },
+      "LocalModelValidationStatus": {
+        "description": "Reusable proof status for local model validations.",
+        "enum": [
+          "succeeded"
+        ],
+        "title": "LocalModelValidationStatus",
+        "type": "string"
+      },
       "LoginRequest": {
         "properties": {
           "password": {
@@ -702,10 +785,81 @@
       },
       "ModelSettingsOut": {
         "properties": {
+          "deepinfra_api_key_set": {
+            "default": false,
+            "description": "True iff a DeepInfra API key is stored for this user. The key itself is never returned.",
+            "title": "Deepinfra Api Key Set",
+            "type": "boolean"
+          },
+          "ollama_model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Ollama model name used when summary_provider is ollama.",
+            "title": "Ollama Model"
+          },
+          "summary_cloud_model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "DeepInfra cloud model id used when summary_provider is cloud.",
+            "title": "Summary Cloud Model"
+          },
+          "summary_local_path": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Custom local model path used when summary_provider is local.",
+            "title": "Summary Local Path"
+          },
           "summary_provider": {
             "$ref": "#/components/schemas/ModelProvider",
             "default": "cloud",
             "description": "Provider for LLM summary: cloud, local, or ollama."
+          },
+          "transcription_cloud_model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "DeepInfra cloud model id used when transcription_provider is cloud.",
+            "title": "Transcription Cloud Model"
+          },
+          "transcription_local_path": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Custom local model path used when transcription_provider is local.",
+            "title": "Transcription Local Path"
           },
           "transcription_provider": {
             "$ref": "#/components/schemas/ModelProvider",
@@ -718,6 +872,67 @@
       },
       "ModelSettingsPatch": {
         "properties": {
+          "deepinfra_api_key": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Write-only. When provided non-empty, stores/replaces the user's DeepInfra API key. Never serialized back in any response.",
+            "title": "Deepinfra Api Key"
+          },
+          "ollama_model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ollama Model"
+          },
+          "summary_cloud_model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary Cloud Model"
+          },
+          "summary_local_path": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary Local Path"
+          },
+          "summary_local_validation_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary Local Validation Id"
+          },
           "summary_provider": {
             "anyOf": [
               {
@@ -727,6 +942,42 @@
                 "type": "null"
               }
             ]
+          },
+          "transcription_cloud_model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transcription Cloud Model"
+          },
+          "transcription_local_path": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transcription Local Path"
+          },
+          "transcription_local_validation_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transcription Local Validation Id"
           },
           "transcription_provider": {
             "anyOf": [
@@ -4259,6 +4510,52 @@
           }
         ],
         "summary": "Update the current admin's JDR AI model provider settings.",
+        "tags": [
+          "jdr-auth"
+        ]
+      }
+    },
+    "/services/jdr/settings/models/local/validation": {
+      "post": {
+        "operationId": "post_local_model_validation_services_jdr_settings_models_local_validation_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalModelValidationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalModelValidationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Validate a local JDR AI model path and return a short-lived proof.",
         "tags": [
           "jdr-auth"
         ]

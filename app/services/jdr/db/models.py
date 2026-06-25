@@ -106,6 +106,19 @@ class ModelProvider(str, enum.Enum):
     OLLAMA = "ollama"
 
 
+class LocalModelCategory(str, enum.Enum):
+    """Model validation category exposed by BD-20."""
+
+    TRANSCRIPTION = "transcription"
+    SUMMARY = "summary"
+
+
+class LocalModelValidationStatus(str, enum.Enum):
+    """Reusable proof status for local model validations."""
+
+    SUCCEEDED = "succeeded"
+
+
 class JobStatus(str, enum.Enum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -668,6 +681,15 @@ class ModelSettings(Base):
     summary_cloud_model: Mapped[str | None] = mapped_column(
         String(200), nullable=True, default=None
     )
+    ollama_model: Mapped[str | None] = mapped_column(
+        String(200), nullable=True, default=None
+    )
+    transcription_local_validation_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, default=None
+    )
+    summary_local_validation_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, default=None
+    )
     # Account-level DeepInfra API key. Write-only: stored here but NEVER
     # serialized back to any response (ModelSettingsOut exposes only the
     # ``deepinfra_api_key_set`` boolean derived from this column).
@@ -682,4 +704,52 @@ class ModelSettings(Base):
         nullable=False,
         default=_utcnow,
         onupdate=_utcnow,
+    )
+
+
+class LocalModelValidation(Base):
+    """Short-lived proof that one local model path was accepted for one user."""
+
+    __tablename__ = "jdr_local_model_validations"
+
+    validation_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("core_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    category: Mapped[LocalModelCategory] = mapped_column(
+        Enum(
+            LocalModelCategory,
+            name="jdr_local_model_category",
+            native_enum=False,
+            length=32,
+            values_callable=_enum_values,
+        ),
+        nullable=False,
+        index=True,
+    )
+    model_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    path_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[LocalModelValidationStatus] = mapped_column(
+        Enum(
+            LocalModelValidationStatus,
+            name="jdr_local_model_validation_status",
+            native_enum=False,
+            length=16,
+            values_callable=_enum_values,
+        ),
+        nullable=False,
+        default=LocalModelValidationStatus.SUCCEEDED,
+        server_default=LocalModelValidationStatus.SUCCEEDED.value,
+    )
+    runtime: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_format: Mapped[str] = mapped_column(String(64), nullable=False)
+    message: Mapped[str] = mapped_column(String(255), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
     )

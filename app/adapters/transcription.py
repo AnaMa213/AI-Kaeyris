@@ -14,9 +14,11 @@ Chunking of files > 25 MB (the cloud limit) is handled at job level
 (``app/jobs/jdr.py``), not in this adapter.
 """
 
+import asyncio
 import time
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Protocol
 
 from openai import (
@@ -124,6 +126,7 @@ _DEFAULT_BASE_URLS: dict[str, str | None] = {
     "cloud": None,  # SDK default = OpenAI Whisper API
     "local": None,  # operator must set TRANSCRIPTION_BASE_URL
 }
+_PERSONAL_CLOUD_BASE_URL = "https://api.deepinfra.com/v1/openai"
 
 
 class OpenAICompatibleTranscriptionAdapter:
@@ -144,6 +147,7 @@ class OpenAICompatibleTranscriptionAdapter:
     ) -> None:
         self.provider = provider
         self.model = model
+        self.base_url = base_url
         client_kwargs: dict[str, object] = {
             "api_key": api_key,
             "timeout": timeout_seconds,
@@ -325,40 +329,150 @@ class MockTranscriptionAdapter:
         )
 
 
+class LocalFasterWhisperTranscriptionAdapter:
+    """In-process local transcription adapter backed by faster-whisper."""
+
+    provider = "local"
+
+    def __init__(self, *, model_path: str) -> None:
+        self.model_path = model_path
+        self.model = Path(model_path).name or "local-transcription-model"
+        self._model = None
+
+    async def transcribe(
+        self,
+        *,
+        audio_path: str,
+        language_hint: str | None = None,
+    ) -> TranscriptionResult:
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._transcribe_sync, audio_path, language_hint),
+                timeout=settings.TRANSCRIPTION_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            raise TransientTranscriptionError(
+                "Local transcription timed out."
+            ) from exc
+        except ModuleNotFoundError as exc:
+            raise PermanentTranscriptionError(
+                "Local transcription runtime is not installed in this backend environment."
+            ) from exc
+        except MemoryError as exc:
+            raise PermanentTranscriptionError(
+                "Local transcription model exceeded available memory."
+            ) from exc
+        except PermanentTranscriptionError:
+            raise
+        except Exception as exc:
+            raise PermanentTranscriptionError("Local transcription failed.") from exc
+
+    def _transcribe_sync(
+        self,
+        audio_path: str,
+        language_hint: str | None,
+    ) -> TranscriptionResult:
+        if self._model is None:
+            from faster_whisper import WhisperModel
+
+            self._model = WhisperModel(
+                self.model_path,
+                device=settings.LOCAL_MODEL_DEVICE,
+                compute_type=settings.LOCAL_WHISPER_COMPUTE_TYPE,
+            )
+        raw_segments, info = self._model.transcribe(
+            audio_path,
+            language=language_hint,
+        )
+        segments = [
+            TranscriptionSegment(
+                speaker_label="unknown",
+                start_seconds=float(getattr(segment, "start", 0.0) or 0.0),
+                end_seconds=float(getattr(segment, "end", 0.0) or 0.0),
+                text=str(getattr(segment, "text", "") or "").strip(),
+            )
+            for segment in raw_segments
+        ]
+        return TranscriptionResult(
+            segments=segments,
+            language=getattr(info, "language", "") or (language_hint or ""),
+            model_used=f"local:{self.model}",
+            provider=self.provider,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
 
-def build_transcription_adapter() -> TranscriptionAdapter:
-    """Build an adapter from current settings. Raises if config is invalid."""
-    provider = settings.TRANSCRIPTION_PROVIDER.strip().lower()
+def build_transcription_adapter(
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> TranscriptionAdapter:
+    """Build an adapter, falling back to env config for omitted params."""
+    explicit_provider = provider is not None
+    provider = (provider or settings.TRANSCRIPTION_PROVIDER).strip().lower()
     if provider == "mock":
         return MockTranscriptionAdapter()
     if provider not in _DEFAULT_BASE_URLS:
+        config_name = (
+            "transcription provider"
+            if explicit_provider
+            else "TRANSCRIPTION_PROVIDER"
+        )
         raise RuntimeError(
-            f"Unknown TRANSCRIPTION_PROVIDER {provider!r}. "
+            f"Unknown {config_name} {provider!r}. "
             f"Supported: {sorted({*_DEFAULT_BASE_URLS, 'mock'})}"
         )
-    if provider == "local" and not settings.TRANSCRIPTION_BASE_URL:
+    resolved_base_url = (
+        base_url.strip()
+        if base_url and base_url.strip()
+        else settings.TRANSCRIPTION_BASE_URL or _DEFAULT_BASE_URLS[provider]
+    )
+    resolved_key = (
+        api_key if api_key is not None else settings.TRANSCRIPTION_API_KEY
+    )
+    if provider == "local" and not resolved_base_url:
         raise RuntimeError(
             "TRANSCRIPTION_PROVIDER='local' requires TRANSCRIPTION_BASE_URL "
             "(e.g. http://gpu-host.lan:8001/v1)."
         )
-    if provider == "cloud" and not settings.TRANSCRIPTION_API_KEY:
+    if provider == "cloud" and not resolved_key:
         raise RuntimeError(
             "TRANSCRIPTION_PROVIDER='cloud' requires TRANSCRIPTION_API_KEY. "
             "Set TRANSCRIPTION_PROVIDER=mock for tests."
         )
 
-    base_url = settings.TRANSCRIPTION_BASE_URL or _DEFAULT_BASE_URLS[provider]
     return OpenAICompatibleTranscriptionAdapter(
         provider=provider,
-        model=settings.TRANSCRIPTION_MODEL,
-        api_key=settings.TRANSCRIPTION_API_KEY or "noop",
-        base_url=base_url,
+        model=model or settings.TRANSCRIPTION_MODEL,
+        api_key=resolved_key or "noop",
+        base_url=resolved_base_url,
         timeout_seconds=settings.TRANSCRIPTION_TIMEOUT_SECONDS,
     )
+
+
+def build_personal_cloud_transcription_adapter(
+    *,
+    model: str,
+    api_key: str,
+) -> TranscriptionAdapter:
+    """Build the configured personal cloud transcription adapter."""
+    return build_transcription_adapter(
+        provider="cloud",
+        model=model,
+        api_key=api_key,
+        base_url=_PERSONAL_CLOUD_BASE_URL,
+    )
+
+
+def build_local_transcription_adapter(*, model_path: str) -> TranscriptionAdapter:
+    """Build an in-process local transcription adapter for a validated path."""
+    return LocalFasterWhisperTranscriptionAdapter(model_path=model_path)
 
 
 @lru_cache(maxsize=1)

@@ -27,6 +27,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+local = [
+    "faster-whisper",
+    "llama-cpp-python",
+]
 dev = [
     "pytest",
     "pytest-asyncio",

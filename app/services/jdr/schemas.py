@@ -23,6 +23,8 @@ from app.core.datetime_serialization import ensure_aware_utc, serialize_datetime
 from app.services.jdr.db.models import (
     JobKind,
     JobStatus,
+    LocalModelCategory,
+    LocalModelValidationStatus,
     ModelProvider,
     SessionMode,
     SessionState,
@@ -121,6 +123,11 @@ class ModelSettingsOut(JdrSchema):
         max_length=200,
         description="DeepInfra cloud model id used when summary_provider is cloud.",
     )
+    ollama_model: str | None = Field(
+        None,
+        max_length=200,
+        description="Ollama model name used when summary_provider is ollama.",
+    )
     deepinfra_api_key_set: bool = Field(
         False,
         description=(
@@ -135,8 +142,11 @@ class ModelSettingsPatch(JdrSchema):
     summary_provider: ModelProvider | None = None
     transcription_local_path: str | None = Field(None, max_length=1024)
     summary_local_path: str | None = Field(None, max_length=1024)
+    transcription_local_validation_id: str | None = Field(None, max_length=128)
+    summary_local_validation_id: str | None = Field(None, max_length=128)
     transcription_cloud_model: str | None = Field(None, max_length=200)
     summary_cloud_model: str | None = Field(None, max_length=200)
+    ollama_model: str | None = Field(None, max_length=200)
     deepinfra_api_key: str | None = Field(
         None,
         max_length=512,
@@ -145,6 +155,34 @@ class ModelSettingsPatch(JdrSchema):
             "DeepInfra API key. Never serialized back in any response."
         ),
     )
+
+
+class LocalModelValidationRequest(JdrSchema):
+    category: LocalModelCategory
+    model_path: str = Field(..., min_length=1, max_length=1024)
+
+    @field_validator("model_path")
+    @classmethod
+    def reject_blank_model_path(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Local model path cannot be blank.")
+        return stripped
+
+
+class LocalModelValidationOut(JdrSchema):
+    validation_id: str
+    category: LocalModelCategory
+    model_path: str = Field(..., max_length=1024)
+    status: LocalModelValidationStatus
+    runtime: str
+    model_format: str
+    message: str
+    expires_at: datetime
+
+    @field_serializer("expires_at", when_used="json")
+    def serialize_expires_at(self, value: datetime) -> str:
+        return serialize_datetime_utc(value).replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
