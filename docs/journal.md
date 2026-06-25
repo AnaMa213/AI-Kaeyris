@@ -802,3 +802,67 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
   roadmap pour la parité + le fix).
 - Filet SQLite (WAL + busy_timeout) pour le run local hors Docker laissé en option
   non implémentée — à décider si le workflow hôte le nécessite.
+
+## 2026-06-16 - BD-19 : Application des settings modeles au pipeline JDR
+
+### Ce qui a ete fait
+
+- Les factories LLM/transcription acceptent maintenant des parametres explicites
+  tout en gardant les getters caches pour les usages env et les tests existants.
+- Les jobs JDR resolvent le proprietaire de session, chargent ses settings modele,
+  puis routent cloud payant, cloud gratuit et Ollama HTTP selon la configuration
+  effective.
+- `jdr_model_settings` gagne `ollama_model`, expose en PATCH/GET et dans OpenAPI.
+- `GET /settings/models` retourne les defaults env effectifs quand aucun row
+  utilisateur n'existe, sans exposer les secrets operateur.
+
+### Ce que j'ai appris
+
+- **Un setting persiste mais non branche est pire qu'absent** : l'UI donne une
+  impression de controle alors que le worker ignore le choix.
+- **Compatibilite des tests = contrat implicite** : les monkeypatchs existants
+  sur `get_llm_adapter` / `get_transcription_adapter` ont guide le design vers
+  un fallback par getters plutot qu'un remplacement brutal.
+- **"Cloud" et provider technique ne sont pas le meme niveau** : le domaine JDR
+  parle de postures utilisateur (`cloud`, `ollama`, `local`), les adapters
+  traduisent vers les endpoints compatibles.
+
+### Limitations acceptees
+
+- Pas de mode local in-process dans BD-19 ; les providers `local` retombent sur
+  l'env operateur.
+- Pas de decouverte automatique des modeles Ollama.
+- Pas de chiffrement at-rest de la cle personnelle ; la cle reste write-only
+  cote API.
+
+## 2026-06-16 - BD-20 : Validation des modeles locaux JDR
+
+### Ce qui a ete fait
+
+- Ajout de `POST /services/jdr/settings/models/local/validation` pour produire
+  une preuve courte duree liee au user, a la categorie et au chemin normalise.
+- Les preuves brutes ne sont pas stockees : la base conserve seulement leur
+  hash SHA-256 avec le chemin hash, le runtime, le format et l'expiration.
+- `PATCH /services/jdr/settings/models` refuse maintenant un chemin Local
+  nouveau ou modifie sans preuve valide.
+- Les jobs JDR utilisent les adapters locaux pour les settings Local valides ;
+  un echec runtime devient un echec visible, pas un fallback silencieux.
+- OpenAPI, doc service, memo et specs Spec Kit 017 mis a jour.
+
+### Ce que j'ai appris
+
+- **Une validation sans enforcement ne securise rien** : l'endpoint de probe
+  doit etre couple au PATCH, sinon un appel direct contourne l'UI.
+- **Hasher les preuves suffit pour ce besoin** : on evite un secret de
+  signature global tout en reduisant le replay si la table est exposee.
+- **Les deps IA locales doivent rester optionnelles** : charger les runtimes
+  lazy garde le backend cloud/test leger, tout en echouant honnetement quand
+  Local est demande sans runtime installe.
+
+### Limitations acceptees
+
+- Pas de decouverte automatique ni telechargement de modeles.
+- Pas de sandbox filesystem stricte par repertoire autorise ; les chemins
+  restent reserves aux administrateurs.
+- Les probes utilisent un timeout applicatif ; un chargement natif lance en
+  thread peut finir apres le timeout cote requete.
