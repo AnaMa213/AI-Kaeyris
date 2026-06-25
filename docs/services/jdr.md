@@ -97,10 +97,39 @@ Au premier démarrage, l'app importe cette entrée dans `jdr_api_keys` avec `rol
 Les API keys historiques restent supportées pour les clients machine. Pour compatibilité avec les tables JDR existantes, chaque compte web reçoit aussi une clé JDR interne non exposée : les ownership FKs continuent donc de pointer vers `jdr_api_keys`. Le rôle API-key legacy `player` reste réservé aux tokens joueur `/me/*` ; les memberships web de campagne utilisent `gm|pj`.
 
 **Settings modèles IA BD-18 / FR-22** :
-- `GET /services/jdr/settings/models` retourne les choix de provider du compte administrateur web courant. Par défaut : `transcription_provider="cloud"` et `summary_provider="cloud"`.
-- `PATCH /services/jdr/settings/models` accepte un patch partiel avec `transcription_provider` et/ou `summary_provider`, valeurs autorisées : `cloud`, `local`, `ollama`.
+- `GET /services/jdr/settings/models` retourne les choix de provider du compte administrateur web courant. Si aucun row `jdr_model_settings` n'existe, BD-19 retourne les defaults effectifs lus depuis l'env operateur (provider + model applicable), pas seulement les defaults Pydantic.
+- `PATCH /services/jdr/settings/models` accepte un patch partiel avec `transcription_provider`, `summary_provider`, les modeles cloud par categorie, `ollama_model`, et la cle cloud personnelle write-only.
 - Ces settings sont scopés au compte web (`core_users.id`) et réservés aux administrateurs connectés par cookie. Les API keys machine et les comptes `system_role="user"` sont refusés.
-- Scope volontairement limité : BD-18 stocke ici seulement la sélection de provider. Chemin de modèle local, clé cloud DeepInfra et registre de modèles restent des contrats ultérieurs.
+- BD-19 applique ces settings dans le pipeline worker JDR : cloud payant = cle personnelle + modele choisi, cloud gratuit = env operateur, Ollama = LLM HTTP seulement avec `ollama_model`. La transcription ne passe jamais par Ollama.
+- BD-20 ajoute `POST /services/jdr/settings/models/local/validation` : le backend valide un chemin local pour `transcription` ou `summary`, puis retourne un `validation_id` opaque, un statut `succeeded`, le runtime, le format et `expires_at`.
+- `PATCH /services/jdr/settings/models` exige maintenant `transcription_local_validation_id` ou `summary_local_validation_id` des qu'un chemin Local est introduit ou modifie. La preuve est liee au user, a la categorie, au chemin normalise, au succes et a l'expiration.
+- Une fois Local sauvegarde avec preuve, les jobs utilisent le runtime local correspondant. Si ce runtime echoue, le job echoue explicitement ; il ne retombe pas silencieusement sur l'env operateur. Le fallback env reste reserve aux sessions sans owner/settings resolvables.
+- Secrets : la cle personnelle brute et les cles operateur ne sont jamais retournees ; seul `deepinfra_api_key_set` indique l'existence d'une cle personnelle stockee.
+
+**Runtime local in-process BD-20** :
+
+| Var env | Default | Role |
+|---|---|---|
+| `LOCAL_MODEL_VALIDATION_TIMEOUT_SECONDS` | `45` | Budget max d'un probe de validation local |
+| `LOCAL_MODEL_VALIDATION_TTL_SECONDS` | `900` | Duree de validite d'une preuve de validation |
+| `LOCAL_MODEL_DEVICE` | `cpu` | Device passe aux runtimes locaux |
+| `LOCAL_WHISPER_COMPUTE_TYPE` | `int8` | Compute type faster-whisper pour limiter la RAM |
+| `LOCAL_LLM_CONTEXT_TOKENS` | `2048` | Contexte charge par le runtime GGUF local |
+| `LOCAL_LLM_GPU_LAYERS` | `0` | Couches offloadees GPU par llama.cpp |
+
+| Categorie | Format supporte | Runtime optionnel |
+|---|---|---|
+| `transcription` | Repertoire Whisper CTranslate2 lisible (`model.bin`) | `faster-whisper` |
+| `summary` | Fichier `.gguf` lisible | `llama-cpp-python` |
+
+Installer les runtimes uniquement sur les hotes qui valident/executent Local :
+
+```powershell
+pip install -e ".[local]"
+```
+
+Les chemins sont ceux visibles par le backend. En Docker, monter les modeles et
+utiliser un chemin conteneur (`/models/...`) plutot qu'un chemin hote Windows.
 
 **Reseed local/staging BD-7 après purge** :
 1. Purger la base locale/staging, puis appliquer `alembic upgrade head`.

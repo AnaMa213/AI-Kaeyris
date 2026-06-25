@@ -57,9 +57,18 @@ from app.services.jdr.campaign_context import (
     resolve_active_campaign_for_user,
     resolve_campaign_scope_for_auth,
 )
-from app.services.jdr.db.models import CampaignRole
+from app.services.jdr.db.models import CampaignRole, LocalModelCategory, ModelProvider
 from app.services.jdr.db.repositories import CampaignRepository, ModelSettingsRepository
-from app.services.jdr.schemas import ModelSettingsOut, ModelSettingsPatch
+from app.services.jdr.local_model_validation import (
+    create_local_model_validation,
+    require_local_model_validation_hash,
+)
+from app.services.jdr.schemas import (
+    LocalModelValidationOut,
+    LocalModelValidationRequest,
+    ModelSettingsOut,
+    ModelSettingsPatch,
+)
 
 logger = get_logger(__name__)
 
@@ -372,7 +381,28 @@ async def get_users(
 
 def _model_settings_out(row) -> ModelSettingsOut:
     if row is None:
-        return ModelSettingsOut()
+        transcription_provider = _effective_transcription_provider()
+        summary_provider = _effective_summary_provider()
+        return ModelSettingsOut(
+            transcription_provider=transcription_provider,
+            summary_provider=summary_provider,
+            transcription_cloud_model=(
+                settings.TRANSCRIPTION_MODEL
+                if transcription_provider is ModelProvider.CLOUD
+                else None
+            ),
+            summary_cloud_model=(
+                settings.LLM_MODEL
+                if summary_provider is ModelProvider.CLOUD
+                else None
+            ),
+            ollama_model=(
+                settings.LLM_MODEL
+                if summary_provider is ModelProvider.OLLAMA
+                else None
+            ),
+            deepinfra_api_key_set=False,
+        )
     return ModelSettingsOut(
         transcription_provider=row.transcription_provider,
         summary_provider=row.summary_provider,
@@ -380,6 +410,7 @@ def _model_settings_out(row) -> ModelSettingsOut:
         summary_local_path=row.summary_local_path,
         transcription_cloud_model=row.transcription_cloud_model,
         summary_cloud_model=row.summary_cloud_model,
+        ollama_model=row.ollama_model,
         # Expose only whether a key exists, never the key itself.
         deepinfra_api_key_set=bool(row.deepinfra_api_key),
     )
@@ -399,6 +430,20 @@ async def get_model_settings(
     return _model_settings_out(row)
 
 
+@router.post(
+    "/services/jdr/settings/models/local/validation",
+    response_model=LocalModelValidationOut,
+    summary="Validate a local JDR AI model path and return a short-lived proof.",
+)
+async def post_local_model_validation(
+    payload: LocalModelValidationRequest,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> LocalModelValidationOut:
+    user = await _require_admin_user(db, auth)
+    return await create_local_model_validation(db, user_id=user.id, payload=payload)
+
+
 @router.patch(
     "/services/jdr/settings/models",
     response_model=ModelSettingsOut,
@@ -410,7 +455,23 @@ async def patch_model_settings(
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ModelSettingsOut:
     user = await _require_admin_user(db, auth)
-    row = await ModelSettingsRepository(db).upsert_for_user(
+    repo = ModelSettingsRepository(db)
+    current = await repo.get_for_user(user.id)
+    transcription_validation_hash = await _required_local_validation_hash_if_needed(
+        db,
+        user_id=user.id,
+        current=current,
+        payload=payload,
+        category=LocalModelCategory.TRANSCRIPTION,
+    )
+    summary_validation_hash = await _required_local_validation_hash_if_needed(
+        db,
+        user_id=user.id,
+        current=current,
+        payload=payload,
+        category=LocalModelCategory.SUMMARY,
+    )
+    row = await repo.upsert_for_user(
         user_id=user.id,
         transcription_provider=payload.transcription_provider,
         summary_provider=payload.summary_provider,
@@ -418,6 +479,9 @@ async def patch_model_settings(
         summary_local_path=payload.summary_local_path,
         transcription_cloud_model=payload.transcription_cloud_model,
         summary_cloud_model=payload.summary_cloud_model,
+        ollama_model=payload.ollama_model,
+        transcription_local_validation_hash=transcription_validation_hash,
+        summary_local_validation_hash=summary_validation_hash,
         deepinfra_api_key=payload.deepinfra_api_key,
     )
     # NOTE: never log payload.deepinfra_api_key — it is a secret.
@@ -426,9 +490,76 @@ async def patch_model_settings(
         user_id=str(user.id),
         transcription_provider=row.transcription_provider.value,
         summary_provider=row.summary_provider.value,
+        ollama_model=row.ollama_model,
         deepinfra_api_key_set=bool(row.deepinfra_api_key),
     )
     return _model_settings_out(row)
+
+
+async def _required_local_validation_hash_if_needed(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    current,
+    payload: ModelSettingsPatch,
+    category: LocalModelCategory,
+) -> str | None:
+    if category is LocalModelCategory.TRANSCRIPTION:
+        provider_field = "transcription_provider"
+        path_field = "transcription_local_path"
+        proof_field = "transcription_local_validation_id"
+        hash_field = "transcription_local_validation_hash"
+    else:
+        provider_field = "summary_provider"
+        path_field = "summary_local_path"
+        proof_field = "summary_local_validation_id"
+        hash_field = "summary_local_validation_hash"
+
+    current_provider = (
+        getattr(current, provider_field) if current is not None else ModelProvider.CLOUD
+    )
+    current_path = getattr(current, path_field) if current is not None else None
+    current_hash = getattr(current, hash_field) if current is not None else None
+    effective_provider = getattr(payload, provider_field) or current_provider
+    effective_path = (
+        getattr(payload, path_field)
+        if path_field in payload.model_fields_set
+        else current_path
+    )
+    path_changed = path_field in payload.model_fields_set and effective_path != current_path
+    introduces_local = current_provider is not ModelProvider.LOCAL and (
+        effective_provider is ModelProvider.LOCAL
+    )
+    needs_validation = (
+        effective_provider is ModelProvider.LOCAL
+        and (path_changed or introduces_local or not current_hash)
+    )
+    if not needs_validation:
+        return None
+
+    return await require_local_model_validation_hash(
+        db,
+        user_id=user_id,
+        category=category,
+        model_path=effective_path,
+        validation_id=getattr(payload, proof_field),
+    )
+
+
+def _effective_transcription_provider() -> ModelProvider:
+    provider = settings.TRANSCRIPTION_PROVIDER.strip().lower()
+    if provider == ModelProvider.LOCAL.value:
+        return ModelProvider.LOCAL
+    return ModelProvider.CLOUD
+
+
+def _effective_summary_provider() -> ModelProvider:
+    provider = settings.LLM_PROVIDER.strip().lower()
+    if provider == ModelProvider.OLLAMA.value:
+        return ModelProvider.OLLAMA
+    if provider == "vllm":
+        return ModelProvider.LOCAL
+    return ModelProvider.CLOUD
 
 
 @router.patch("/services/jdr/users/{user_id}", response_model=UserOut)

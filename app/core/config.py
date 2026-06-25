@@ -69,6 +69,16 @@ class Settings(BaseSettings):
     # whole file (tests use 0 to keep their fake audio bytes working).
     TRANSCRIPTION_CHUNK_DURATION_SECONDS: int = 30
 
+    # Local in-process model validation/execution (BD-20).
+    # Runtime packages are optional and imported lazily so default API/worker
+    # installs are not forced to carry local inference dependencies.
+    LOCAL_MODEL_VALIDATION_TIMEOUT_SECONDS: float = 45.0
+    LOCAL_MODEL_VALIDATION_TTL_SECONDS: int = 900
+    LOCAL_MODEL_DEVICE: str = "cpu"
+    LOCAL_WHISPER_COMPUTE_TYPE: str = "int8"
+    LOCAL_LLM_CONTEXT_TOKENS: int = 2048
+    LOCAL_LLM_GPU_LAYERS: int = 0
+
     # Sous-jalon 5.5 — mode `non_diarised`. Taille maximale d'un chunk de
     # transcription stocké dans jdr_chunks (en caractères). ~30 000 chars
     # ≈ 7 500-10 000 tokens FR, confortable pour un contexte 32k tokens avec
@@ -108,4 +118,19 @@ if settings.WEB_SESSION_TTL_SECONDS <= 0:
     raise RuntimeError(
         "WEB_SESSION_TTL_SECONDS must be strictly positive "
         f"(got {settings.WEB_SESSION_TTL_SECONDS!r})."
+    )
+if settings.LOCAL_MODEL_VALIDATION_TIMEOUT_SECONDS <= 0:
+    raise RuntimeError(
+        "LOCAL_MODEL_VALIDATION_TIMEOUT_SECONDS must be strictly positive "
+        f"(got {settings.LOCAL_MODEL_VALIDATION_TIMEOUT_SECONDS!r})."
+    )
+if settings.LOCAL_MODEL_VALIDATION_TTL_SECONDS <= 0:
+    raise RuntimeError(
+        "LOCAL_MODEL_VALIDATION_TTL_SECONDS must be strictly positive "
+        f"(got {settings.LOCAL_MODEL_VALIDATION_TTL_SECONDS!r})."
+    )
+if settings.LOCAL_LLM_CONTEXT_TOKENS <= 0:
+    raise RuntimeError(
+        "LOCAL_LLM_CONTEXT_TOKENS must be strictly positive "
+        f"(got {settings.LOCAL_LLM_CONTEXT_TOKENS!r})."
     )

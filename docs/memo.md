@@ -28,7 +28,9 @@
 | **Alembic** | migrations standard de l'écosystème SQLAlchemy, fichiers Python versionnés |
 | **aiosqlite** | driver SQLite async pour le dev ; PostgreSQL+asyncpg en cible Jalon 8 |
 | **argon2-cffi** | hash mots de passe / tokens conforme OWASP (vs bcrypt/pbkdf2 : Argon2 gagnant PHC 2015) |
-| **faster-whisper + pyannote** (futur GPU host) | transcription + diarisation locale sur RTX 4090 LAN, alternative au cloud OpenAI |
+| **faster-whisper** (extra `local`) | validation/execution transcription locale in-process, charge lazy seulement en mode Local |
+| **llama-cpp-python** (extra `local`) | execution locale GGUF pour resumes JDR, charge lazy seulement en mode Local |
+| **pyannote** (futur GPU host) | diarisation locale sur RTX 4090 LAN, hors backend in-process courant |
 | **prometheus-client** (Jalon 6) | métriques applicatives, `/metrics` text exposition, naming `kaeyris_*` |
 | **OpenTelemetry** (Jalon 6 — opt-in) | traces auto-instrumentation FastAPI/SQLAlchemy/httpx, exporter console ou OTLP |
 | **GitHub Actions** (Jalon 7) | CI native du repo, gratuit pour OSS / repo perso, workflows YAML (vs Jenkins : auto-hébergé inutile à ce scale) |
@@ -142,6 +144,35 @@ down -v` la repart à zéro. SQLite reste le défaut hors-Docker (tests in-memor
 | `PATCH /services/jdr/pjs/<pj_id>` | Renomme un PJ ou modifie son `user_id`; `user_id: null` délie explicitement |
 | `PUT /services/jdr/sessions/{id}/transcription` | Persiste l'override Markdown corrigé BD-13 pour une session `transcribed` |
 | `GET /services/jdr/sessions/{id}/transcription.md` | Renvoie l'override Markdown s'il existe, sinon le rendu automatique |
+
+### Settings modeles IA JDR (BD-19/BD-20)
+
+| Geste | Raison |
+|---|---|
+| `GET /services/jdr/settings/models` sans row | Retourne les providers/modeles env effectifs pour eviter un affichage UI mensonger |
+| `PATCH /services/jdr/settings/models` avec `ollama_model` | Persiste le modele Ollama utilise quand `summary_provider="ollama"` |
+| Jobs JDR + settings cloud avec cle personnelle | Utilisent la cle personnelle et le modele cloud choisi par le GM |
+| Jobs JDR + settings cloud sans cle personnelle | Retombent sur l'env operateur, comportement historique |
+| Jobs JDR + `summary_provider="ollama"` | LLM HTTP Ollama seulement ; transcription hors Ollama |
+| `POST /services/jdr/settings/models/local/validation` | Valide un chemin Local et retourne une preuve courte duree |
+| `PATCH /services/jdr/settings/models` + `*_local_validation_id` | Obligatoire pour sauvegarder un chemin Local nouveau/modifie |
+| Jobs JDR + provider `local` valide | Utilisent le runtime local ; echec visible, pas de fallback silencieux |
+| Reponse settings | N'expose jamais `deepinfra_api_key`; seulement `deepinfra_api_key_set` |
+
+| Var env Local BD-20 | Default | Role |
+|---|---|---|
+| `LOCAL_MODEL_VALIDATION_TIMEOUT_SECONDS` | `45` | Budget de probe local |
+| `LOCAL_MODEL_VALIDATION_TTL_SECONDS` | `900` | Expiration de preuve |
+| `LOCAL_MODEL_DEVICE` | `cpu` | Device runtime |
+| `LOCAL_WHISPER_COMPUTE_TYPE` | `int8` | Compute faster-whisper |
+| `LOCAL_LLM_CONTEXT_TOKENS` | `2048` | Contexte GGUF |
+| `LOCAL_LLM_GPU_LAYERS` | `0` | Offload GPU llama.cpp |
+
+| Format Local BD-20 | Usage |
+|---|---|
+| Repertoire CTranslate2 Whisper avec `model.bin` | `category="transcription"` |
+| Fichier `.gguf` | `category="summary"` |
+| `pip install -e ".[local]"` | Installe les runtimes optionnels locaux |
 
 | BD-9 | Action |
 |---|---|

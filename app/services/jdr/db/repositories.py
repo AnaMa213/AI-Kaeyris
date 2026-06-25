@@ -36,6 +36,9 @@ from app.services.jdr.db.models import (
     CampaignMember,
     CampaignRole,
     Job,
+    LocalModelCategory,
+    LocalModelValidation,
+    LocalModelValidationStatus,
     ModelProvider,
     ModelSettings,
     Pj,
@@ -854,6 +857,43 @@ class SessionPlayerRepository(_BaseRepository):
         return rows
 
 
+class LocalModelValidationRepository(_BaseRepository):
+    """Short-lived local model validation proof access (BD-20)."""
+
+    async def create_succeeded(
+        self,
+        *,
+        validation_hash: str,
+        user_id: UUID,
+        category: LocalModelCategory,
+        model_path: str,
+        path_hash: str,
+        runtime: str,
+        model_format: str,
+        message: str,
+        expires_at: datetime,
+    ) -> LocalModelValidation:
+        row = LocalModelValidation(
+            validation_hash=validation_hash,
+            user_id=user_id,
+            category=category,
+            model_path=model_path,
+            path_hash=path_hash,
+            status=LocalModelValidationStatus.SUCCEEDED,
+            runtime=runtime,
+            model_format=model_format,
+            message=message,
+            expires_at=expires_at,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
+    async def get_by_hash(self, validation_hash: str) -> LocalModelValidation | None:
+        return await self._session.get(LocalModelValidation, validation_hash)
+
+
 class ModelSettingsRepository(_BaseRepository):
     """Per-web-user AI provider settings (BD-18 / FR-22)."""
 
@@ -870,6 +910,9 @@ class ModelSettingsRepository(_BaseRepository):
         summary_local_path: str | None = None,
         transcription_cloud_model: str | None = None,
         summary_cloud_model: str | None = None,
+        ollama_model: str | None = None,
+        transcription_local_validation_hash: str | None = None,
+        summary_local_validation_hash: str | None = None,
         deepinfra_api_key: str | None = None,
     ) -> ModelSettings:
         row = await self.get_for_user(user_id)
@@ -889,6 +932,14 @@ class ModelSettingsRepository(_BaseRepository):
             row.transcription_cloud_model = transcription_cloud_model
         if summary_cloud_model is not None:
             row.summary_cloud_model = summary_cloud_model
+        if ollama_model is not None:
+            row.ollama_model = ollama_model
+        if transcription_local_validation_hash is not None:
+            row.transcription_local_validation_hash = (
+                transcription_local_validation_hash
+            )
+        if summary_local_validation_hash is not None:
+            row.summary_local_validation_hash = summary_local_validation_hash
         # Write-only secret: only store when a non-empty key is provided; an
         # empty string means "keep the existing key" (the frontend never sends
         # an empty value to clear it).

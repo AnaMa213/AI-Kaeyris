@@ -26,8 +26,12 @@ from rq import get_current_job
 from sqlalchemy import select, update
 
 from app.adapters.llm import (
+    LLMAdapter,
     PermanentLLMError,
     TransientLLMError,
+    build_llm_adapter,
+    build_local_llm_adapter,
+    build_personal_cloud_llm_adapter,
     get_llm_adapter,
 )
 from app.adapters.transcription import (
@@ -36,12 +40,15 @@ from app.adapters.transcription import (
     TranscriptionResult,
     TranscriptionSegment,
     TransientTranscriptionError,
+    build_local_transcription_adapter,
+    build_personal_cloud_transcription_adapter,
     get_transcription_adapter,
 )
 from app.core.config import settings
 from app.core.db import get_sessionmaker
 from app.core.logging import get_logger
 from app.core.metrics import JOB_DURATION_SECONDS, JOBS_TOTAL
+from app.core.models import User
 from app.jobs import PermanentJobError, TransientJobError
 from app.services.jdr.audio import (
     AudioChunkingError,
@@ -51,8 +58,11 @@ from app.services.jdr.audio import (
 )
 from app.services.jdr.db.models import (
     AudioSource,
+    Campaign,
     Job,
     JobStatus,
+    ModelProvider,
+    ModelSettings,
     Pj,
     Session,
     SessionState,
@@ -63,6 +73,7 @@ from app.services.jdr.db.repositories import (
     ArtifactRepository,
     ChunkRepository,
     MappingRepository,
+    ModelSettingsRepository,
     SessionPlayerRepository,
     SessionRepository,
     TranscriptionRepository,
@@ -77,6 +88,118 @@ from app.services.jdr.prompts import (
 )
 
 logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Per-user model settings routing (BD-19)
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_session_owner_id(session_id: UUID) -> UUID | None:
+    """Resolve the owning web user for a session, if one can be found."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db:
+        session_row = await db.scalar(
+            select(Session).where(Session.id == session_id)
+        )
+        if session_row is None:
+            return None
+
+        if session_row.campaign_id is not None:
+            campaign = await db.scalar(
+                select(Campaign).where(Campaign.id == session_row.campaign_id)
+            )
+            if campaign is not None:
+                return campaign.owner_user_id
+
+        return await db.scalar(
+            select(User.id).where(User.api_key_id == session_row.gm_key_id)
+        )
+
+
+async def _load_user_model_settings(user_id: UUID) -> ModelSettings | None:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db:
+        return await ModelSettingsRepository(db).get_for_user(user_id)
+
+
+async def _load_session_model_settings(session_id: UUID) -> ModelSettings | None:
+    owner_id = await _resolve_session_owner_id(session_id)
+    if owner_id is None:
+        return None
+    return await _load_user_model_settings(owner_id)
+
+
+def _build_llm_adapter_for_user(row: ModelSettings | None) -> LLMAdapter:
+    """Build an LLM adapter from user settings, preserving env fallback."""
+    if row is None:
+        return get_llm_adapter()
+
+    if row.summary_provider is ModelProvider.OLLAMA:
+        return build_llm_adapter(
+            provider="ollama",
+            model=row.ollama_model or settings.LLM_MODEL,
+            api_key="noop",
+        )
+
+    if row.summary_provider is ModelProvider.CLOUD:
+        if row.deepinfra_api_key:
+            return build_personal_cloud_llm_adapter(
+                model=row.summary_cloud_model or settings.LLM_MODEL,
+                api_key=row.deepinfra_api_key,
+            )
+        return get_llm_adapter()
+
+    if row.summary_provider is ModelProvider.LOCAL:
+        if not row.summary_local_path or not row.summary_local_validation_hash:
+            raise PermanentJobError(
+                "Validated local summary settings are required before running Local jobs."
+            )
+        return build_local_llm_adapter(model_path=row.summary_local_path)
+
+    return get_llm_adapter()
+
+
+def _build_transcription_adapter_for_user(
+    row: ModelSettings | None,
+) -> TranscriptionAdapter:
+    """Build a transcription adapter from user settings, preserving env fallback."""
+    if row is None:
+        return get_transcription_adapter()
+
+    if row.transcription_provider is ModelProvider.CLOUD:
+        if row.deepinfra_api_key:
+            return build_personal_cloud_transcription_adapter(
+                model=row.transcription_cloud_model
+                or settings.TRANSCRIPTION_MODEL,
+                api_key=row.deepinfra_api_key,
+            )
+        return get_transcription_adapter()
+
+    if row.transcription_provider is ModelProvider.LOCAL:
+        if (
+            not row.transcription_local_path
+            or not row.transcription_local_validation_hash
+        ):
+            raise PermanentJobError(
+                "Validated local transcription settings are required before "
+                "running Local jobs."
+            )
+        return build_local_transcription_adapter(
+            model_path=row.transcription_local_path
+        )
+
+    logger.warning(
+        "transcription_adapter.ollama_not_supported",
+        note="Ollama is supported for LLM jobs only; falling back to operator config.",
+    )
+    return get_transcription_adapter()
+
+
+def _llm_model_used(adapter: LLMAdapter) -> str:
+    provider = getattr(adapter, "provider", settings.LLM_PROVIDER)
+    model = getattr(adapter, "model", settings.LLM_MODEL)
+    return f"{provider}:{model}"
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +409,8 @@ async def _transcribe_session(
 
     # --- Step 2: call the adapter (long, no DB) -----------------------------
 
-    adapter = get_transcription_adapter()
+    user_settings = await _load_session_model_settings(session_id)
+    adapter = _build_transcription_adapter_for_user(user_settings)
     chunk_duration = settings.TRANSCRIPTION_CHUNK_DURATION_SECONDS
 
     def _on_chunk(chunks_done: int, chunks_total: int) -> None:
@@ -468,7 +592,8 @@ async def _generate_narrative(session_id: UUID) -> None:
     )
 
     # Step 3: call the LLM
-    adapter = get_llm_adapter()
+    user_settings = await _load_session_model_settings(session_id)
+    adapter = _build_llm_adapter_for_user(user_settings)
     try:
         text = await adapter.complete(
             system=NARRATIVE_SYSTEM_PROMPT,
@@ -481,7 +606,7 @@ async def _generate_narrative(session_id: UUID) -> None:
         raise PermanentJobError(str(exc)) from exc
 
     # Step 4: UPSERT the artifact
-    model_used = f"{settings.LLM_PROVIDER}:{settings.LLM_MODEL}"
+    model_used = _llm_model_used(adapter)
     async with sessionmaker() as db:
         await ArtifactRepository(db).upsert(
             session_id,
@@ -512,7 +637,8 @@ async def _generate_elements(session_id: UUID) -> None:
         campaign_context, source_text
     )
 
-    adapter = get_llm_adapter()
+    user_settings = await _load_session_model_settings(session_id)
+    adapter = _build_llm_adapter_for_user(user_settings)
     try:
         raw = await adapter.complete(
             system=ELEMENTS_SYSTEM_PROMPT,
@@ -526,7 +652,7 @@ async def _generate_elements(session_id: UUID) -> None:
 
     elements = _parse_elements_response(raw)
 
-    model_used = f"{settings.LLM_PROVIDER}:{settings.LLM_MODEL}"
+    model_used = _llm_model_used(adapter)
     async with sessionmaker() as db:
         await ArtifactRepository(db).upsert(
             session_id,
@@ -602,8 +728,9 @@ async def _generate_povs(session_id: UUID) -> None:
     )
 
     # Step 3: per-PJ LLM calls
-    adapter = get_llm_adapter()
-    model_used = f"{settings.LLM_PROVIDER}:{settings.LLM_MODEL}"
+    user_settings = await _load_session_model_settings(session_id)
+    adapter = _build_llm_adapter_for_user(user_settings)
+    model_used = _llm_model_used(adapter)
 
     results: list[tuple[UUID, str]] = []
     for pj_id, speaker_label in pj_pairs:
@@ -763,7 +890,8 @@ async def _generate_summary(session_id: UUID) -> None:
         await db.commit()
 
     # --- Step 2 : map -------------------------------------------------------
-    adapter = get_llm_adapter()
+    user_settings = await _load_session_model_settings(session_id)
+    adapter = _build_llm_adapter_for_user(user_settings)
     partial_summaries: list[str] = []
     for chunk_id, _ordre, text in chunk_data:
         try:
@@ -801,7 +929,7 @@ async def _generate_summary(session_id: UUID) -> None:
             raise PermanentJobError(str(exc)) from exc
 
     # --- Step 4 : UPSERT summary artifact -----------------------------------
-    model_used = f"{settings.LLM_PROVIDER}:{settings.LLM_MODEL}"
+    model_used = _llm_model_used(adapter)
     async with sessionmaker() as db:
         await ArtifactRepository(db).upsert(
             session_id,
