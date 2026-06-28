@@ -23,7 +23,8 @@ from uuid import UUID
 
 from argon2 import PasswordHasher
 from redis import Redis
-from rq.exceptions import NoSuchJobError
+from rq.command import send_stop_job_command
+from rq.exceptions import InvalidJobOperation, NoSuchJobError
 from rq.job import Job as RQJob
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -163,6 +164,22 @@ class TranscriptionStillActiveError(Exception):
 
 class NoAudioToPurgeError(Exception):
     """The session has no audio source on record — nothing to delete."""
+
+
+class NoAudioToTranscribeError(Exception):
+    """Re-transcription requested but the session has no usable audio source.
+
+    Surfaced by :func:`restart_transcription_for_session`. The route maps this
+    to HTTP 409 — there is nothing to (re)transcribe.
+    """
+
+
+class TranscriptionRestartNotAllowedError(Exception):
+    """Re-transcription requested from a state that does not allow it.
+
+    Surfaced by :func:`restart_transcription_for_session` (e.g. while a job is
+    already running). The route maps this to HTTP 409.
+    """
 
 
 class AudioReadNotFoundError(Exception):
@@ -477,24 +494,55 @@ async def delete_session(
     redis_client: Redis,
 ) -> None:
     repo = SessionRepository(db)
-    _ensure_session_deletable(session=session, redis_client=redis_client)
+    # Story 7.1 / BD-21: a session can be deleted in ANY state. If a job is still
+    # active, abort it first (stop a running worker, cancel a queued job) so the
+    # delete is never blocked by in-flight work.
+    _abort_active_session_job(session=session, redis_client=redis_client)
     audio = await repo.get_audio_source(session.id)
     _delete_session_audio_files(session=session, audio=audio)
     await repo.delete(session)
     await db.commit()
 
 
-def _ensure_session_deletable(*, session: Session, redis_client: Redis) -> None:
-    if session.state is SessionState.TRANSCRIBING:
-        raise SessionDeleteBlockedError(
-            f"Session {session.id} is currently transcribing."
-        )
-    if session.current_job_id is None:
+def _abort_active_session_job(*, session: Session, redis_client: Redis) -> None:
+    """Best-effort abort of the session's current RQ job before deletion.
+
+    Story 7.1 / BD-21: a *running* job receives a stop command (the worker kills
+    its work horse); a *queued/deferred/scheduled* job is cancelled so it never
+    starts. Already-finished or unknown jobs are a no-op. This never raises — a
+    failed abort must not block the delete (the orphaned job, if any, simply
+    fails when it can no longer find its session).
+    """
+    job_id = session.current_job_id
+    if job_id is None:
         return
-    if _is_rq_job_active(redis_client, session.current_job_id):
-        raise SessionDeleteBlockedError(
-            f"Session {session.id} has active job {session.current_job_id}."
-        )
+    try:
+        job = RQJob.fetch(job_id, connection=redis_client)
+    except NoSuchJobError:
+        return
+    job_status = job.get_status(refresh=True)
+    if job_status not in _ACTIVE_RQ_JOB_STATUSES:
+        return
+    if job_status == "started":
+        try:
+            send_stop_job_command(redis_client, job_id)
+        except (InvalidJobOperation, NoSuchJobError) as exc:
+            logger.warning(
+                "session.delete_stop_job_failed",
+                session_id=str(session.id),
+                job_id=job_id,
+                error=str(exc),
+            )
+    else:
+        try:
+            job.cancel()
+        except (InvalidJobOperation, NoSuchJobError) as exc:
+            logger.warning(
+                "session.delete_cancel_job_failed",
+                session_id=str(session.id),
+                job_id=job_id,
+                error=str(exc),
+            )
 
 
 def _is_rq_job_active(redis_client: Redis, job_id: str) -> bool:
@@ -557,6 +605,62 @@ async def recover_stuck_transcription(
                 "(worker lost before completion)."
             ),
         )
+    await db.commit()
+    await db.refresh(session)
+    return session
+
+
+# States from which a transcription can be re-run on the existing audio source.
+# `transcription_failed`: the previous run failed. `transcribed`: the GM wants a
+# fresh transcription (e.g. after a failed artifact, or to redo it) without
+# re-uploading the file.
+_RESTARTABLE_TRANSCRIPTION_STATES: frozenset[SessionState] = frozenset(
+    {SessionState.TRANSCRIPTION_FAILED, SessionState.TRANSCRIBED}
+)
+
+
+async def restart_transcription_for_session(
+    db: AsyncSession,
+    *,
+    session: Session,
+    redis_client: Redis,
+) -> Session:
+    """Re-run transcription on the session's existing audio source.
+
+    Story 7.1 / BD-21: after a transcription failure (or to redo a finished
+    transcription) the GM can restart without re-uploading. The stored audio
+    file survives a failure, so this simply re-enqueues ``transcribe_session_job``
+    and resets the session to ``audio_uploaded`` (the worker then drives it back
+    through ``transcribing`` → ``transcribed``).
+
+    - refuses with :class:`TranscriptionRestartNotAllowedError` if the session
+      is not in a restartable state (``transcription_failed`` / ``transcribed``);
+    - refuses with :class:`NoAudioToTranscribeError` if no usable audio source
+      remains (never uploaded, or purged).
+
+    Returns the refreshed session row (``state == audio_uploaded`` with a new
+    ``current_job_id``).
+    """
+    if session.state not in _RESTARTABLE_TRANSCRIPTION_STATES:
+        raise TranscriptionRestartNotAllowedError(
+            f"Session {session.id} cannot restart transcription from state "
+            f"{session.state.value}."
+        )
+    repo = SessionRepository(db)
+    audio = await repo.get_audio_source(session.id)
+    if audio is None or audio.purged_at is not None:
+        raise NoAudioToTranscribeError(
+            f"Session {session.id} has no audio to re-transcribe."
+        )
+
+    await repo.update_state(session.id, SessionState.AUDIO_UPLOADED)
+    await enqueue_session_job(
+        db,
+        session=session,
+        redis_client=redis_client,
+        kind=JobKind.TRANSCRIPTION,
+        job_func=transcribe_session_job,
+    )
     await db.commit()
     await db.refresh(session)
     return session

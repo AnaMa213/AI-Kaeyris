@@ -158,6 +158,22 @@ class TranscriptionNotReadyError(AppError):
     title = "Transcription not ready"
 
 
+class TranscriptionRestartNotAllowedError(AppError):
+    """Re-transcription requested from a state that does not allow it."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "transcription-restart-not-allowed"
+    title = "Transcription restart not allowed"
+
+
+class NoAudioToTranscribeError(AppError):
+    """Re-transcription requested but the session has no usable audio source."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "no-audio-to-transcribe"
+    title = "No audio to transcribe"
+
+
 class ArtifactNotReadyError(AppError):
     """Session exists but the requested artefact has not been generated yet."""
 
@@ -904,11 +920,8 @@ async def patch_session(
         status.HTTP_404_NOT_FOUND: {
             "description": "Session not found or not visible to the current GM."
         },
-        status.HTTP_409_CONFLICT: {
-            "description": "Session has active work and cannot be deleted yet."
-        },
     },
-    summary="Delete one of the MJ's sessions.",
+    summary="Delete one of the MJ's sessions (aborts active work first).",
 )
 async def delete_session(
     session_id: UUID,
@@ -916,15 +929,12 @@ async def delete_session(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
 ) -> Response:
+    # Story 7.1 / BD-21: deletion now works in ANY state — an active job is
+    # aborted first by the logic layer, so there is no longer a 409 path.
     session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
-    try:
-        await logic.delete_session(
-            db, session=session, redis_client=redis_client
-        )
-    except logic.SessionDeleteBlockedError as exc:
-        raise SessionDeleteBlockedError(detail=str(exc)) from exc
+    await logic.delete_session(db, session=session, redis_client=redis_client)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1363,6 +1373,51 @@ async def recover_stuck_transcription(
         raise TranscriptionNotStuckError(detail=str(exc)) from exc
     except logic.TranscriptionStillActiveError as exc:
         raise TranscriptionStillActiveError(detail=str(exc)) from exc
+    return SessionOut.model_validate(updated)
+
+
+@router.post(
+    "/sessions/{session_id}/transcription/restart",
+    response_model=SessionOut,
+    responses={
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Session not found or not visible to the current GM."
+        },
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "Session is not in a restartable state, or has no audio to "
+                "re-transcribe."
+            )
+        },
+    },
+    summary="Re-run transcription on the session's existing audio.",
+)
+async def restart_transcription(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    redis_client: Annotated[Redis, Depends(get_redis)],
+) -> SessionOut:
+    """Re-enqueue transcription from the stored audio without a re-upload.
+
+    Story 7.1 / BD-21: after a transcription failure (or to redo a finished
+    transcription) the GM restarts here. The session returns to
+    ``audio_uploaded`` with a fresh ``current_job_id`` and flows back through the
+    normal pipeline. Refused (409) when the session is not in
+    ``transcription_failed`` / ``transcribed`` (``transcription-restart-not-allowed``)
+    or has no usable audio (``no-audio-to-transcribe``).
+    """
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    try:
+        updated = await logic.restart_transcription_for_session(
+            db, session=session, redis_client=redis_client
+        )
+    except logic.TranscriptionRestartNotAllowedError as exc:
+        raise TranscriptionRestartNotAllowedError(detail=str(exc)) from exc
+    except logic.NoAudioToTranscribeError as exc:
+        raise NoAudioToTranscribeError(detail=str(exc)) from exc
     return SessionOut.model_validate(updated)
 
 
