@@ -19,7 +19,10 @@ from argon2 import PasswordHasher
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
-from app.adapters.llm import LLMAdapter
+import pytest
+
+from app.adapters.llm import LLMAdapter, PermanentLLMError
+from app.jobs import PermanentJobError
 from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
@@ -214,3 +217,59 @@ async def test_regenerate_summary_cascade_resets_chunks_and_deletes_derived(
         )
     assert summary.content_json == {"text": "nouveau résumé global"}
     assert summary.model_used != "old-model"
+
+
+class _FailingLLM:
+    """Map step fails (e.g. DeepInfra 401) — simulates a permanent LLM error."""
+
+    async def complete(self, *, system: str, user: str, max_tokens: int) -> str:
+        raise PermanentLLMError("invalid_api_key: User is not authorized")
+
+
+async def test_failed_regeneration_preserves_existing_data(
+    ctx_with_existing_derived_artefacts, monkeypatch
+):
+    """Story 7.4 — a failed summary regeneration must NOT destroy prior data.
+
+    The destructive cascade now runs only AFTER a successful map+reduce, so a
+    permanent LLM error (401) leaves the previous chunk summaries and the
+    narrative/elements/pov/summary artifacts untouched. This also means the
+    downstream "run POST /artifacts/summary first" guard can never fire as a
+    consequence of a failed regen (the chunk summary_text stay non-null).
+    """
+    _patch_llm(monkeypatch, _FailingLLM())
+
+    from app.jobs.jdr import _generate_summary
+
+    sid = ctx_with_existing_derived_artefacts.session_id
+
+    with pytest.raises(PermanentJobError):
+        await _generate_summary(sid)
+
+    sm = ctx_with_existing_derived_artefacts.sessionmaker
+
+    # Chunk summaries are untouched (still the old values, never NULLed).
+    async with sm() as db:
+        chunks = (
+            await db.execute(
+                select(Chunk).where(Chunk.session_id == sid).order_by(Chunk.ordre)
+            )
+        ).scalars().all()
+    assert chunks[0].summary_text == "ancien résumé 0"
+    assert chunks[1].summary_text == "ancien résumé 1"
+
+    # All derived artifacts + the prior summary survive.
+    async with sm() as db:
+        rows = (
+            await db.execute(
+                select(Artifact.kind, Artifact.content_json).where(
+                    Artifact.session_id == sid
+                )
+            )
+        ).all()
+    kinds = {kind for kind, _ in rows}
+    assert "narrative" in kinds
+    assert "elements" in kinds
+    assert any(k.startswith("pov:") for k in kinds)
+    summary_payload = next(c for k, c in rows if k == "summary")
+    assert summary_payload == {"text": "ancien résumé global"}

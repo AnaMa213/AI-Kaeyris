@@ -643,7 +643,11 @@ class ModelSettings(Base):
         ForeignKey("core_users.id", ondelete="CASCADE"),
         primary_key=True,
     )
-    transcription_provider: Mapped[ModelProvider] = mapped_column(
+    # Story 7.2 / BD-22: nullable = "no per-user override, inherit the
+    # operator/env default". The GET endpoint resolves NULL to the effective
+    # default; the job pipeline falls back to the env adapter. This lets a user
+    # change one category without flipping the other off its operator default.
+    transcription_provider: Mapped[ModelProvider | None] = mapped_column(
         Enum(
             ModelProvider,
             name="jdr_model_provider",
@@ -651,11 +655,10 @@ class ModelSettings(Base):
             length=16,
             values_callable=_enum_values,
         ),
-        nullable=False,
-        default=ModelProvider.CLOUD,
-        server_default=ModelProvider.CLOUD.value,
+        nullable=True,
+        default=None,
     )
-    summary_provider: Mapped[ModelProvider] = mapped_column(
+    summary_provider: Mapped[ModelProvider | None] = mapped_column(
         Enum(
             ModelProvider,
             name="jdr_model_provider",
@@ -663,9 +666,8 @@ class ModelSettings(Base):
             length=16,
             values_callable=_enum_values,
         ),
-        nullable=False,
-        default=ModelProvider.CLOUD,
-        server_default=ModelProvider.CLOUD.value,
+        nullable=True,
+        default=None,
     )
     transcription_local_path: Mapped[str | None] = mapped_column(
         String(1024), nullable=True, default=None

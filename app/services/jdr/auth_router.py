@@ -10,6 +10,11 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters.llm import (
+    PermanentLLMError,
+    TransientLLMError,
+    build_personal_cloud_llm_adapter,
+)
 from app.core.auth import (
     AuthenticatedKey,
     UnauthorizedError,
@@ -103,6 +108,14 @@ class AdminRequiredAppError(AppError):
     status_code = status.HTTP_403_FORBIDDEN
     error_type = "admin-required"
     title = "Administrator privileges required"
+
+
+class CloudApiKeyInvalidAppError(AppError):
+    """A newly-supplied DeepInfra cloud key failed an authenticated probe."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "cloud-api-key-invalid"
+    title = "Cloud API key invalid"
 
 
 def _front_problem(status_code: int, title: str) -> JSONResponse:
@@ -380,39 +393,46 @@ async def get_users(
 
 
 def _model_settings_out(row) -> ModelSettingsOut:
-    if row is None:
-        transcription_provider = _effective_transcription_provider()
-        summary_provider = _effective_summary_provider()
-        return ModelSettingsOut(
-            transcription_provider=transcription_provider,
-            summary_provider=summary_provider,
-            transcription_cloud_model=(
-                settings.TRANSCRIPTION_MODEL
-                if transcription_provider is ModelProvider.CLOUD
-                else None
-            ),
-            summary_cloud_model=(
-                settings.LLM_MODEL
-                if summary_provider is ModelProvider.CLOUD
-                else None
-            ),
-            ollama_model=(
-                settings.LLM_MODEL
-                if summary_provider is ModelProvider.OLLAMA
-                else None
-            ),
-            deepinfra_api_key_set=False,
-        )
+    # Story 7.2 / BD-22: a provider is NULL when the user has no per-user
+    # override for that category — it then resolves to the operator/env default,
+    # exactly as if no row existed. Stored cloud/ollama models are preferred when
+    # present, otherwise the effective default model is surfaced (mirrors what the
+    # job pipeline actually uses).
+    transcription_provider = (
+        row.transcription_provider
+        if row is not None and row.transcription_provider is not None
+        else _effective_transcription_provider()
+    )
+    summary_provider = (
+        row.summary_provider
+        if row is not None and row.summary_provider is not None
+        else _effective_summary_provider()
+    )
+    transcription_cloud_model = (
+        row.transcription_cloud_model if row is not None else None
+    ) or (
+        settings.TRANSCRIPTION_MODEL
+        if transcription_provider is ModelProvider.CLOUD
+        else None
+    )
+    summary_cloud_model = (row.summary_cloud_model if row is not None else None) or (
+        settings.LLM_MODEL if summary_provider is ModelProvider.CLOUD else None
+    )
+    ollama_model = (row.ollama_model if row is not None else None) or (
+        settings.LLM_MODEL if summary_provider is ModelProvider.OLLAMA else None
+    )
     return ModelSettingsOut(
-        transcription_provider=row.transcription_provider,
-        summary_provider=row.summary_provider,
-        transcription_local_path=row.transcription_local_path,
-        summary_local_path=row.summary_local_path,
-        transcription_cloud_model=row.transcription_cloud_model,
-        summary_cloud_model=row.summary_cloud_model,
-        ollama_model=row.ollama_model,
+        transcription_provider=transcription_provider,
+        summary_provider=summary_provider,
+        transcription_local_path=(
+            row.transcription_local_path if row is not None else None
+        ),
+        summary_local_path=row.summary_local_path if row is not None else None,
+        transcription_cloud_model=transcription_cloud_model,
+        summary_cloud_model=summary_cloud_model,
+        ollama_model=ollama_model,
         # Expose only whether a key exists, never the key itself.
-        deepinfra_api_key_set=bool(row.deepinfra_api_key),
+        deepinfra_api_key_set=bool(row.deepinfra_api_key) if row is not None else False,
     )
 
 
@@ -471,6 +491,9 @@ async def patch_model_settings(
         payload=payload,
         category=LocalModelCategory.SUMMARY,
     )
+    # Story 7.4 / B: fail fast on a bad DeepInfra key — probe it at save time
+    # instead of letting an unauthorized key surface as a 401 deep in a worker.
+    await _validate_cloud_api_key_if_needed(payload=payload, current=current)
     row = await repo.upsert_for_user(
         user_id=user.id,
         transcription_provider=payload.transcription_provider,
@@ -488,8 +511,14 @@ async def patch_model_settings(
     logger.info(
         "jdr.settings.models_updated",
         user_id=str(user.id),
-        transcription_provider=row.transcription_provider.value,
-        summary_provider=row.summary_provider.value,
+        transcription_provider=(
+            row.transcription_provider.value
+            if row.transcription_provider is not None
+            else None
+        ),
+        summary_provider=(
+            row.summary_provider.value if row.summary_provider is not None else None
+        ),
         ollama_model=row.ollama_model,
         deepinfra_api_key_set=bool(row.deepinfra_api_key),
     )
@@ -551,6 +580,45 @@ def _effective_transcription_provider() -> ModelProvider:
     if provider == ModelProvider.LOCAL.value:
         return ModelProvider.LOCAL
     return ModelProvider.CLOUD
+
+
+async def _validate_cloud_api_key_if_needed(*, payload, current) -> None:
+    """Probe a newly-supplied DeepInfra key before storing it (Story 7.4 / B).
+
+    Only runs when the PATCH carries a non-empty ``deepinfra_api_key``. The probe
+    is a 1-token completion against a cloud model from the same PATCH (or the
+    stored one), so a `401`/permission error isolates an unauthorized **key**
+    (the configured cloud models come from a fixed catalog, so a model mismatch
+    is not the failure mode). On a permanent failure the save is rejected with
+    `400 cloud-api-key-invalid`; a transient/network failure does not block the
+    save (it can't confirm the key is bad). If no cloud model is available to
+    probe against, validation is skipped (the key is checked on the next save
+    that includes a cloud model).
+    """
+    new_key = payload.deepinfra_api_key
+    if not new_key:
+        return
+    model = (
+        payload.summary_cloud_model
+        or (current.summary_cloud_model if current is not None else None)
+        or payload.transcription_cloud_model
+        or (current.transcription_cloud_model if current is not None else None)
+    )
+    if not model:
+        return
+    adapter = build_personal_cloud_llm_adapter(model=model, api_key=new_key)
+    try:
+        await adapter.complete(system="", user="ping", max_tokens=1)
+    except PermanentLLMError as exc:
+        raise CloudApiKeyInvalidAppError(
+            detail=(
+                "La clé DeepInfra a été refusée (non autorisée pour ce modèle). "
+                "Vérifie la clé et le modèle cloud."
+            )
+        ) from exc
+    except TransientLLMError:
+        # Network/transient: cannot confirm the key is bad → don't block the save.
+        return
 
 
 def _effective_summary_provider() -> ModelProvider:

@@ -67,6 +67,30 @@ def test_llm_adapter_env_fallback(monkeypatch):
     assert isinstance(adapter, MockLLMAdapter)
 
 
+def test_llm_adapter_none_provider_uses_env_fallback(monkeypatch):
+    # Story 7.2 / BD-22: a NULL summary_provider means "inherit operator default".
+    monkeypatch.setattr("app.adapters.llm.settings.LLM_PROVIDER", "mock")
+    row = _settings_row(summary_provider=None)
+
+    adapter = _build_llm_adapter_for_user(row)
+
+    assert isinstance(adapter, MockLLMAdapter)
+
+
+def test_transcription_adapter_none_provider_uses_env_fallback(monkeypatch):
+    # Story 7.2 / BD-22: a NULL transcription_provider means "inherit operator
+    # default" — e.g. the operator's env-configured local model — instead of
+    # being forced to cloud.
+    monkeypatch.setattr(
+        "app.adapters.transcription.settings.TRANSCRIPTION_PROVIDER", "mock"
+    )
+    row = _settings_row(transcription_provider=None)
+
+    adapter = _build_transcription_adapter_for_user(row)
+
+    assert isinstance(adapter, MockTranscriptionAdapter)
+
+
 def test_llm_adapter_cloud_paid(monkeypatch):
     monkeypatch.setattr("app.adapters.llm.settings.LLM_MODEL", "env-model")
     row = _settings_row(
