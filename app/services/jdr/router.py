@@ -185,6 +185,14 @@ class ArtifactNotReadyError(AppError):
     title = "Artifact not ready"
 
 
+class ArtifactEditedAppError(AppError):
+    """Regeneration would overwrite a manually edited artifact (BD-24)."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "artifact-edited"
+    title = "Artifact edited"
+
+
 class SessionNotTranscribedError(AppError):
     """Triggering an artefact requires the session to be transcribed first."""
 
@@ -402,6 +410,58 @@ def _ensure_aware(dt):
 
 def _has_edited_transcription(session_row: SessionModel) -> bool:
     return bool((session_row.edited_transcript_md or "").strip())
+
+
+def _is_downstream_artifact(kind: str) -> bool:
+    return kind in {"narrative", "elements"} or kind.startswith("pov:")
+
+
+def _artifact_kind_label(kind: str) -> str:
+    return "povs" if kind.startswith("pov:") else kind
+
+
+async def _guard_regeneration_not_edited(
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    force: bool,
+    target_kinds: tuple[str, ...] = (),
+    include_povs: bool = False,
+    include_downstream: bool = False,
+) -> None:
+    """Block destructive regeneration unless the caller explicitly confirms.
+
+    The guard runs before enqueueing the job. The actual destructive write still
+    happens inside the worker after model success, preserving Story 7.4's
+    non-destructive failure semantics.
+    """
+    if force:
+        return
+
+    target_set = set(target_kinds)
+    edited_kinds: list[str] = []
+    for artifact in await ArtifactRepository(db).list_for_session(session_id):
+        if not artifact.is_edited:
+            continue
+        kind = artifact.kind
+        should_guard = (
+            kind in target_set
+            or (include_povs and kind.startswith("pov:"))
+            or (include_downstream and _is_downstream_artifact(kind))
+        )
+        if should_guard:
+            edited_kinds.append(kind)
+
+    if edited_kinds:
+        labels = ", ".join(
+            sorted({_artifact_kind_label(kind) for kind in edited_kinds})
+        )
+        raise ArtifactEditedAppError(
+            detail=(
+                "Regeneration would overwrite manually edited artifact(s): "
+                f"{labels}. Retry with ?force=true to confirm replacement."
+            )
+        )
 
 
 # Closed phase vocabulary mirrored from JobOut (BD-10). Kept here so the route
@@ -1483,6 +1543,10 @@ async def post_narrative(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
+    force: Annotated[
+        bool,
+        Query(description="Confirm overwrite of a manually edited artifact."),
+    ] = False,
 ) -> JobQueuedOut:
     session_row = await resolve_session_for_gm(
         db, session_id=session_id, auth=auth
@@ -1506,6 +1570,12 @@ async def post_narrative(
                 ),
             )
 
+    await _guard_regeneration_not_edited(
+        db,
+        session_id=session_id,
+        force=force,
+        target_kinds=("narrative",),
+    )
     job_id = await logic.enqueue_session_job(
         db,
         session=session_row,
@@ -1609,6 +1679,10 @@ async def post_elements(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
+    force: Annotated[
+        bool,
+        Query(description="Confirm overwrite of a manually edited artifact."),
+    ] = False,
 ) -> JobQueuedOut:
     session_row = await resolve_session_for_gm(
         db, session_id=session_id, auth=auth
@@ -1632,6 +1706,12 @@ async def post_elements(
                 ),
             )
 
+    await _guard_regeneration_not_edited(
+        db,
+        session_id=session_id,
+        force=force,
+        target_kinds=("elements",),
+    )
     job_id = await logic.enqueue_session_job(
         db,
         session=session_row,
@@ -1723,6 +1803,10 @@ async def post_summary(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
+    force: Annotated[
+        bool,
+        Query(description="Confirm overwrite of manually edited artifacts."),
+    ] = False,
 ) -> JobQueuedOut:
     """Enqueue the map-reduce summary job for a non_diarised session.
 
@@ -1766,6 +1850,13 @@ async def post_summary(
             ),
         )
 
+    await _guard_regeneration_not_edited(
+        db,
+        session_id=session_id,
+        force=force,
+        target_kinds=("summary",),
+        include_downstream=True,
+    )
     job_id = await logic.enqueue_session_job(
         db,
         session=session_row,
@@ -1872,6 +1963,10 @@ async def post_povs(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
+    force: Annotated[
+        bool,
+        Query(description="Confirm overwrite of manually edited POV artifacts."),
+    ] = False,
 ) -> JobQueuedOut:
     """Enqueue a single job that generates one ``pov:<pj_id>`` artefact
     per row in the session's mapping. Pre-conditions match the other
@@ -1922,6 +2017,12 @@ async def post_povs(
                 ),
             )
 
+    await _guard_regeneration_not_edited(
+        db,
+        session_id=session_id,
+        force=force,
+        include_povs=True,
+    )
     job_id = await logic.enqueue_session_job(
         db,
         session=session_row,

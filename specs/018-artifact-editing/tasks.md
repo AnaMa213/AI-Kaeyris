@@ -90,14 +90,14 @@ description: "Task list — Epic 8 : Artefacts JDR éditables"
 
 ### Tests (écrits d'abord, doivent échouer)
 
-- [ ] T017 [P] [US3] Tests provenance + garde dans `tests/services/jdr/test_artifact_provenance.py` : is_edited/edited_at posés à l'édition, model_used/generated_at intacts, 409 sans force, succès avec force + reset provenance, cascade summary bloquée si artefact aval édité, non-destructif si job échoue
+- [X] T017 [P] [US3] Tests provenance + garde dans `tests/services/jdr/test_artifact_provenance.py` : is_edited/edited_at posés à l'édition, model_used/generated_at intacts, 409 sans force, succès avec force + reset provenance, cascade summary bloquée si artefact aval édité, non-destructif si job échoue
 
 ### Implémentation
 
-- [ ] T018 [US3] Faire poser `is_edited=true`/`edited_at=now`/`edited_by=<gm>` par `update_content` (et reset `false`/`null` dans `ArtifactRepository.upsert`) dans `app/services/jdr/db/repositories.py` (dépend de T002, T008)
-- [ ] T019 [US3] Ajouter l'erreur applicative `ArtifactEditedAppError` (409, `artifact-edited`) dans `app/services/jdr/router.py` (ou module d'erreurs du service)
-- [ ] T020 [US3] Ajouter le paramètre `force: bool = False` + garde 409 (si artefact cible `is_edited` et `force` absent) sur `POST narrative`, `POST elements`, `POST povs` dans `app/services/jdr/router.py` (dépend de T019)
-- [ ] T021 [US3] Étendre la garde au `POST summary` : 409 si un artefact aval (`narrative`/`elements`/`pov:*`) est `is_edited` et `force` absent ; `?force=true` lève la garde pour toute la cascade ; cascade-delete uniquement au succès du job (non-destructif, FR-009) dans `app/services/jdr/router.py` (dépend de T019)
+- [X] T018 [US3] Faire poser `is_edited=true`/`edited_at=now`/`edited_by=<gm>` par `update_content` (et reset `false`/`null` dans `ArtifactRepository.upsert`) dans `app/services/jdr/db/repositories.py` (dépend de T002, T008) — déjà en place via US1, verrouillé par T017
+- [X] T019 [US3] Ajouter l'erreur applicative `ArtifactEditedAppError` (409, `artifact-edited`) dans `app/services/jdr/router.py` (ou module d'erreurs du service)
+- [X] T020 [US3] Ajouter le paramètre `force: bool = False` + garde 409 (si artefact cible `is_edited` et `force` absent) sur `POST narrative`, `POST elements`, `POST povs` dans `app/services/jdr/router.py` (dépend de T019)
+- [X] T021 [US3] Étendre la garde au `POST summary` : 409 si un artefact aval (`narrative`/`elements`/`pov:*`) est `is_edited` et `force` absent ; `?force=true` lève la garde pour toute la cascade ; cascade-delete uniquement au succès du job (non-destructif, FR-009) dans `app/services/jdr/router.py` (dépend de T019)
 
 **Checkpoint**: éditions protégées ; régénération normale inchangée sur artefacts non édités.
 
