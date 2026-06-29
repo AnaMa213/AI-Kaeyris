@@ -2496,6 +2496,128 @@ async def get_my_narrative_md(
 
 
 @router.get(
+    "/me/sessions/{session_id}/summary",
+    response_model=SummaryArtifactOut,
+    summary="Read the global summary of a session (player view).",
+)
+async def get_my_summary(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_player)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SummaryArtifactOut:
+    campaign_id = await _campaign_id_for_auth(db, auth)
+    await _ensure_player_can_read_session(
+        db,
+        session_id=session_id,
+        player_pj_id=auth.pj_id,
+        campaign_id=campaign_id,
+    )
+    artifact = await ArtifactRepository(db).get(session_id, "summary")
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=f"Summary for session {session_id} has not been generated yet."
+        )
+    content = artifact.content_json or {}
+    text = str(content.get("text", "")) if isinstance(content, dict) else ""
+    return SummaryArtifactOut(
+        session_id=artifact.session_id,
+        text=text,
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
+    )
+
+
+@router.get(
+    "/me/sessions/{session_id}/summary.md",
+    response_class=Response,
+    summary="Export the global summary as Markdown (player view).",
+)
+async def get_my_summary_md(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_player)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Response:
+    campaign_id = await _campaign_id_for_auth(db, auth)
+    await _ensure_player_can_read_session(
+        db,
+        session_id=session_id,
+        player_pj_id=auth.pj_id,
+        campaign_id=campaign_id,
+    )
+    session = await db.scalar(
+        select(SessionModel).where(SessionModel.id == session_id)
+    )
+    artifact = await ArtifactRepository(db).get(session_id, "summary")
+    if artifact is None or session is None:
+        raise ArtifactNotReadyError(
+            detail=f"Summary for session {session_id} has not been generated yet."
+        )
+    md = render_summary_md(session, artifact)
+    return Response(content=md, media_type="text/markdown; charset=utf-8")
+
+
+@router.get(
+    "/me/sessions/{session_id}/elements",
+    response_model=ElementsArtifactOut,
+    summary="Read the structured-elements card of a session (player view).",
+)
+async def get_my_elements(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_player)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ElementsArtifactOut:
+    campaign_id = await _campaign_id_for_auth(db, auth)
+    await _ensure_player_can_read_session(
+        db,
+        session_id=session_id,
+        player_pj_id=auth.pj_id,
+        campaign_id=campaign_id,
+    )
+    artifact = await ArtifactRepository(db).get(session_id, "elements")
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=f"Elements for session {session_id} have not been generated yet."
+        )
+    return ElementsArtifactOut(
+        session_id=artifact.session_id,
+        elements=[Element(**row) for row in elements_from_content(artifact.content_json)],
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
+    )
+
+
+@router.get(
+    "/me/sessions/{session_id}/elements.md",
+    response_class=Response,
+    summary="Export the structured-elements card as Markdown (player view).",
+)
+async def get_my_elements_md(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_player)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Response:
+    campaign_id = await _campaign_id_for_auth(db, auth)
+    await _ensure_player_can_read_session(
+        db,
+        session_id=session_id,
+        player_pj_id=auth.pj_id,
+        campaign_id=campaign_id,
+    )
+    session = await db.scalar(
+        select(SessionModel).where(SessionModel.id == session_id)
+    )
+    artifact = await ArtifactRepository(db).get(session_id, "elements")
+    if artifact is None or session is None:
+        raise ArtifactNotReadyError(
+            detail=f"Elements for session {session_id} have not been generated yet."
+        )
+    md = render_elements_md(session, artifact)
+    return Response(content=md, media_type="text/markdown; charset=utf-8")
+
+
+@router.get(
     "/me/sessions/{session_id}/pov",
     response_model=PovArtifactOut,
     summary="Read the current player's POV summary for a session.",

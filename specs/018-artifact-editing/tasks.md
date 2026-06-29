@@ -109,8 +109,8 @@ description: "Task list — Epic 8 : Artefacts JDR éditables"
 
 **Independent Test**: PATCH summary avec ~10 000 mots → GET renvoie la longueur intégrale.
 
-- [ ] T022 [P] [US4] Test round-trip texte long dans `tests/services/jdr/test_artifact_text_length.py` : PATCH ~10 000 mots → GET sans troncature (dépend de T009)
-- [ ] T023 [US4] Vérifier qu'aucun chemin d'édition n'introduit de cap (pas de `max_length` sur `TextEditIn.text`) dans `app/services/jdr/schemas.py` ; documenter dans le code que le stockage `content_json` est non borné
+- [X] T022 [P] [US4] Test round-trip texte long dans `tests/services/jdr/test_artifact_text_length.py` : PATCH ~10 000 mots → GET sans troncature (dépend de T009)
+- [X] T023 [US4] Vérifier qu'aucun chemin d'édition n'introduit de cap (pas de `max_length` sur `TextEditIn.text`) dans `app/services/jdr/schemas.py` ; documenter dans le code que le stockage `content_json` est non borné
 
 ---
 
@@ -122,12 +122,12 @@ description: "Task list — Epic 8 : Artefacts JDR éditables"
 
 ### Tests (écrits d'abord, doivent échouer)
 
-- [ ] T024 [P] [US5] Tests lectures joueur dans `tests/services/jdr/test_player_artifact_reads.py` : GET /me summary(.md) + elements(.md) autorisés, isolation inter-sessions (403/404)
+- [X] T024 [P] [US5] Tests lectures joueur dans `tests/services/jdr/test_player_artifact_reads.py` : GET /me summary(.md) + elements(.md) autorisés, isolation inter-sessions (403/404)
 
 ### Implémentation
 
-- [ ] T025 [US5] Implémenter `GET /me/sessions/{session_id}/summary` et `.../summary.md` en miroir de `/me/.../narrative` (même autorisation PJ-lié, projection `SummaryArtifactOut`) dans `app/services/jdr/router.py`
-- [ ] T026 [US5] Implémenter `GET /me/sessions/{session_id}/elements` et `.../elements.md` (projection `ElementsArtifactOut` post-BD-26) dans `app/services/jdr/router.py` (dépend de T015)
+- [X] T025 [US5] Implémenter `GET /me/sessions/{session_id}/summary` et `.../summary.md` en miroir de `/me/.../narrative` (même autorisation PJ-lié, projection `SummaryArtifactOut`) dans `app/services/jdr/router.py`
+- [X] T026 [US5] Implémenter `GET /me/sessions/{session_id}/elements` et `.../elements.md` (projection `ElementsArtifactOut` post-BD-26) dans `app/services/jdr/router.py` (dépend de T015)
 
 **Checkpoint**: toutes les stories indépendamment fonctionnelles.
 
@@ -135,10 +135,10 @@ description: "Task list — Epic 8 : Artefacts JDR éditables"
 
 ## Phase 8: Polish & Cross-Cutting
 
-- [ ] T027 Régénérer `docs/context/api/openapi.json` (rupture intentionnelle sur `ElementsArtifactOut`)
-- [ ] T028 [P] Mettre à jour `README.md` (édition + lectures joueur) et ajouter une entrée `docs/journal.md` (epic 8, écarts ADR↔backend)
-- [ ] T029 [P] Documenter le service éditable dans `docs/services/jdr.md` si présent (sinon ignorer)
-- [ ] T030 Lancer la validation complète : `ruff check .`, `pytest`, `alembic upgrade head && alembic downgrade -1 && alembic upgrade head`, puis le parcours `quickstart.md`
+- [X] T027 Régénérer `docs/context/api/openapi.json` (rupture intentionnelle sur `ElementsArtifactOut`)
+- [X] T028 [P] Mettre à jour `README.md` (édition + lectures joueur) et ajouter une entrée `docs/journal.md` (epic 8, écarts ADR↔backend)
+- [X] T029 [P] Documenter le service éditable dans `docs/services/jdr.md` si présent (sinon ignorer)
+- [X] T030 Lancer la validation complète : `ruff check .`, `pytest`, `alembic upgrade head && alembic downgrade -1 && alembic upgrade head`, puis le parcours `quickstart.md`
 
 ---
 

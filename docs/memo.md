@@ -298,6 +298,7 @@ docker compose up --build           # build image + démarre (foreground, Ctrl+C
 docker compose up -d --build        # idem en arrière-plan
 docker compose ps                   # liste les services tournants
 docker compose logs -f api          # suit les logs du service api
+docker compose exec worker rq info --url redis://redis:6379/0  # check queue cote worker
 docker compose exec api bash        # shell dans le conteneur (debug)
 docker compose down                 # arrête + supprime les conteneurs
 docker compose build --no-cache     # force rebuild complet (couches foireuses)

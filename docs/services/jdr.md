@@ -17,9 +17,9 @@ Pipeline batch en 4 étapes, chacune asynchrone via RQ :
 2. Un worker RQ transcrit l'audio (Whisper cloud ou local), purge le fichier source, écrit la `Transcription` (segments + speaker labels).
 3. Le MJ déclare ses PJ, mappe `speaker_X → PJ`, déclenche à la demande la génération de 3 artefacts via le `LLMAdapter` (DeepInfra par défaut) :
    - `narrative` — récit chronologique global.
-   - `elements` — fiche structurée `{npcs, locations, items, clues}`.
+   - `elements` — fiche structurée plate `elements[]` avec `{category,name,description}`.
    - `pov:<pj_id>` — un résumé par PJ mappé, scoppé à ce qu'il pouvait percevoir.
-4. Chaque joueur enrôlé (`role='player'`, lié à un `pj_id`) consulte `narrative` et **son** `pov` via `/me/*` — jamais ceux des autres (FR-014).
+4. Chaque joueur enrôlé (`role='player'`, lié à un `pj_id`) consulte `narrative`, `summary`, `elements` et **son** `pov` via `/me/*` — jamais ceux des autres (FR-014/BD-27).
 
 Le mode live (WebSocket Discord) est un **stub publié sans implémentation** (FR-015/016) — voir §5.
 
@@ -56,7 +56,7 @@ Tous les `*_SYSTEM_PROMPT` sont en français, instruits pour **rester fidèles a
 | Prompt | Sortie attendue | Particularité |
 |---|---|---|
 | `NARRATIVE_SYSTEM_PROMPT` | Récit chronologique en prose, 3ème personne | Pas de conclusion bilan ; s'arrête au dernier événement exploitable |
-| `ELEMENTS_SYSTEM_PROMPT` | **JSON strict** `{npcs, locations, items, clues}` | Listes vides plutôt qu'absentes (acceptance US2.3) ; parsing tolère bloc ```json``` ou `{…}` extrait |
+| `ELEMENTS_SYSTEM_PROMPT` | **JSON strict interne** `{npcs, locations, items, clues}` | Les buckets LLM sont aplatis avant stockage/publication vers `elements[]` `{category,name,description}` ; parsing tolère bloc ```json``` ou `{…}` extrait |
 | `POV_SYSTEM_PROMPT` | Récit centré sur un PJ donné | Limite l'omniscience : ne raconte que ce que ce PJ pouvait percevoir |
 
 L'utilisateur prompt embarque la transcription formatée segment par segment, et optionnellement le `campaign_context` de la session comme bloc "CONTEXTE DE CAMPAGNE" séparé.
@@ -158,6 +158,14 @@ utiliser un chemin conteneur (`/models/...`) plutot qu'un chemin hote Windows.
 - Les générations lancées après édition préfèrent ce Markdown corrigé comme source. En mode `non_diarised`, le summary découpe l'override en chunks transitoires pour le map-reduce, sans réécrire `jdr_chunks.text`.
 - Pas de reset/delete dans BD-13 : remplacer l'override se fait par un nouveau `PUT`.
 
+**Artefacts editables Epic 8 (BD-23 -> BD-27)** :
+- Le MJ peut remplacer immediatement le texte de `summary`, `narrative` et `pov:<pj_id>` par `PATCH`, sans job RQ.
+- Le MJ peut remplacer atomiquement toute la carte `elements` par `PUT /services/jdr/sessions/{session_id}/artifacts/elements`; le contrat public est `elements[]` avec categorie libre, nom et description.
+- Une edition pose `is_edited=true`, `edited_at` et `edited_by`, mais ne modifie jamais `model_used` ni `generated_at`.
+- Les `POST /artifacts/{summary,narrative,elements,povs}` refusent d'ecraser un artefact edite avec `409 artifact-edited`, sauf confirmation explicite `?force=true`.
+- Les textes d'artefacts et descriptions d'elements ne portent pas de plafond strict de schema; les tests couvrent les longs contenus attendus par BD-25/BD-26.
+- Les joueurs peuvent lire en readonly `GET /me/sessions/{id}/summary(.md)` et `GET /me/sessions/{id}/elements(.md)` quand leur PJ est autorise par le mapping PJ-session existant.
+
 **Bascule transcription cloud → local** (sans modifier le code) :
 ```ini
 TRANSCRIPTION_PROVIDER=local
@@ -220,7 +228,7 @@ Le mode `diarised` (défaut) reste strictement inchangé Jalon 5 (`/mapping`, `/
 ### Limites assumées
 
 - **POV qualitativement limités** : sans speaker labels, le LLM doit "deviner" qui agit depuis le contexte narratif. À ré-évaluer post-Jalon 9 (diarisation locale).
-- **`/me/*` joueur reste réservé aux sessions `diarised`** au sub-jalon courant. Un joueur dont le MJ a opté pour non_diarised verra `409 wrong-mode` (à reconsidérer si la première vraie session révèle un besoin).
+- **Lecture joueur non_diarised incomplète** : `/me/*` s'appuie encore sur `SessionPjMapping`; le mode `non_diarised` utilise aussi `SessionPlayer`. A harmoniser si le front doit exposer ces lectures aux joueurs sur des sessions sans speaker labels.
 - **Mode immuable** : un MJ qui s'est trompé doit recréer une nouvelle session.
 
 Voir [ADR 0007](../adr/0007-non-diarised-mode.md) pour le détail des décisions et alternatives rejetées.

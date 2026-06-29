@@ -245,7 +245,7 @@ Scénario E2E (résumé — la procédure complète est dans [`specs/001-kaeyris
 2. MJ : `POST /pjs`, `PUT /sessions/{id}/mapping` pour relier `speaker_X` à chaque PJ de la campagne.
 3. MJ : `POST /sessions/{id}/artifacts/{narrative|elements|povs}` puis polling `GET /jobs/{id}`.
 4. MJ : `POST /players` pour enrôler un joueur (token plaintext renvoyé **une seule fois**).
-5. Joueur : `GET /me`, `GET /me/sessions`, `GET /me/sessions/{id}/{narrative|pov}[.md]` — strictement scoppé à son PJ (FR-014).
+5. Joueur : `GET /me`, `GET /me/sessions`, `GET /me/sessions/{id}/{narrative|summary|elements|pov}[.md]` — strictement scoppé à son PJ (FR-014/BD-27).
 
 Depuis BD-6, les campagnes ont un CRUD dédié pour le front web : `GET/POST /services/jdr/campaigns`, puis `GET/PATCH/DELETE /services/jdr/campaigns/{campaign_id}`. Les réponses exposent `role`, `session_count`, `last_session_at` et des datetimes avec timezone explicite.
 
@@ -256,6 +256,8 @@ Depuis BD-7, les PJ sont scoppés par campagne : `POST /services/jdr/pjs` accept
 Depuis BD-8, les réponses session exposent `current_job_id` pour reprendre le polling après refresh. L'audio source reste disponible après succès ou échec de transcription : `GET /services/jdr/sessions/{session_id}/audio` sert le fichier aux membres autorisés de la campagne avec support `Range: bytes=...`, et `DELETE /services/jdr/sessions/{session_id}/audio` remet la session en `created`, vide `current_job_id`, marque l'audio purgé et supprime transcription/chunks/artifacts dérivés. Seul l'état `transcribing` bloque la suppression avec `409`.
 
 Depuis BD-9, le client n'a plus besoin de reduire l'audio avant upload. Le backend accepte un M4A brut jusqu'a `KAEYRIS_AUDIO_MAX_UPLOAD_BYTES` (500 MiB par defaut), le stocke temporairement sous `.tmp/audio-reduce/<session_id>/raw.m4a`, puis le worker prepare un artefact durable `audios/<session_id>.m4a` via `ffmpeg` avant la transcription. Le contrat visible reste inchange : `POST /audio` renvoie `202` avec `job_id`, le job reste de type `transcription`, et une erreur de limite renvoie un Problem Details `413` avec `limit_bytes`. Le brut temporaire est supprime apres preparation, apres rejet 413, ou lors du `DELETE /audio`.
+
+Epic 8 rend les artefacts MJ editables sans job asynchrone : `PATCH /sessions/{id}/artifacts/{summary|narrative}`, `PATCH /sessions/{id}/artifacts/povs/{pj_id}` et `PUT /sessions/{id}/artifacts/elements`. Les editions posent `is_edited`, conservent `model_used`/`generated_at`, et les regenerations refusent d'ecraser un artefact edite sans `?force=true`. La carte `elements` est maintenant une liste plate `elements[]` avec `{category,name,description}` ; les joueurs peuvent aussi lire `summary(.md)` et `elements(.md)` via `/me/sessions/{id}/...` quand leur PJ est autorise par le mapping joueur existant.
 
 ```json
 {
@@ -287,7 +289,7 @@ Flow MJ :
 
 Variable d'environnement additionnelle : `KAEYRIS_CHUNK_MAX_CHARS` (default `30000`, taille max d'un chunk de transcription).
 
-> **Limite assumée** : la qualité POV reste dégradée par construction tant que la diarisation n'est pas opérationnelle (Jalon 9) — le LLM doit deviner qui agit depuis le contexte narratif. Les endpoints `/me/*` joueur restent réservés aux sessions `diarised` au sub-jalon courant.
+> **Limite assumée** : la qualité POV reste dégradée par construction tant que la diarisation n'est pas opérationnelle (Jalon 9) — le LLM doit deviner qui agit depuis le contexte narratif. Les lectures joueur `/me/*` continuent de réutiliser le mapping PJ-session existant ; le cas `non_diarised` basé uniquement sur `/sessions/{id}/players` reste une dette de cohérence à traiter si le front en a besoin.
 
 ## Créer un nouveau service
 

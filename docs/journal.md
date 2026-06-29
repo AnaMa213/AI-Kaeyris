@@ -866,3 +866,46 @@ Mon premier hotfix a inversé le sens du mismatch sans s'en rendre compte : les 
   restent reserves aux administrateurs.
 - Les probes utilisent un timeout applicatif ; un chargement natif lance en
   thread peut finir apres le timeout cote requete.
+
+## 2026-06-29 - Epic 8 : artefacts JDR editables (BD-23 a BD-27)
+
+### Ce qui a ete fait
+
+- Les artefacts texte `summary`, `narrative` et `pov:<pj_id>` sont editables
+  par PATCH synchrone MJ-only, avec provenance manuelle (`is_edited`,
+  `edited_at`, `edited_by`) separee de l'historique de generation IA.
+- La carte `elements` est maintenant une liste plate `elements[]`
+  `{category,name,description}` ; la generation continue d'accepter les 4
+  buckets internes puis les aplatit avant stockage/publication.
+- Les regenerations protegent les edits : `409 artifact-edited` sans
+  confirmation, `?force=true` pour confirmer l'ecrasement.
+- Les joueurs peuvent lire en readonly `summary(.md)` et `elements(.md)` via
+  `/me/sessions/{id}/...` quand leur PJ est autorise par le mapping existant.
+- OpenAPI, README, doc service JDR et memo ont ete mis a jour. Le worker Compose
+  a recu un healthcheck RQ adapte (`rq info`) au lieu du `/healthz` HTTP de
+  l'image API.
+
+### Ce que j'ai appris
+
+- **Provenance manuelle != provenance IA** : garder `model_used` et
+  `generated_at` immuables rend l'historique lisible, tandis que les champs
+  `edited_*` disent seulement ce qui s'est passe depuis la derniere generation.
+- **Un contrat public peut diverger du format de prompt interne** : le LLM peut
+  encore produire `{npcs,locations,items,clues}` tant que le backend expose le
+  contrat plat attendu par le front.
+- **Un healthcheck doit correspondre au process lance** : partager une image
+  Docker entre API et worker est pratique, mais le worker RQ ne doit pas heriter
+  d'un probe HTTP `/healthz`. Reference Docker `HEALTHCHECK` :
+  https://docs.docker.com/reference/dockerfile/#healthcheck
+
+### Validation
+
+- `ruff check .` : OK.
+- `pytest -q --tb=short` : 606 passed, 10 warnings.
+- Alembic SQLite temporaire : `upgrade head`, `downgrade -1`, `upgrade head`
+  jusqu'a `e4f6a8b0c121`.
+- `docker compose up -d --build` puis `docker compose config --quiet` : stack
+  healthy (`api`, `worker`, `postgres`, `redis`).
+- Parcours quickstart HTTP execute via donnees temporaires nettoyees : PATCH
+  long summary, PUT elements free-form, garde `artifact-edited`, lectures
+  joueur summary/elements et refus session non jouee.
