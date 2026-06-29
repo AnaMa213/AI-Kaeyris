@@ -657,6 +657,11 @@ class ArtifactRepository(_BaseRepository):
             existing.content_json = content_json
             existing.model_used = model_used
             existing.generated_at = now
+            # A (re)generation is freshly AI-produced, never hand-edited:
+            # clear any prior manual-edit provenance (BD-24 / Story 8.1).
+            existing.is_edited = False
+            existing.edited_at = None
+            existing.edited_by = None
             await self._session.flush()
             return existing
         row = Artifact(
@@ -678,6 +683,38 @@ class ArtifactRepository(_BaseRepository):
                 Artifact.kind == kind,
             )
         )
+
+    async def update_content(
+        self,
+        session_id: UUID,
+        *,
+        kind: str,
+        content_json: dict,
+        edited_by: str | None = None,
+    ) -> Artifact | None:
+        """Synchronous manual edit of an existing artefact (BD-23 / Story 8.1).
+
+        Requires the row to already exist (an edit is not a creation): returns
+        ``None`` when absent so the caller can surface the existing
+        artefact-absent semantics (404). Sets manual-edit provenance and leaves
+        ``model_used``/``generated_at`` untouched (FR-006).
+        """
+        from datetime import UTC, datetime
+
+        existing = await self._session.scalar(
+            select(Artifact).where(
+                Artifact.session_id == session_id,
+                Artifact.kind == kind,
+            )
+        )
+        if existing is None:
+            return None
+        existing.content_json = content_json
+        existing.is_edited = True
+        existing.edited_at = datetime.now(UTC)
+        existing.edited_by = edited_by
+        await self._session.flush()
+        return existing
 
     async def list_for_session(self, session_id: UUID) -> list[Artifact]:
         rows = await self._session.scalars(

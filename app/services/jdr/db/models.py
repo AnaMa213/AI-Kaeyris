@@ -26,6 +26,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     Enum,
     ForeignKey,
@@ -501,6 +502,19 @@ class Artifact(Base):
     model_used: Mapped[str] = mapped_column(String(255), nullable=False)
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    # Provenance (BD-24 / Story 8.1). `model_used`/`generated_at` above remain
+    # the immutable record of the last AI generation; a manual edit never
+    # touches them, it only flips these three. A (re)generation resets them to
+    # the "freshly generated, never hand-edited" state (see ArtifactRepository).
+    is_edited: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    edited_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    edited_by: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, default=None
     )
 
     session: Mapped[Session] = relationship("Session", back_populates="artifacts")

@@ -111,6 +111,7 @@ from app.services.jdr.schemas import (
     SessionPlayersOut,
     SessionUpdate,
     SummaryArtifactOut,
+    TextEditIn,
     TranscriptionEditIn,
     TranscriptionEditOut,
     TranscriptionOut,
@@ -1519,6 +1520,18 @@ async def post_narrative(
     )
 
 
+def _artifact_provenance(artifact) -> dict:
+    """Provenance kwargs shared by every ``*ArtifactOut`` projection (BD-24).
+
+    Surfaces whether an artefact was hand-edited since its last AI generation.
+    """
+    return {
+        "is_edited": artifact.is_edited,
+        "edited_at": artifact.edited_at,
+        "edited_by": artifact.edited_by,
+    }
+
+
 @router.get(
     "/sessions/{session_id}/artifacts/narrative",
     response_model=NarrativeArtifactOut,
@@ -1549,6 +1562,7 @@ async def get_narrative(
         text=str(artifact.content_json.get("text", "")),
         model_used=artifact.model_used,
         generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
     )
 
 
@@ -1678,6 +1692,7 @@ async def get_elements(
         clues=_coerce("clues"),
         model_used=artifact.model_used,
         generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
     )
 
 
@@ -1818,6 +1833,7 @@ async def get_summary(
         text=text,
         model_used=artifact.model_used,
         generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
     )
 
 
@@ -2011,6 +2027,139 @@ async def get_pov(
         text=text,
         model_used=artifact.model_used,
         generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Artifact editing — synchronous MJ edits (BD-23 / Epic 8 Story 8.1)
+# ---------------------------------------------------------------------------
+
+
+@router.patch(
+    "/sessions/{session_id}/artifacts/summary",
+    response_model=SummaryArtifactOut,
+    summary="Edit the global session summary (synchronous write, MJ only).",
+)
+async def patch_summary(
+    session_id: UUID,
+    payload: TextEditIn,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SummaryArtifactOut:
+    """Replace the summary text in one synchronous write (BD-23).
+
+    Ownership enforced by ``resolve_session_for_gm`` (404 if the session is not
+    the caller's). The artefact must already exist (404 ``artifact-not-ready``
+    otherwise — same semantics as GET). Sets ``is_edited``/``edited_at`` and
+    leaves ``model_used``/``generated_at`` untouched (FR-006).
+    """
+    session_row = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    artifact = await ArtifactRepository(db).update_content(
+        session_id,
+        kind="summary",
+        content_json={"text": payload.text},
+        edited_by=str(auth.id),
+    )
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"Summary for session {session_id} has not been generated yet; "
+                "generate it before editing."
+            ),
+        )
+    return SummaryArtifactOut(
+        session_id=artifact.session_id,
+        text=str(artifact.content_json.get("text", "")),
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
+    )
+
+
+@router.patch(
+    "/sessions/{session_id}/artifacts/narrative",
+    response_model=NarrativeArtifactOut,
+    summary="Edit the narrative summary (synchronous write, MJ only).",
+)
+async def patch_narrative(
+    session_id: UUID,
+    payload: TextEditIn,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> NarrativeArtifactOut:
+    """Replace the narrative text in one synchronous write (BD-23). Same
+    ownership / artefact-absent / provenance semantics as ``patch_summary``."""
+    session_row = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    artifact = await ArtifactRepository(db).update_content(
+        session_id,
+        kind="narrative",
+        content_json={"text": payload.text},
+        edited_by=str(auth.id),
+    )
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"Narrative for session {session_id} has not been generated yet; "
+                "generate it before editing."
+            ),
+        )
+    return NarrativeArtifactOut(
+        session_id=artifact.session_id,
+        text=str(artifact.content_json.get("text", "")),
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
+    )
+
+
+@router.patch(
+    "/sessions/{session_id}/artifacts/povs/{pj_id}",
+    response_model=PovArtifactOut,
+    summary="Edit one PJ's POV (synchronous write, MJ only).",
+)
+async def patch_pov(
+    session_id: UUID,
+    pj_id: UUID,
+    payload: TextEditIn,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> PovArtifactOut:
+    """Replace one PJ's POV text in one synchronous write (BD-23).
+
+    Resolves session ownership then the owned PJ (404 on either mismatch),
+    before editing the ``pov:<pj_id>`` artefact.
+    """
+    session_row = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    await _load_owned_pj_or_404(
+        db, pj_id=pj_id, gm_key_id=auth.id, campaign_id=session_row.campaign_id
+    )
+    artifact = await ArtifactRepository(db).update_content(
+        session_id,
+        kind=f"pov:{pj_id}",
+        content_json={"text": payload.text},
+        edited_by=str(auth.id),
+    )
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"POV for PJ {pj_id} in session {session_id} has not been "
+                "generated yet; generate it before editing."
+            ),
+        )
+    return PovArtifactOut(
+        session_id=artifact.session_id,
+        pj_id=pj_id,
+        text=str(artifact.content_json.get("text", "")),
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
     )
 
 
