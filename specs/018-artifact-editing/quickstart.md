@@ -6,7 +6,7 @@ Procédure de validation manuelle (en complément des tests pytest). Suppose une
 
 ```bash
 # Appliquer la migration
-.venv/Scripts/python.exe -m alembic upgrade head      # crée 0019 (provenance + flatten éléments)
+.venv/Scripts/python.exe -m alembic upgrade head      # applique 0019 (provenance) puis 0020 (flatten éléments)
 
 # Lancer l'API
 docker compose up   # ou: uvicorn app.main:app --reload

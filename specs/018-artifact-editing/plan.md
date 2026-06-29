@@ -70,14 +70,16 @@ app/services/jdr/
 ├── schemas.py           # Element{category,name,description} ; ElementsArtifactOut → liste plate
 │                        # + edited_at/is_edited/edited_by sur les *ArtifactOut (BD-24)
 │                        # + corps d'édition (TextEditIn, ElementsPutIn)
-├── logic.py             # flatten 4 buckets → catégories (npcs→PNJ…), pose provenance à l'édition
+├── elements.py          # flatten 4 buckets → catégories (npcs→PNJ…), lecture legacy/new shape
+├── logic.py             # règles métier JDR existantes
 ├── db/
 │   ├── models.py        # Artifact: + edited_at, is_edited, edited_by
 │   └── repositories.py  # ArtifactRepository: + update_content (édition), garde régénération
 └── ...
 
 migrations/versions/
-└── 0019_jdr_artifact_provenance_and_elements_freeform.py   # provenance (DDL) + éléments (données)
+├── 0019_jdr_artifact_provenance.py                         # provenance (DDL additif)
+└── 0020_jdr_elements_freeform_category.py                  # éléments (migration de données JSON)
 
 tests/services/jdr/
 ├── test_artifact_edit.py         # BD-23 (édition texte + elements, authz, artefact absent)
@@ -87,7 +89,7 @@ tests/services/jdr/
 └── test_player_artifact_reads.py # BD-27 (lectures joueur + isolation inter-sessions)
 ```
 
-**Structure Decision** : service unique `app/services/jdr/` (modular monolith, §4.1). Une seule migration Alembic `0019` regroupe l'ajout de colonnes de provenance (DDL) et la transformation des éléments (données), car les deux concernent la même table et le même epic.
+**Structure Decision** : service unique `app/services/jdr/` (modular monolith, §4.1). La baseline Epic 8 se fait en deux migrations séquentielles sur la même table : `0019` ajoute la provenance (DDL additif) et `0020` transforme les éléments (migration de données JSON). La séparation évite de transformer la forme stockée des éléments avant que le code de lecture/écriture US2 sache la projeter.
 
 ## Phase tracking
 

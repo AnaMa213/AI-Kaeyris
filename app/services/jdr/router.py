@@ -46,6 +46,7 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Job
 from app.services.jdr import logic
 from app.services.jdr.batch.router import router as batch_router
+from app.services.jdr.elements import elements_from_content
 from app.services.jdr.campaign_context import (
     CampaignAccessError,
     resolve_campaign_scope_for_auth,
@@ -89,6 +90,7 @@ from app.services.jdr.schemas import (
     ChunkOut,
     Element,
     ElementsArtifactOut,
+    ElementsPutIn,
     JobOut,
     JobQueuedOut,
     MappingOut,
@@ -1671,25 +1673,9 @@ async def get_elements(
             ),
         )
 
-    content = artifact.content_json or {}
-
-    def _coerce(key: str) -> list[Element]:
-        entries = content.get(key) or []
-        return [
-            Element(
-                name=str(e.get("name", "")).strip(),
-                description=str(e.get("description", "")).strip(),
-            )
-            for e in entries
-            if isinstance(e, dict) and str(e.get("name", "")).strip()
-        ]
-
     return ElementsArtifactOut(
         session_id=artifact.session_id,
-        npcs=_coerce("npcs"),
-        locations=_coerce("locations"),
-        items=_coerce("items"),
-        clues=_coerce("clues"),
+        elements=[Element(**row) for row in elements_from_content(artifact.content_json)],
         model_used=artifact.model_used,
         generated_at=artifact.generated_at,
         **_artifact_provenance(artifact),
@@ -2157,6 +2143,49 @@ async def patch_pov(
         session_id=artifact.session_id,
         pj_id=pj_id,
         text=str(artifact.content_json.get("text", "")),
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
+    )
+
+
+@router.put(
+    "/sessions/{session_id}/artifacts/elements",
+    response_model=ElementsArtifactOut,
+    summary="Replace the elements card (synchronous full write, MJ only).",
+)
+async def put_elements(
+    session_id: UUID,
+    payload: ElementsPutIn,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ElementsArtifactOut:
+    """Atomically replace the whole elements card (BD-23/BD-26).
+
+    Full-replace (PUT) rather than per-element CRUD: atomic, idempotent, and it
+    mirrors the existing ``PUT /mapping`` pattern. Same ownership /
+    artefact-absent / provenance semantics as the text edits.
+    """
+    session_row = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    content_json = {"elements": [e.model_dump() for e in payload.elements]}
+    artifact = await ArtifactRepository(db).update_content(
+        session_id,
+        kind="elements",
+        content_json=content_json,
+        edited_by=str(auth.id),
+    )
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"Elements for session {session_id} have not been generated yet; "
+                "generate them before editing."
+            ),
+        )
+    return ElementsArtifactOut(
+        session_id=artifact.session_id,
+        elements=[Element(**row) for row in elements_from_content(artifact.content_json)],
         model_used=artifact.model_used,
         generated_at=artifact.generated_at,
         **_artifact_provenance(artifact),

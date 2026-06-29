@@ -56,6 +56,7 @@ from app.services.jdr.audio import (
     chunked_audio,
     prepare_audio_for_transcription,
 )
+from app.services.jdr.elements import flatten_elements
 from app.services.jdr.db.models import (
     AudioSource,
     Campaign,
@@ -654,7 +655,10 @@ async def _generate_elements(session_id: UUID) -> None:
     except PermanentLLMError as exc:
         raise PermanentJobError(str(exc)) from exc
 
-    elements = _parse_elements_response(raw)
+    # The LLM still returns the four canonical buckets; flatten them into the
+    # category-tagged shape stored since BD-26 (npcs->PNJ, locations->Lieux,
+    # items->Objets, clues->Indices).
+    elements = {"elements": flatten_elements(_parse_elements_response(raw))}
 
     model_used = _llm_model_used(adapter)
     async with sessionmaker() as db:

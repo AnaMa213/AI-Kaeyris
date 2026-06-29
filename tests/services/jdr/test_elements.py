@@ -286,7 +286,8 @@ def _make_jdr_app(make_db_session_dep: Callable[..., Any]) -> FastAPI:
 # ---------------------------------------------------------------------------
 
 
-async def test_generate_elements_writes_artifact_with_four_lists(ctx, monkeypatch):
+async def test_generate_elements_writes_flat_category_tagged_list(ctx, monkeypatch):
+    """BD-26: the four LLM buckets are flattened into a category-tagged list."""
     stub = _StubLLM()
     _patch_llm_adapter(monkeypatch, stub)
 
@@ -301,9 +302,12 @@ async def test_generate_elements_writes_artifact_with_four_lists(ctx, monkeypatc
         )
     assert artifact is not None
     content = artifact.content_json
-    assert set(content.keys()) == {"npcs", "locations", "items", "clues"}
-    assert content["npcs"][0]["name"] == "Gandalf"
-    assert content["items"][0]["name"] == "Anneau Unique"
+    assert list(content.keys()) == ["elements"]
+    by_name = {e["name"]: e["category"] for e in content["elements"]}
+    assert by_name["Gandalf"] == "PNJ"
+    assert by_name["Comté"] == "Lieux"
+    assert by_name["Anneau Unique"] == "Objets"
+    assert by_name["Mot de passe Mellon"] == "Indices"
 
 
 async def test_generate_elements_uses_elements_system_prompt(ctx, monkeypatch):
@@ -341,10 +345,7 @@ async def test_generate_elements_handles_empty_lists_per_acceptance_us23(
         )
     assert artifact is not None
     content = artifact.content_json
-    assert content["npcs"] == []
-    assert content["locations"] == []
-    assert content["items"] == []
-    assert content["clues"] == []
+    assert content == {"elements": []}
 
 
 async def test_generate_elements_is_idempotent(ctx, monkeypatch):
@@ -367,7 +368,7 @@ async def test_generate_elements_is_idempotent(ctx, monkeypatch):
             )
         ).all()
     assert len(rows) == 1
-    assert rows[0].content_json["npcs"][0]["name"] == "Second"
+    assert rows[0].content_json["elements"][0]["name"] == "Second"
 
 
 async def test_generate_elements_remaps_transient_llm_error(ctx, monkeypatch):
@@ -457,7 +458,7 @@ async def test_post_elements_returns_404_for_unknown_session(
     assert response.status_code == 404
 
 
-async def test_get_elements_returns_four_named_lists(
+async def test_get_elements_returns_flat_category_list(
     ctx, make_db_session_dep, monkeypatch
 ):
     _patch_llm_adapter(monkeypatch, _StubLLM())
@@ -474,10 +475,12 @@ async def test_get_elements_returns_four_named_lists(
     assert response.status_code == 200
     body = response.json()
     assert body["session_id"] == str(ctx.session_id)
-    assert body["npcs"][0]["name"] == "Gandalf"
-    assert body["locations"][0]["name"] == "Comté"
-    assert body["items"][0]["name"] == "Anneau Unique"
-    assert body["clues"][0]["name"] == "Mot de passe Mellon"
+    by_name = {e["name"]: e["category"] for e in body["elements"]}
+    assert by_name["Gandalf"] == "PNJ"
+    assert by_name["Comté"] == "Lieux"
+    assert by_name["Anneau Unique"] == "Objets"
+    assert by_name["Mot de passe Mellon"] == "Indices"
+    assert body["is_edited"] is False
     assert "model_used" in body
     assert "generated_at" in body
 

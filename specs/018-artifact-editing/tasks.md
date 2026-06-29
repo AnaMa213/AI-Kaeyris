@@ -28,13 +28,13 @@ description: "Task list — Epic 8 : Artefacts JDR éditables"
 
 ## Phase 2: Foundational (Blocking Prerequisites)
 
-**Purpose**: Baseline de schéma partagée par toutes les stories (table `jdr_artifacts`). ⚠️ Couplage assumé : la migration unique `0019` porte à la fois la provenance (US3) et la transformation des éléments (US2) — voir [plan.md](plan.md) « Structure Decision ». Aucune story ne démarre avant.
+**Purpose**: Baseline de schéma partagée par toutes les stories (table `jdr_artifacts`). ⚠️ Couplage assumé : `0019` porte la provenance (US3) et `0020` porte la transformation des éléments (US2) — voir [plan.md](plan.md) « Structure Decision ». Aucune story ne démarre avant.
 
 - [X] T002 Colonnes de provenance ajoutées au modèle `Artifact` (`is_edited`/`edited_at`/`edited_by`) dans `app/services/jdr/db/models.py`
-- [~] T003 **Partiel** : provenance ajoutée aux 4 `*ArtifactOut` via `ArtifactProvenanceMixin` dans `app/services/jdr/schemas.py`. La refonte `Element → {category,...}` et `ElementsArtifactOut → elements: list[Element]` est **reportée à US2** (la faire ici sans le code de lecture US2 casserait `GET .../elements`).
-- [~] T004 [P] **Partiel** : `TextEditIn{text}` ajouté (avec rejet du blanc). `ElementsPutIn` **reporté à US2** (couplé à la forme free-form).
-- [X] T005 Migration `migrations/versions/0019_jdr_artifact_provenance.py` — **provenance DDL uniquement** (additif). Le data-migration flatten des éléments est **reporté à US2** (futur 0020) pour livrer avec le code de lecture. Upgrade/downgrade validés sur SQLite.
-- [~] T006 [P] **Adapté** : migration 0019 validée par `alembic upgrade head → downgrade -1 → upgrade head` (round-trip OK). Pas de test unitaire alembic-in-pytest (harnais de test = `create_all`, migration additive). Le test d'intégrité d'éléments (SC-006) sera écrit avec le flatten en US2.
+- [X] T003 Provenance sur les 4 `*ArtifactOut` (`ArtifactProvenanceMixin`) **+ reshape `Element → {category,name,description}` et `ElementsArtifactOut → elements: list[Element]`** (fait en US2) dans `app/services/jdr/schemas.py`
+- [X] T004 [P] `TextEditIn{text}` (rejet du blanc) **+ `ElementsPutIn{elements}`** (fait en US2) dans `app/services/jdr/schemas.py`
+- [X] T005 Migration provenance `0019_jdr_artifact_provenance.py` (additif) **+ data-migration `0020_jdr_elements_freeform_category.py`** (flatten éléments, fait en US2). Upgrade/downgrade validés sur SQLite.
+- [X] T006 [P] Migrations validées par round-trip `alembic upgrade head → downgrade -1 → upgrade head`. Intégrité du mapping (SC-006, conservation du compte) couverte par les tests unitaires `flatten_elements`/`elements_from_content` (mêmes règles que la migration 0020).
 
 **Checkpoint**: provenance (schéma + migration) prête ✅ — le flatten des éléments démarrera avec US2.
 
@@ -69,14 +69,14 @@ description: "Task list — Epic 8 : Artefacts JDR éditables"
 
 ### Tests (écrits d'abord, doivent échouer)
 
-- [ ] T012 [P] [US2] Tests éléments free-form dans `tests/services/jdr/test_artifact_elements_freeform.py` : GET forme plate, PUT round-trip catégorie libre, description >25 mots acceptée, flatten 4 buckets → catégories
+- [X] T012 [P] [US2] Tests éléments free-form dans `tests/services/jdr/test_artifact_elements_freeform.py` : GET forme plate, PUT round-trip catégorie libre + description >25 mots, 422 blank, 404 absent, + tests unitaires `flatten_elements`/`elements_from_content` (7 verts) ; tests existants `test_elements`/`test_elements_md`/`test_non_diarised_artefacts` mis à jour pour la nouvelle forme
 
 ### Implémentation
 
-- [ ] T013 [US2] Ajouter le helper `flatten_elements(buckets) -> list[Element]` (correspondance npcs→PNJ, locations→Lieux, items→Objets, clues→Indices) dans `app/services/jdr/logic.py`
-- [ ] T014 [US2] Brancher `flatten_elements` dans le job/chemin de génération des éléments pour que `content_json` soit écrit au format `{"elements":[...]}` dans `app/services/jdr/logic.py`
-- [ ] T015 [US2] Adapter `GET /sessions/{session_id}/artifacts/elements` (et `.md`) pour projeter `content_json["elements"]` vers le nouveau `ElementsArtifactOut` dans `app/services/jdr/router.py`
-- [ ] T016 [US2] Implémenter `PUT /sessions/{session_id}/artifacts/elements` (corps `ElementsPutIn`, remplacement atomique via `update_content`, `require_gm` **+ résolution de propriété via `resolve_session_for_gm`**, 404/422 si absent) dans `app/services/jdr/router.py` (dépend de T008)
+- [X] T013 [US2] Helpers `flatten_elements` + `elements_from_content` + mapping `ELEMENT_CATEGORY_LABELS` dans **nouveau module** `app/services/jdr/elements.py` (placé hors de `logic.py` pour éviter le cycle `logic → jobs.jdr`)
+- [X] T014 [US2] `flatten_elements` branché dans `_generate_elements` (`app/jobs/jdr.py`) → `content_json = {"elements": [...]}`
+- [X] T015 [US2] `GET .../artifacts/elements` (+`.md` via `render_elements_md`) projette la liste plate taggée (gère aussi la forme legacy en lecture) dans `app/services/jdr/router.py` et `markdown.py`
+- [X] T016 [US2] `PUT /sessions/{session_id}/artifacts/elements` (`ElementsPutIn`, remplacement atomique via `update_content`, `require_gm` + `resolve_session_for_gm`, 404 si absent) dans `app/services/jdr/router.py`
 
 **Checkpoint**: US1 + US2 fonctionnent indépendamment.
 
@@ -183,5 +183,5 @@ US1 (MVP) → US2 (éléments) → US3 (protection) → US4 (textes longs) → U
 ## Notes
 
 - `[P]` = fichiers différents, pas de dépendance.
-- Couplage Foundational assumé : migration unique `0019` (provenance + flatten) sert US2 et US3 ; les stories restent **comportementalement** indépendantes même si elles partagent la baseline de schéma.
+- Couplage Foundational assumé : `0019` (provenance) + `0020` (flatten éléments) servent US2 et US3 ; les stories restent **comportementalement** indépendantes même si elles partagent la baseline de schéma.
 - Commit par tâche ou groupe logique, message Conventional Commits référençant `BD-XX` (cf. convention epic-7).
