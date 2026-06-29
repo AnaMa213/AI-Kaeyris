@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_valid
 
 from app.core.datetime_serialization import ensure_aware_utc, serialize_datetime_utc
 
+from app.services.jdr.model_catalog import CloudModel
 from app.services.jdr.db.models import (
     JobKind,
     JobStatus,
@@ -135,6 +136,18 @@ class ModelSettingsOut(JdrSchema):
             "itself is never returned."
         ),
     )
+
+
+class ModelCatalogOut(JdrSchema):
+    """Curated cloud-model catalog served to the front (single source of truth).
+
+    The front renders its model selectors and pricing from this payload instead
+    of hardcoding ids/prices, so the two never drift. Each entry carries its
+    tier and indicative price (see :mod:`app.services.jdr.model_catalog`).
+    """
+
+    transcription: list[CloudModel]
+    summary: list[CloudModel]
 
 
 class ModelSettingsPatch(JdrSchema):

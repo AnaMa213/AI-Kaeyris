@@ -649,3 +649,110 @@ async def test_admin_can_persist_ollama_model(make_db_session_dep):
     assert patched.json()["ollama_model"] == "llama3:8b"
     assert "deepinfra_api_key" not in patched.json()
     assert fetched.json()["ollama_model"] == "llama3:8b"
+
+
+async def test_model_catalog_lists_curated_cloud_models(make_db_session_dep):
+    # The backend is the single source of truth: the front renders selectors and
+    # pricing from this payload (ids, tiers, prices) instead of hardcoding them.
+    app = _make_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await _setup_admin(client)
+        response = await client.get("/services/jdr/settings/model-catalog")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"transcription", "summary"}
+
+    summary_ids = [m["id"] for m in body["summary"]]
+    assert summary_ids == [
+        "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "Qwen/Qwen2.5-72B-Instruct",
+        "meta-llama/Meta-Llama-3.1-70B-Instruct",
+    ]
+    economy = body["summary"][0]
+    assert economy["tier"] == "economy"
+    assert economy["pricing"] == {
+        "unit": "per_million_tokens",
+        "input_per_1m": 0.02,
+        "output_per_1m": 0.05,
+    }
+
+    transcription_turbo = body["transcription"][0]
+    assert transcription_turbo["id"] == "openai/whisper-large-v3-turbo"
+    assert transcription_turbo["pricing"] == {
+        "unit": "per_minute",
+        "price_per_minute": 0.0002,
+    }
+
+
+async def test_unknown_summary_cloud_model_is_rejected(make_db_session_dep):
+    app = _make_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await _setup_admin(client)
+        response = await client.patch(
+            "/services/jdr/settings/models",
+            json={"summary_cloud_model": "acme/not-a-real-model"},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["type"].endswith("/unknown-cloud-model")
+
+
+async def test_unknown_transcription_cloud_model_is_rejected(make_db_session_dep):
+    app = _make_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await _setup_admin(client)
+        response = await client.patch(
+            "/services/jdr/settings/models",
+            # The legacy un-prefixed id is intentionally not in the catalog.
+            json={"transcription_cloud_model": "whisper-large-v3"},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["type"].endswith("/unknown-cloud-model")
+
+
+async def test_changing_summary_model_revalidates_stored_key(
+    make_db_session_dep, monkeypatch
+):
+    # Switching to a model the stored key cannot serve (e.g. a gated 70B) must be
+    # caught at save time, not surface as a 401 deep in a worker — even though no
+    # new key is supplied with the change.
+    _set_operator_cloud_defaults(monkeypatch)
+    app = _make_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await _setup_admin(client)
+        _mock_cloud_key_probe(monkeypatch, ok=True)
+        stored = await client.patch(
+            "/services/jdr/settings/models",
+            json={
+                "summary_provider": "cloud",
+                "summary_cloud_model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+                "deepinfra_api_key": "good-for-8b",
+            },
+        )
+        assert stored.status_code == 200
+
+        # No new key in this PATCH: the stored key is re-probed against the 70B.
+        _mock_cloud_key_probe(monkeypatch, ok=False)
+        rejected = await client.patch(
+            "/services/jdr/settings/models",
+            json={"summary_cloud_model": "meta-llama/Meta-Llama-3.1-70B-Instruct"},
+        )
+        fetched = await client.get("/services/jdr/settings/models")
+
+    assert rejected.status_code == 400
+    assert rejected.json()["type"].endswith("/cloud-api-key-invalid")
+    # The unauthorized model was not persisted.
+    assert (
+        fetched.json()["summary_cloud_model"]
+        == "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    )

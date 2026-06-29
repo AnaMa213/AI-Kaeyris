@@ -68,9 +68,16 @@ from app.services.jdr.local_model_validation import (
     create_local_model_validation,
     require_local_model_validation_hash,
 )
+from app.services.jdr.model_catalog import (
+    SUMMARY_CLOUD_MODELS,
+    TRANSCRIPTION_CLOUD_MODELS,
+    is_allowed_summary_cloud_model,
+    is_allowed_transcription_cloud_model,
+)
 from app.services.jdr.schemas import (
     LocalModelValidationOut,
     LocalModelValidationRequest,
+    ModelCatalogOut,
     ModelSettingsOut,
     ModelSettingsPatch,
 )
@@ -116,6 +123,14 @@ class CloudApiKeyInvalidAppError(AppError):
     status_code = status.HTTP_400_BAD_REQUEST
     error_type = "cloud-api-key-invalid"
     title = "Cloud API key invalid"
+
+
+class UnknownCloudModelAppError(AppError):
+    """A selected cloud model id is absent from the curated catalog."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "unknown-cloud-model"
+    title = "Unknown cloud model"
 
 
 def _front_problem(status_code: int, title: str) -> JSONResponse:
@@ -450,6 +465,25 @@ async def get_model_settings(
     return _model_settings_out(row)
 
 
+@router.get(
+    "/services/jdr/settings/model-catalog",
+    response_model=ModelCatalogOut,
+    summary="Return the curated catalog of selectable cloud models (ids, tiers, prices).",
+)
+async def get_model_catalog(
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+) -> ModelCatalogOut:
+    # Static, non-secret catalog (the backend is the single source of truth):
+    # the front renders its selectors and pricing from this instead of
+    # hardcoding ids/prices. Gated by require_gm only because the settings UI
+    # that consumes it is admin-only; no per-user state is involved.
+    _ = auth
+    return ModelCatalogOut(
+        transcription=list(TRANSCRIPTION_CLOUD_MODELS),
+        summary=list(SUMMARY_CLOUD_MODELS),
+    )
+
+
 @router.post(
     "/services/jdr/settings/models/local/validation",
     response_model=LocalModelValidationOut,
@@ -491,6 +525,10 @@ async def patch_model_settings(
         payload=payload,
         category=LocalModelCategory.SUMMARY,
     )
+    # Reject a cloud model id absent from the curated catalog before doing any
+    # network probe — the catalog is the single source of truth shared with the
+    # front (GET /services/jdr/settings/model-catalog).
+    _validate_cloud_models_in_catalog(payload)
     # Story 7.4 / B: fail fast on a bad DeepInfra key — probe it at save time
     # instead of letting an unauthorized key surface as a 401 deep in a worker.
     await _validate_cloud_api_key_if_needed(payload=payload, current=current)
@@ -582,31 +620,78 @@ def _effective_transcription_provider() -> ModelProvider:
     return ModelProvider.CLOUD
 
 
-async def _validate_cloud_api_key_if_needed(*, payload, current) -> None:
-    """Probe a newly-supplied DeepInfra key before storing it (Story 7.4 / B).
+def _validate_cloud_models_in_catalog(payload: ModelSettingsPatch) -> None:
+    """Reject a PATCH cloud model id that is not in the curated catalog.
 
-    Only runs when the PATCH carries a non-empty ``deepinfra_api_key``. The probe
-    is a 1-token completion against a cloud model from the same PATCH (or the
-    stored one), so a `401`/permission error isolates an unauthorized **key**
-    (the configured cloud models come from a fixed catalog, so a model mismatch
-    is not the failure mode). On a permanent failure the save is rejected with
-    `400 cloud-api-key-invalid`; a transient/network failure does not block the
-    save (it can't confirm the key is bad). If no cloud model is available to
-    probe against, validation is skipped (the key is checked on the next save
-    that includes a cloud model).
+    The catalog is the single source of truth shared with the front. Only
+    non-empty, PATCH-supplied ids are checked (surfaced operator defaults and
+    cleared/None fields are left alone). Mirrors the 422 returned for an unknown
+    provider enum value.
+    """
+    if payload.transcription_cloud_model and not is_allowed_transcription_cloud_model(
+        payload.transcription_cloud_model
+    ):
+        raise UnknownCloudModelAppError(
+            detail=(
+                f"Unknown transcription cloud model "
+                f"{payload.transcription_cloud_model!r}. Fetch "
+                "GET /services/jdr/settings/model-catalog for valid ids."
+            )
+        )
+    if payload.summary_cloud_model and not is_allowed_summary_cloud_model(
+        payload.summary_cloud_model
+    ):
+        raise UnknownCloudModelAppError(
+            detail=(
+                f"Unknown summary cloud model {payload.summary_cloud_model!r}. "
+                "Fetch GET /services/jdr/settings/model-catalog for valid ids."
+            )
+        )
+
+
+async def _validate_cloud_api_key_if_needed(*, payload, current) -> None:
+    """Probe the DeepInfra key against the selected model before storing (7.4 / B).
+
+    The probe is a 1-token completion isolating an unauthorized **key for the
+    chosen model**. It runs when either:
+
+    - a new ``deepinfra_api_key`` is supplied (validate the new key), or
+    - the **summary** cloud model is being changed while a key is already stored
+      (re-validate that the stored key is authorized for the new model — without
+      this, switching to a model the key cannot serve, e.g. a gated 70B, only
+      surfaced as a `401` deep in a worker instead of a save-time `400`).
+
+    On a permanent failure the save is rejected with `400 cloud-api-key-invalid`;
+    a transient/network failure does not block the save (it can't confirm the key
+    is bad). If no key or no cloud model is available, the probe is skipped.
     """
     new_key = payload.deepinfra_api_key
-    if not new_key:
+    stored_key = current.deepinfra_api_key if current is not None else None
+    effective_key = new_key or stored_key
+    if not effective_key:
         return
-    model = (
-        payload.summary_cloud_model
-        or (current.summary_cloud_model if current is not None else None)
-        or payload.transcription_cloud_model
+
+    summary_model = payload.summary_cloud_model or (
+        current.summary_cloud_model if current is not None else None
+    )
+    # Probe the summary model first (the récit/résumé path, most likely gated),
+    # falling back to the transcription model when no summary model is set.
+    model = summary_model or (
+        payload.transcription_cloud_model
         or (current.transcription_cloud_model if current is not None else None)
     )
     if not model:
         return
-    adapter = build_personal_cloud_llm_adapter(model=model, api_key=new_key)
+
+    summary_model_changed = bool(
+        payload.summary_cloud_model
+        and current is not None
+        and payload.summary_cloud_model != current.summary_cloud_model
+    )
+    if not new_key and not summary_model_changed:
+        return
+
+    adapter = build_personal_cloud_llm_adapter(model=model, api_key=effective_key)
     try:
         await adapter.complete(system="", user="ping", max_tokens=1)
     except PermanentLLMError as exc:
