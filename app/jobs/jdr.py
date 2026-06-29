@@ -56,6 +56,7 @@ from app.services.jdr.audio import (
     chunked_audio,
     prepare_audio_for_transcription,
 )
+from app.services.jdr.elements import flatten_elements
 from app.services.jdr.db.models import (
     AudioSource,
     Campaign,
@@ -132,7 +133,9 @@ async def _load_session_model_settings(session_id: UUID) -> ModelSettings | None
 
 def _build_llm_adapter_for_user(row: ModelSettings | None) -> LLMAdapter:
     """Build an LLM adapter from user settings, preserving env fallback."""
-    if row is None:
+    # Story 7.2 / BD-22: a NULL provider means "no per-user override" — inherit
+    # the operator/env adapter, exactly as when no row exists.
+    if row is None or row.summary_provider is None:
         return get_llm_adapter()
 
     if row.summary_provider is ModelProvider.OLLAMA:
@@ -164,7 +167,9 @@ def _build_transcription_adapter_for_user(
     row: ModelSettings | None,
 ) -> TranscriptionAdapter:
     """Build a transcription adapter from user settings, preserving env fallback."""
-    if row is None:
+    # Story 7.2 / BD-22: a NULL provider means "no per-user override" — inherit
+    # the operator/env adapter, exactly as when no row exists.
+    if row is None or row.transcription_provider is None:
         return get_transcription_adapter()
 
     if row.transcription_provider is ModelProvider.CLOUD:
@@ -650,7 +655,10 @@ async def _generate_elements(session_id: UUID) -> None:
     except PermanentLLMError as exc:
         raise PermanentJobError(str(exc)) from exc
 
-    elements = _parse_elements_response(raw)
+    # The LLM still returns the four canonical buckets; flatten them into the
+    # category-tagged shape stored since BD-26 (npcs->PNJ, locations->Lieux,
+    # items->Objets, clues->Indices).
+    elements = {"elements": flatten_elements(_parse_elements_response(raw))}
 
     model_used = _llm_model_used(adapter)
     async with sessionmaker() as db:
@@ -811,18 +819,18 @@ async def _generate_summary(session_id: UUID) -> None:
     """Map-reduce session summary for `non_diarised` sessions (FR-006/007).
 
     Step 0: load + validate (mode, state, source text).
-    Step 1 (reset transaction): NULL every chunks.summary_text + DELETE
-        artifacts(kind IN ('narrative', 'elements') OR kind LIKE 'pov:%').
-        Committed before any LLM call so that DB locks don't span the
-        long LLM phase (research.md §2). The old `summary` artifact
-        survives this step — it's only overwritten at the end.
-    Step 2 (map): one LLM call per automatic or transient edited chunk, in
-        `ordre` ASC. Automatic chunk summaries are persisted inline; transient
-        chunks derived from an edited transcription never rewrite jdr_chunks.
-    Step 3 (reduce): if > 1 chunk, consolidate the partial summaries
+    Step 1 (map): one LLM call per automatic or transient edited chunk, in
+        `ordre` ASC, collected in memory. No DB transaction is held during the
+        LLM phase (research.md §2).
+    Step 2 (reduce): if > 1 chunk, consolidate the partial summaries
         via one more LLM call. Otherwise the single partial summary is
         used as-is.
-    Step 4: UPSERT artifacts(kind='summary'). Single commit.
+    Step 3 (atomic swap, cascade FR-011): in ONE transaction — reset
+        chunks.summary_text, write the new per-chunk summaries, DELETE
+        artifacts(kind IN ('narrative','elements') OR kind LIKE 'pov:%'), and
+        UPSERT artifacts(kind='summary'). Runs ONLY after the LLM succeeded, so
+        a failed regeneration (Story 7.4) never destroys the prior summary or
+        derived artifacts, and no destructive write precedes the new summary.
     """
     sessionmaker = get_sessionmaker()
 
@@ -868,32 +876,16 @@ async def _generate_summary(session_id: UUID) -> None:
             # objects across DB sessions.
             chunk_data = [(c.id, c.ordre, c.text) for c in chunks]
 
-    # --- Step 1 : reset transaction (cascade FR-011) ------------------------
-    from sqlalchemy import delete as sa_delete
-
-    from app.services.jdr.db.models import Artifact as ArtifactModel
-
-    async with sessionmaker() as db:
-        await ChunkRepository(db).reset_summary_texts(session_id)
-        await db.execute(
-            sa_delete(ArtifactModel).where(
-                ArtifactModel.session_id == session_id,
-                ArtifactModel.kind.in_(("narrative", "elements")),
-            )
-        )
-        await db.execute(
-            sa_delete(ArtifactModel).where(
-                ArtifactModel.session_id == session_id,
-                ArtifactModel.kind.like("pov:%"),
-            )
-        )
-        await db.commit()
-
-    # --- Step 2 : map -------------------------------------------------------
+    # --- Step 1 : map (LLM only — NO DB transaction held) -------------------
+    # Story 7.4 / FR-011 fix: the destructive cascade (reset summary_text +
+    # delete derived artifacts) used to run BEFORE the LLM. A failed regen
+    # (401, transient, rate-limit…) then destroyed the prior summary and left a
+    # misleading downstream "run summary first". The map+reduce now run first,
+    # purely in memory; nothing is written/deleted until the new summary exists.
     user_settings = await _load_session_model_settings(session_id)
     adapter = _build_llm_adapter_for_user(user_settings)
     partial_summaries: list[str] = []
-    for chunk_id, _ordre, text in chunk_data:
+    for _chunk_id, _ordre, text in chunk_data:
         try:
             partial = await adapter.complete(
                 system=SUMMARY_MAP_SYSTEM_PROMPT,
@@ -905,14 +897,8 @@ async def _generate_summary(session_id: UUID) -> None:
         except PermanentLLMError as exc:
             raise PermanentJobError(str(exc)) from exc
         partial_summaries.append(partial)
-        if chunk_id is not None:
-            async with sessionmaker() as db:
-                await ChunkRepository(db).update_summary_text(
-                    chunk_id, summary_text=partial
-                )
-                await db.commit()
 
-    # --- Step 3 : reduce ----------------------------------------------------
+    # --- Step 2 : reduce ----------------------------------------------------
     if len(partial_summaries) == 1:
         final_text = partial_summaries[0]
     else:
@@ -928,9 +914,37 @@ async def _generate_summary(session_id: UUID) -> None:
         except PermanentLLMError as exc:
             raise PermanentJobError(str(exc)) from exc
 
-    # --- Step 4 : UPSERT summary artifact -----------------------------------
+    # --- Step 3 : atomic swap (cascade FR-011) — ONLY after the LLM succeeded -
+    # reset chunk summaries + write the new ones + delete stale derived
+    # artifacts + upsert the new summary, in ONE transaction. No LLM call is
+    # held inside, so DB locks never span the long LLM phase (research.md §2),
+    # and a failed regen above leaves all prior data untouched.
+    from sqlalchemy import delete as sa_delete
+
+    from app.services.jdr.db.models import Artifact as ArtifactModel
+
     model_used = _llm_model_used(adapter)
     async with sessionmaker() as db:
+        await ChunkRepository(db).reset_summary_texts(session_id)
+        for (chunk_id, _ordre, _text), partial in zip(
+            chunk_data, partial_summaries
+        ):
+            if chunk_id is not None:
+                await ChunkRepository(db).update_summary_text(
+                    chunk_id, summary_text=partial
+                )
+        await db.execute(
+            sa_delete(ArtifactModel).where(
+                ArtifactModel.session_id == session_id,
+                ArtifactModel.kind.in_(("narrative", "elements")),
+            )
+        )
+        await db.execute(
+            sa_delete(ArtifactModel).where(
+                ArtifactModel.session_id == session_id,
+                ArtifactModel.kind.like("pov:%"),
+            )
+        )
         await ArtifactRepository(db).upsert(
             session_id,
             kind="summary",

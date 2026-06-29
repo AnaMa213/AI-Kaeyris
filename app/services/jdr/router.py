@@ -46,6 +46,7 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Job
 from app.services.jdr import logic
 from app.services.jdr.batch.router import router as batch_router
+from app.services.jdr.elements import elements_from_content
 from app.services.jdr.campaign_context import (
     CampaignAccessError,
     resolve_campaign_scope_for_auth,
@@ -89,6 +90,7 @@ from app.services.jdr.schemas import (
     ChunkOut,
     Element,
     ElementsArtifactOut,
+    ElementsPutIn,
     JobOut,
     JobQueuedOut,
     MappingOut,
@@ -111,6 +113,7 @@ from app.services.jdr.schemas import (
     SessionPlayersOut,
     SessionUpdate,
     SummaryArtifactOut,
+    TextEditIn,
     TranscriptionEditIn,
     TranscriptionEditOut,
     TranscriptionOut,
@@ -158,12 +161,36 @@ class TranscriptionNotReadyError(AppError):
     title = "Transcription not ready"
 
 
+class TranscriptionRestartNotAllowedError(AppError):
+    """Re-transcription requested from a state that does not allow it."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "transcription-restart-not-allowed"
+    title = "Transcription restart not allowed"
+
+
+class NoAudioToTranscribeError(AppError):
+    """Re-transcription requested but the session has no usable audio source."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "no-audio-to-transcribe"
+    title = "No audio to transcribe"
+
+
 class ArtifactNotReadyError(AppError):
     """Session exists but the requested artefact has not been generated yet."""
 
     status_code = status.HTTP_404_NOT_FOUND
     error_type = "artifact-not-ready"
     title = "Artifact not ready"
+
+
+class ArtifactEditedAppError(AppError):
+    """Regeneration would overwrite a manually edited artifact (BD-24)."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "artifact-edited"
+    title = "Artifact edited"
 
 
 class SessionNotTranscribedError(AppError):
@@ -383,6 +410,58 @@ def _ensure_aware(dt):
 
 def _has_edited_transcription(session_row: SessionModel) -> bool:
     return bool((session_row.edited_transcript_md or "").strip())
+
+
+def _is_downstream_artifact(kind: str) -> bool:
+    return kind in {"narrative", "elements"} or kind.startswith("pov:")
+
+
+def _artifact_kind_label(kind: str) -> str:
+    return "povs" if kind.startswith("pov:") else kind
+
+
+async def _guard_regeneration_not_edited(
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    force: bool,
+    target_kinds: tuple[str, ...] = (),
+    include_povs: bool = False,
+    include_downstream: bool = False,
+) -> None:
+    """Block destructive regeneration unless the caller explicitly confirms.
+
+    The guard runs before enqueueing the job. The actual destructive write still
+    happens inside the worker after model success, preserving Story 7.4's
+    non-destructive failure semantics.
+    """
+    if force:
+        return
+
+    target_set = set(target_kinds)
+    edited_kinds: list[str] = []
+    for artifact in await ArtifactRepository(db).list_for_session(session_id):
+        if not artifact.is_edited:
+            continue
+        kind = artifact.kind
+        should_guard = (
+            kind in target_set
+            or (include_povs and kind.startswith("pov:"))
+            or (include_downstream and _is_downstream_artifact(kind))
+        )
+        if should_guard:
+            edited_kinds.append(kind)
+
+    if edited_kinds:
+        labels = ", ".join(
+            sorted({_artifact_kind_label(kind) for kind in edited_kinds})
+        )
+        raise ArtifactEditedAppError(
+            detail=(
+                "Regeneration would overwrite manually edited artifact(s): "
+                f"{labels}. Retry with ?force=true to confirm replacement."
+            )
+        )
 
 
 # Closed phase vocabulary mirrored from JobOut (BD-10). Kept here so the route
@@ -904,11 +983,8 @@ async def patch_session(
         status.HTTP_404_NOT_FOUND: {
             "description": "Session not found or not visible to the current GM."
         },
-        status.HTTP_409_CONFLICT: {
-            "description": "Session has active work and cannot be deleted yet."
-        },
     },
-    summary="Delete one of the MJ's sessions.",
+    summary="Delete one of the MJ's sessions (aborts active work first).",
 )
 async def delete_session(
     session_id: UUID,
@@ -916,15 +992,12 @@ async def delete_session(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
 ) -> Response:
+    # Story 7.1 / BD-21: deletion now works in ANY state — an active job is
+    # aborted first by the logic layer, so there is no longer a 409 path.
     session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
-    try:
-        await logic.delete_session(
-            db, session=session, redis_client=redis_client
-        )
-    except logic.SessionDeleteBlockedError as exc:
-        raise SessionDeleteBlockedError(detail=str(exc)) from exc
+    await logic.delete_session(db, session=session, redis_client=redis_client)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1366,6 +1439,51 @@ async def recover_stuck_transcription(
     return SessionOut.model_validate(updated)
 
 
+@router.post(
+    "/sessions/{session_id}/transcription/restart",
+    response_model=SessionOut,
+    responses={
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Session not found or not visible to the current GM."
+        },
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "Session is not in a restartable state, or has no audio to "
+                "re-transcribe."
+            )
+        },
+    },
+    summary="Re-run transcription on the session's existing audio.",
+)
+async def restart_transcription(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    redis_client: Annotated[Redis, Depends(get_redis)],
+) -> SessionOut:
+    """Re-enqueue transcription from the stored audio without a re-upload.
+
+    Story 7.1 / BD-21: after a transcription failure (or to redo a finished
+    transcription) the GM restarts here. The session returns to
+    ``audio_uploaded`` with a fresh ``current_job_id`` and flows back through the
+    normal pipeline. Refused (409) when the session is not in
+    ``transcription_failed`` / ``transcribed`` (``transcription-restart-not-allowed``)
+    or has no usable audio (``no-audio-to-transcribe``).
+    """
+    session = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
+    if session is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    try:
+        updated = await logic.restart_transcription_for_session(
+            db, session=session, redis_client=redis_client
+        )
+    except logic.TranscriptionRestartNotAllowedError as exc:
+        raise TranscriptionRestartNotAllowedError(detail=str(exc)) from exc
+    except logic.NoAudioToTranscribeError as exc:
+        raise NoAudioToTranscribeError(detail=str(exc)) from exc
+    return SessionOut.model_validate(updated)
+
+
 @router.get(
     "/sessions/{session_id}/transcription.md",
     response_class=Response,
@@ -1425,6 +1543,10 @@ async def post_narrative(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
+    force: Annotated[
+        bool,
+        Query(description="Confirm overwrite of a manually edited artifact."),
+    ] = False,
 ) -> JobQueuedOut:
     session_row = await resolve_session_for_gm(
         db, session_id=session_id, auth=auth
@@ -1448,6 +1570,12 @@ async def post_narrative(
                 ),
             )
 
+    await _guard_regeneration_not_edited(
+        db,
+        session_id=session_id,
+        force=force,
+        target_kinds=("narrative",),
+    )
     job_id = await logic.enqueue_session_job(
         db,
         session=session_row,
@@ -1462,6 +1590,18 @@ async def post_narrative(
         status=JobStatus.QUEUED,
         queued_at=datetime.now(UTC),
     )
+
+
+def _artifact_provenance(artifact) -> dict:
+    """Provenance kwargs shared by every ``*ArtifactOut`` projection (BD-24).
+
+    Surfaces whether an artefact was hand-edited since its last AI generation.
+    """
+    return {
+        "is_edited": artifact.is_edited,
+        "edited_at": artifact.edited_at,
+        "edited_by": artifact.edited_by,
+    }
 
 
 @router.get(
@@ -1494,6 +1634,7 @@ async def get_narrative(
         text=str(artifact.content_json.get("text", "")),
         model_used=artifact.model_used,
         generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
     )
 
 
@@ -1538,6 +1679,10 @@ async def post_elements(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
+    force: Annotated[
+        bool,
+        Query(description="Confirm overwrite of a manually edited artifact."),
+    ] = False,
 ) -> JobQueuedOut:
     session_row = await resolve_session_for_gm(
         db, session_id=session_id, auth=auth
@@ -1561,6 +1706,12 @@ async def post_elements(
                 ),
             )
 
+    await _guard_regeneration_not_edited(
+        db,
+        session_id=session_id,
+        force=force,
+        target_kinds=("elements",),
+    )
     job_id = await logic.enqueue_session_job(
         db,
         session=session_row,
@@ -1602,27 +1753,12 @@ async def get_elements(
             ),
         )
 
-    content = artifact.content_json or {}
-
-    def _coerce(key: str) -> list[Element]:
-        entries = content.get(key) or []
-        return [
-            Element(
-                name=str(e.get("name", "")).strip(),
-                description=str(e.get("description", "")).strip(),
-            )
-            for e in entries
-            if isinstance(e, dict) and str(e.get("name", "")).strip()
-        ]
-
     return ElementsArtifactOut(
         session_id=artifact.session_id,
-        npcs=_coerce("npcs"),
-        locations=_coerce("locations"),
-        items=_coerce("items"),
-        clues=_coerce("clues"),
+        elements=[Element(**row) for row in elements_from_content(artifact.content_json)],
         model_used=artifact.model_used,
         generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
     )
 
 
@@ -1667,6 +1803,10 @@ async def post_summary(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
+    force: Annotated[
+        bool,
+        Query(description="Confirm overwrite of manually edited artifacts."),
+    ] = False,
 ) -> JobQueuedOut:
     """Enqueue the map-reduce summary job for a non_diarised session.
 
@@ -1710,6 +1850,13 @@ async def post_summary(
             ),
         )
 
+    await _guard_regeneration_not_edited(
+        db,
+        session_id=session_id,
+        force=force,
+        target_kinds=("summary",),
+        include_downstream=True,
+    )
     job_id = await logic.enqueue_session_job(
         db,
         session=session_row,
@@ -1763,6 +1910,7 @@ async def get_summary(
         text=text,
         model_used=artifact.model_used,
         generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
     )
 
 
@@ -1815,6 +1963,10 @@ async def post_povs(
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
     redis_client: Annotated[Redis, Depends(get_redis)],
+    force: Annotated[
+        bool,
+        Query(description="Confirm overwrite of manually edited POV artifacts."),
+    ] = False,
 ) -> JobQueuedOut:
     """Enqueue a single job that generates one ``pov:<pj_id>`` artefact
     per row in the session's mapping. Pre-conditions match the other
@@ -1865,6 +2017,12 @@ async def post_povs(
                 ),
             )
 
+    await _guard_regeneration_not_edited(
+        db,
+        session_id=session_id,
+        force=force,
+        include_povs=True,
+    )
     job_id = await logic.enqueue_session_job(
         db,
         session=session_row,
@@ -1956,6 +2114,182 @@ async def get_pov(
         text=text,
         model_used=artifact.model_used,
         generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Artifact editing — synchronous MJ edits (BD-23 / Epic 8 Story 8.1)
+# ---------------------------------------------------------------------------
+
+
+@router.patch(
+    "/sessions/{session_id}/artifacts/summary",
+    response_model=SummaryArtifactOut,
+    summary="Edit the global session summary (synchronous write, MJ only).",
+)
+async def patch_summary(
+    session_id: UUID,
+    payload: TextEditIn,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SummaryArtifactOut:
+    """Replace the summary text in one synchronous write (BD-23).
+
+    Ownership enforced by ``resolve_session_for_gm`` (404 if the session is not
+    the caller's). The artefact must already exist (404 ``artifact-not-ready``
+    otherwise — same semantics as GET). Sets ``is_edited``/``edited_at`` and
+    leaves ``model_used``/``generated_at`` untouched (FR-006).
+    """
+    session_row = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    artifact = await ArtifactRepository(db).update_content(
+        session_id,
+        kind="summary",
+        content_json={"text": payload.text},
+        edited_by=str(auth.id),
+    )
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"Summary for session {session_id} has not been generated yet; "
+                "generate it before editing."
+            ),
+        )
+    return SummaryArtifactOut(
+        session_id=artifact.session_id,
+        text=str(artifact.content_json.get("text", "")),
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
+    )
+
+
+@router.patch(
+    "/sessions/{session_id}/artifacts/narrative",
+    response_model=NarrativeArtifactOut,
+    summary="Edit the narrative summary (synchronous write, MJ only).",
+)
+async def patch_narrative(
+    session_id: UUID,
+    payload: TextEditIn,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> NarrativeArtifactOut:
+    """Replace the narrative text in one synchronous write (BD-23). Same
+    ownership / artefact-absent / provenance semantics as ``patch_summary``."""
+    session_row = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    artifact = await ArtifactRepository(db).update_content(
+        session_id,
+        kind="narrative",
+        content_json={"text": payload.text},
+        edited_by=str(auth.id),
+    )
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"Narrative for session {session_id} has not been generated yet; "
+                "generate it before editing."
+            ),
+        )
+    return NarrativeArtifactOut(
+        session_id=artifact.session_id,
+        text=str(artifact.content_json.get("text", "")),
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
+    )
+
+
+@router.patch(
+    "/sessions/{session_id}/artifacts/povs/{pj_id}",
+    response_model=PovArtifactOut,
+    summary="Edit one PJ's POV (synchronous write, MJ only).",
+)
+async def patch_pov(
+    session_id: UUID,
+    pj_id: UUID,
+    payload: TextEditIn,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> PovArtifactOut:
+    """Replace one PJ's POV text in one synchronous write (BD-23).
+
+    Resolves session ownership then the owned PJ (404 on either mismatch),
+    before editing the ``pov:<pj_id>`` artefact.
+    """
+    session_row = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    await _load_owned_pj_or_404(
+        db, pj_id=pj_id, gm_key_id=auth.id, campaign_id=session_row.campaign_id
+    )
+    artifact = await ArtifactRepository(db).update_content(
+        session_id,
+        kind=f"pov:{pj_id}",
+        content_json={"text": payload.text},
+        edited_by=str(auth.id),
+    )
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"POV for PJ {pj_id} in session {session_id} has not been "
+                "generated yet; generate it before editing."
+            ),
+        )
+    return PovArtifactOut(
+        session_id=artifact.session_id,
+        pj_id=pj_id,
+        text=str(artifact.content_json.get("text", "")),
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
+    )
+
+
+@router.put(
+    "/sessions/{session_id}/artifacts/elements",
+    response_model=ElementsArtifactOut,
+    summary="Replace the elements card (synchronous full write, MJ only).",
+)
+async def put_elements(
+    session_id: UUID,
+    payload: ElementsPutIn,
+    auth: Annotated[AuthenticatedKey, Depends(require_gm)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ElementsArtifactOut:
+    """Atomically replace the whole elements card (BD-23/BD-26).
+
+    Full-replace (PUT) rather than per-element CRUD: atomic, idempotent, and it
+    mirrors the existing ``PUT /mapping`` pattern. Same ownership /
+    artefact-absent / provenance semantics as the text edits.
+    """
+    session_row = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
+    if session_row is None:
+        raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    content_json = {"elements": [e.model_dump() for e in payload.elements]}
+    artifact = await ArtifactRepository(db).update_content(
+        session_id,
+        kind="elements",
+        content_json=content_json,
+        edited_by=str(auth.id),
+    )
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=(
+                f"Elements for session {session_id} have not been generated yet; "
+                "generate them before editing."
+            ),
+        )
+    return ElementsArtifactOut(
+        session_id=artifact.session_id,
+        elements=[Element(**row) for row in elements_from_content(artifact.content_json)],
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
     )
 
 
@@ -2158,6 +2492,128 @@ async def get_my_narrative_md(
             detail=f"Narrative for session {session_id} has not been generated yet."
         )
     md = render_narrative_md(session, artifact)
+    return Response(content=md, media_type="text/markdown; charset=utf-8")
+
+
+@router.get(
+    "/me/sessions/{session_id}/summary",
+    response_model=SummaryArtifactOut,
+    summary="Read the global summary of a session (player view).",
+)
+async def get_my_summary(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_player)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SummaryArtifactOut:
+    campaign_id = await _campaign_id_for_auth(db, auth)
+    await _ensure_player_can_read_session(
+        db,
+        session_id=session_id,
+        player_pj_id=auth.pj_id,
+        campaign_id=campaign_id,
+    )
+    artifact = await ArtifactRepository(db).get(session_id, "summary")
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=f"Summary for session {session_id} has not been generated yet."
+        )
+    content = artifact.content_json or {}
+    text = str(content.get("text", "")) if isinstance(content, dict) else ""
+    return SummaryArtifactOut(
+        session_id=artifact.session_id,
+        text=text,
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
+    )
+
+
+@router.get(
+    "/me/sessions/{session_id}/summary.md",
+    response_class=Response,
+    summary="Export the global summary as Markdown (player view).",
+)
+async def get_my_summary_md(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_player)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Response:
+    campaign_id = await _campaign_id_for_auth(db, auth)
+    await _ensure_player_can_read_session(
+        db,
+        session_id=session_id,
+        player_pj_id=auth.pj_id,
+        campaign_id=campaign_id,
+    )
+    session = await db.scalar(
+        select(SessionModel).where(SessionModel.id == session_id)
+    )
+    artifact = await ArtifactRepository(db).get(session_id, "summary")
+    if artifact is None or session is None:
+        raise ArtifactNotReadyError(
+            detail=f"Summary for session {session_id} has not been generated yet."
+        )
+    md = render_summary_md(session, artifact)
+    return Response(content=md, media_type="text/markdown; charset=utf-8")
+
+
+@router.get(
+    "/me/sessions/{session_id}/elements",
+    response_model=ElementsArtifactOut,
+    summary="Read the structured-elements card of a session (player view).",
+)
+async def get_my_elements(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_player)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ElementsArtifactOut:
+    campaign_id = await _campaign_id_for_auth(db, auth)
+    await _ensure_player_can_read_session(
+        db,
+        session_id=session_id,
+        player_pj_id=auth.pj_id,
+        campaign_id=campaign_id,
+    )
+    artifact = await ArtifactRepository(db).get(session_id, "elements")
+    if artifact is None:
+        raise ArtifactNotReadyError(
+            detail=f"Elements for session {session_id} have not been generated yet."
+        )
+    return ElementsArtifactOut(
+        session_id=artifact.session_id,
+        elements=[Element(**row) for row in elements_from_content(artifact.content_json)],
+        model_used=artifact.model_used,
+        generated_at=artifact.generated_at,
+        **_artifact_provenance(artifact),
+    )
+
+
+@router.get(
+    "/me/sessions/{session_id}/elements.md",
+    response_class=Response,
+    summary="Export the structured-elements card as Markdown (player view).",
+)
+async def get_my_elements_md(
+    session_id: UUID,
+    auth: Annotated[AuthenticatedKey, Depends(require_player)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Response:
+    campaign_id = await _campaign_id_for_auth(db, auth)
+    await _ensure_player_can_read_session(
+        db,
+        session_id=session_id,
+        player_pj_id=auth.pj_id,
+        campaign_id=campaign_id,
+    )
+    session = await db.scalar(
+        select(SessionModel).where(SessionModel.id == session_id)
+    )
+    artifact = await ArtifactRepository(db).get(session_id, "elements")
+    if artifact is None or session is None:
+        raise ArtifactNotReadyError(
+            detail=f"Elements for session {session_id} have not been generated yet."
+        )
+    md = render_elements_md(session, artifact)
     return Response(content=md, media_type="text/markdown; charset=utf-8")
 
 

@@ -570,9 +570,12 @@ async def test_delete_unknown_session_returns_404(delete_ctx, make_db_session_de
     assert response.json()["type"].endswith("/session-not-found")
 
 
-async def test_delete_transcribing_session_returns_409_and_preserves_session(
+async def test_delete_transcribing_session_succeeds(
     delete_ctx, db_session, make_db_session_dep
 ):
+    # Story 7.1 / BD-21: a session can be deleted in ANY state, including
+    # transcribing (previously a 409). With no active job there is nothing to
+    # abort — the delete just proceeds.
     session = await _create_session(
         db_session, delete_ctx, state=SessionState.TRANSCRIBING
     )
@@ -586,20 +589,21 @@ async def test_delete_transcribing_session_returns_409_and_preserves_session(
             headers=_auth_headers(delete_ctx.plain_token),
         )
 
-    assert response.status_code == 409
-    assert response.json()["type"].endswith("/session-delete-blocked")
+    assert response.status_code == 204
     db_session.expire_all()
-    assert await db_session.get(Session, session_id) is not None
+    assert await db_session.get(Session, session_id) is None
 
 
-async def test_delete_session_with_active_current_job_returns_409_and_preserves_session(
+async def test_delete_session_with_active_current_job_aborts_and_deletes(
     delete_ctx, db_session, make_db_session_dep
 ):
+    # Story 7.1 / BD-21: an active (queued) job no longer blocks deletion — it is
+    # cancelled, then the session is deleted.
     session = await _create_session(
         db_session, delete_ctx, state=SessionState.TRANSCRIBED
     )
     redis_client = fakeredis.FakeStrictRedis()
-    await _attach_current_rq_job(
+    rq_job_id = await _attach_current_rq_job(
         db_session,
         session,
         redis_client=redis_client,
@@ -615,15 +619,53 @@ async def test_delete_session_with_active_current_job_returns_409_and_preserves_
             headers=_auth_headers(delete_ctx.plain_token),
         )
 
-    assert response.status_code == 409
-    assert response.json()["type"].endswith("/session-delete-blocked")
+    assert response.status_code == 204
     db_session.expire_all()
-    assert await db_session.get(Session, session_id) is not None
+    assert await db_session.get(Session, session_id) is None
+    # The queued RQ job was cancelled so it can never start against a gone session.
+    assert (
+        RQJob.fetch(rq_job_id, connection=redis_client).get_status()
+        == RQJobStatus.CANCELED
+    )
 
 
-async def test_delete_after_artifact_generation_enqueue_returns_409(
+async def test_delete_session_with_started_job_aborts_and_deletes(
     delete_ctx, db_session, make_db_session_dep
 ):
+    # Story 7.1 / BD-21: a *running* job is stopped (best-effort) and the session
+    # is deleted regardless. The stop command is fire-and-forget; the guarantee
+    # under test is that deletion always succeeds.
+    session = await _create_session(
+        db_session, delete_ctx, state=SessionState.TRANSCRIBING
+    )
+    redis_client = fakeredis.FakeStrictRedis()
+    await _attach_current_rq_job(
+        db_session,
+        session,
+        redis_client=redis_client,
+        rq_status=RQJobStatus.STARTED,
+        sql_status=JobStatus.RUNNING,
+    )
+    session_id = session.id
+    app = _make_jdr_app(make_db_session_dep, redis_client)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.delete(
+            f"/services/jdr/sessions/{session_id}",
+            headers=_auth_headers(delete_ctx.plain_token),
+        )
+
+    assert response.status_code == 204
+    db_session.expire_all()
+    assert await db_session.get(Session, session_id) is None
+
+
+async def test_delete_after_artifact_generation_enqueue_aborts_and_deletes(
+    delete_ctx, db_session, make_db_session_dep
+):
+    # Story 7.1 / BD-21: enqueuing an artifact then deleting now succeeds — the
+    # in-flight job is aborted and the Job row cascades away with the session.
     session = await _create_session(
         db_session, delete_ctx, state=SessionState.TRANSCRIBED
     )
@@ -643,16 +685,16 @@ async def test_delete_after_artifact_generation_enqueue_returns_409(
         )
 
     assert queued.status_code == 202
-    assert deleted.status_code == 409
-    assert deleted.json()["type"].endswith("/session-delete-blocked")
+    assert deleted.status_code == 204
     job_id = queued.json()["id"]
     db_session.expire_all()
-    refreshed = await db_session.get(Session, session_id)
-    assert refreshed is not None
-    assert refreshed.current_job_id == job_id
-    job = await db_session.get(Job, job_id)
-    assert job is not None
-    assert job.status is JobStatus.QUEUED
+    assert await db_session.get(Session, session_id) is None
+    # Job row cascades on session delete (jdr_jobs.session_id ON DELETE CASCADE).
+    assert await db_session.get(Job, job_id) is None
+    assert (
+        RQJob.fetch(job_id, connection=redis_client).get_status()
+        == RQJobStatus.CANCELED
+    )
 
 
 async def test_delete_allows_finished_rq_job_with_stale_sql_status(

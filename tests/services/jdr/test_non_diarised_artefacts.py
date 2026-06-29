@@ -212,8 +212,9 @@ async def test_elements_non_diarised_consumes_chunk_summaries(
             )
         )
     assert elem is not None
-    assert elem.content_json["npcs"] == [
-        {"name": "Marchand", "description": "PNJ"}
+    # BD-26: buckets are flattened into a category-tagged list (npcs -> PNJ).
+    assert elem.content_json["elements"] == [
+        {"category": "PNJ", "name": "Marchand", "description": "PNJ"}
     ]
 
 

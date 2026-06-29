@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_valid
 
 from app.core.datetime_serialization import ensure_aware_utc, serialize_datetime_utc
 
+from app.services.jdr.model_catalog import CloudModel
 from app.services.jdr.db.models import (
     JobKind,
     JobStatus,
@@ -135,6 +136,18 @@ class ModelSettingsOut(JdrSchema):
             "itself is never returned."
         ),
     )
+
+
+class ModelCatalogOut(JdrSchema):
+    """Curated cloud-model catalog served to the front (single source of truth).
+
+    The front renders its model selectors and pricing from this payload instead
+    of hardcoding ids/prices, so the two never drift. Each entry carries its
+    tier and indicative price (see :mod:`app.services.jdr.model_catalog`).
+    """
+
+    transcription: list[CloudModel]
+    summary: list[CloudModel]
 
 
 class ModelSettingsPatch(JdrSchema):
@@ -403,7 +416,40 @@ class MappingOut(JdrSchema):
 # ---------------------------------------------------------------------------
 
 
-class NarrativeArtifactOut(JdrSchema):
+class ArtifactProvenanceMixin(JdrSchema):
+    """Provenance fields shared by every artefact projection (BD-24 / Story 8.1).
+
+    Defaults keep existing GET responses valid for never-edited artefacts; the
+    edit endpoints (PATCH/PUT) populate them. ``model_used``/``generated_at`` on
+    each artefact stay the immutable record of the last AI generation.
+    """
+
+    is_edited: bool = False
+    edited_at: datetime | None = None
+    edited_by: str | None = None
+
+
+class TextEditIn(JdrSchema):
+    """Body for the synchronous text-artefact edits (BD-23 / Story 8.1):
+    ``PATCH .../artifacts/{summary,narrative}`` and ``.../povs/{pj_id}``.
+
+    Markdown stays the single wire/storage format (DP-6). No upper bound on
+    length — long hand-edited artefacts are expected (BD-25 / FR-010).
+    """
+
+    text: str = Field(..., min_length=1)
+
+    @field_validator("text")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        # An edit replaces content; it is not a deletion. A blank body is a
+        # client error (422), not an instruction to clear the artefact.
+        if not value.strip():
+            raise ValueError("Edited artefact text cannot be blank.")
+        return value
+
+
+class NarrativeArtifactOut(ArtifactProvenanceMixin):
     """Public projection of an ``Artifact(kind='narrative')`` row."""
 
     session_id: UUID
@@ -417,7 +463,7 @@ class NarrativeArtifactOut(JdrSchema):
 # ---------------------------------------------------------------------------
 
 
-class PovArtifactOut(JdrSchema):
+class PovArtifactOut(ArtifactProvenanceMixin):
     """Public projection of an ``Artifact(kind='pov:<pj_id>')`` row.
 
     ``pj_id`` is exposed at the top level for clients that don't want to
@@ -501,32 +547,44 @@ class PlayerSessionListOut(JdrSchema):
 
 
 class Element(JdrSchema):
-    """One row of the four-category elements card.
+    """One element of the card (BD-26 / Epic 8, Option B — free-form category).
 
-    The LLM may return arbitrary keys; we surface only ``name`` and
-    ``description`` so the public contract is stable across model swaps.
+    ``category`` is MJ-chosen free text (the 4 canonical buckets are seeded as
+    ``PNJ``/``Lieux``/``Objets``/``Indices`` by the generation flatten). The
+    25-word guidance applies to LLM generation only, not to hand-edits, so
+    ``description`` carries only a generous guard cap (FR-014).
     """
 
-    name: str = Field(..., description="Short label (proper name or descriptor).")
-    description: str = Field(
-        "", description="One-sentence description (≤ ~25 words)."
-    )
+    category: str = Field(..., min_length=1, max_length=120)
+    name: str = Field(..., min_length=1, max_length=255)
+    description: str = Field("", max_length=2000)
+
+    @field_validator("category", "name")
+    @classmethod
+    def reject_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("category and name cannot be blank.")
+        return value.strip()
 
 
-class ElementsArtifactOut(JdrSchema):
+class ElementsArtifactOut(ArtifactProvenanceMixin):
     """Public projection of an ``Artifact(kind='elements')`` row.
 
-    The four lists are *always* present, even when empty (``[]``). See
-    acceptance scenario US 2.3 in ``spec.md``.
+    Flat list of category-tagged elements (BD-26). The frontend groups by
+    ``category``. Always present, even when empty (``[]``).
     """
 
     session_id: UUID
-    npcs: list[Element] = Field(default_factory=list)
-    locations: list[Element] = Field(default_factory=list)
-    items: list[Element] = Field(default_factory=list)
-    clues: list[Element] = Field(default_factory=list)
+    elements: list[Element] = Field(default_factory=list)
     model_used: str
     generated_at: datetime
+
+
+class ElementsPutIn(JdrSchema):
+    """Body for ``PUT .../artifacts/elements`` (BD-23/BD-26): full atomic
+    replacement of the elements card with a flat category-tagged list."""
+
+    elements: list[Element] = Field(default_factory=list)
 
 
 class JobQueuedOut(JdrSchema):
@@ -625,7 +683,7 @@ class ChunkListOut(JdrSchema):
     items: list[ChunkOut]
 
 
-class SummaryArtifactOut(JdrSchema):
+class SummaryArtifactOut(ArtifactProvenanceMixin):
     """Public projection of an ``Artifact(kind='summary')`` row."""
 
     session_id: UUID

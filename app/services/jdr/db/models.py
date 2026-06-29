@@ -26,6 +26,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     Enum,
     ForeignKey,
@@ -502,6 +503,19 @@ class Artifact(Base):
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+    # Provenance (BD-24 / Story 8.1). `model_used`/`generated_at` above remain
+    # the immutable record of the last AI generation; a manual edit never
+    # touches them, it only flips these three. A (re)generation resets them to
+    # the "freshly generated, never hand-edited" state (see ArtifactRepository).
+    is_edited: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    edited_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    edited_by: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, default=None
+    )
 
     session: Mapped[Session] = relationship("Session", back_populates="artifacts")
 
@@ -643,7 +657,11 @@ class ModelSettings(Base):
         ForeignKey("core_users.id", ondelete="CASCADE"),
         primary_key=True,
     )
-    transcription_provider: Mapped[ModelProvider] = mapped_column(
+    # Story 7.2 / BD-22: nullable = "no per-user override, inherit the
+    # operator/env default". The GET endpoint resolves NULL to the effective
+    # default; the job pipeline falls back to the env adapter. This lets a user
+    # change one category without flipping the other off its operator default.
+    transcription_provider: Mapped[ModelProvider | None] = mapped_column(
         Enum(
             ModelProvider,
             name="jdr_model_provider",
@@ -651,11 +669,10 @@ class ModelSettings(Base):
             length=16,
             values_callable=_enum_values,
         ),
-        nullable=False,
-        default=ModelProvider.CLOUD,
-        server_default=ModelProvider.CLOUD.value,
+        nullable=True,
+        default=None,
     )
-    summary_provider: Mapped[ModelProvider] = mapped_column(
+    summary_provider: Mapped[ModelProvider | None] = mapped_column(
         Enum(
             ModelProvider,
             name="jdr_model_provider",
@@ -663,9 +680,8 @@ class ModelSettings(Base):
             length=16,
             values_callable=_enum_values,
         ),
-        nullable=False,
-        default=ModelProvider.CLOUD,
-        server_default=ModelProvider.CLOUD.value,
+        nullable=True,
+        default=None,
     )
     transcription_local_path: Mapped[str | None] = mapped_column(
         String(1024), nullable=True, default=None

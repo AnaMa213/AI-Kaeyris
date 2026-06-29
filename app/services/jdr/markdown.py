@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.jdr.elements import elements_from_content
+
 
 # ---------------------------------------------------------------------------
 # Shared header
@@ -177,34 +179,28 @@ def render_elements_md(session: Any, elements_artifact: Any) -> str:
     """
     parts: list[str] = [render_session_header(session)]
 
-    content = getattr(elements_artifact, "content_json", None) or {}
-    if not isinstance(content, dict):
-        content = {}
+    rows = elements_from_content(getattr(elements_artifact, "content_json", None))
 
-    for label, key in (
-        ("PNJ", "npcs"),
-        ("Lieux", "locations"),
-        ("Items", "items"),
-        ("Indices", "clues"),
-    ):
-        parts.append(f"## {label}")
+    # Group by free-form category, preserving first-appearance order (BD-26).
+    grouped: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        grouped.setdefault(row["category"], []).append(row)
+
+    if not grouped:
+        parts.append("_(aucun élément)_")
         parts.append("")
-        entries = content.get(key) or []
-        if not isinstance(entries, list) or not entries:
-            parts.append("_(aucun élément)_")
-        else:
+    else:
+        for category, entries in grouped.items():
+            parts.append(f"## {category}")
+            parts.append("")
             for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                name = str(entry.get("name", "")).strip()
-                description = str(entry.get("description", "")).strip()
-                if not name:
-                    continue
+                name = entry["name"]
+                description = entry["description"]
                 if description:
                     parts.append(f"- **{name}** — {description}")
                 else:
                     parts.append(f"- **{name}**")
-        parts.append("")
+            parts.append("")
 
     parts.append("---")
     parts.append("")

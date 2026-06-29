@@ -56,6 +56,25 @@ async def _validate_local_model(
     return str(response.json()["validation_id"])
 
 
+def _mock_cloud_key_probe(monkeypatch, *, ok: bool) -> None:
+    """Stub the save-time DeepInfra key probe (Story 7.4 / B) — no network."""
+    from app.adapters.llm import PermanentLLMError
+
+    class _FakeCloudAdapter:
+        provider = "deepinfra"
+        model = "stub"
+
+        async def complete(self, *, system, user, max_tokens):
+            if ok:
+                return "ok"
+            raise PermanentLLMError("AuthenticationError: invalid_api_key")
+
+    monkeypatch.setattr(
+        "app.services.jdr.auth_router.build_personal_cloud_llm_adapter",
+        lambda *, model, api_key: _FakeCloudAdapter(),
+    )
+
+
 def _set_operator_cloud_defaults(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.services.jdr.auth_router.settings.TRANSCRIPTION_PROVIDER", "cloud"
@@ -134,7 +153,10 @@ async def test_admin_gets_effective_ollama_defaults(
     assert "operator-secret" not in str(payload)
 
 
-async def test_admin_can_persist_model_settings(make_db_session_dep):
+async def test_admin_can_persist_model_settings(make_db_session_dep, monkeypatch):
+    # Pin operator defaults so the test is deterministic regardless of the local
+    # .env (Story 7.2: an unset provider now resolves to the effective default).
+    _set_operator_cloud_defaults(monkeypatch)
     app = _make_app(make_db_session_dep)
     transport = ASGITransport(app=app)
 
@@ -149,14 +171,16 @@ async def test_admin_can_persist_model_settings(make_db_session_dep):
         fetched = await client.get("/services/jdr/settings/models")
 
     assert patched.status_code == 200
+    # transcription_provider was NOT in the PATCH → it stays NULL = inherit the
+    # operator default (cloud), with the effective cloud model surfaced.
     assert patched.json() == {
         "transcription_provider": "cloud",
         "summary_provider": "ollama",
         "transcription_local_path": None,
         "summary_local_path": None,
-        "transcription_cloud_model": None,
+        "transcription_cloud_model": "whisper-large-v3",
         "summary_cloud_model": None,
-        "ollama_model": None,
+        "ollama_model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
         "deepinfra_api_key_set": False,
     }
     assert fetched.status_code == 200
@@ -169,6 +193,7 @@ async def test_admin_can_persist_local_model_paths(
     tmp_path,
 ):
     _mock_local_probe(monkeypatch)
+    _set_operator_cloud_defaults(monkeypatch)
     app = _make_app(make_db_session_dep)
     transport = ASGITransport(app=app)
     model_path = str(tmp_path / "whisper-large-v3")
@@ -191,13 +216,15 @@ async def test_admin_can_persist_local_model_paths(
         fetched = await client.get("/services/jdr/settings/models")
 
     assert patched.status_code == 200
+    # summary_provider was not patched → NULL = inherit operator default (cloud),
+    # surfacing the effective cloud model.
     assert patched.json() == {
         "transcription_provider": "local",
         "summary_provider": "cloud",
         "transcription_local_path": model_path,
         "summary_local_path": None,
         "transcription_cloud_model": None,
-        "summary_cloud_model": None,
+        "summary_cloud_model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
         "ollama_model": None,
         "deepinfra_api_key_set": False,
     }
@@ -211,6 +238,7 @@ async def test_patch_model_settings_is_partial(
     tmp_path,
 ):
     _mock_local_probe(monkeypatch)
+    _set_operator_cloud_defaults(monkeypatch)
     app = _make_app(make_db_session_dep)
     transport = ASGITransport(app=app)
     model_path = str(tmp_path / "whisper-large-v3")
@@ -238,16 +266,56 @@ async def test_patch_model_settings_is_partial(
 
     assert first.status_code == 200
     assert second.status_code == 200
+    # transcription stays explicitly local (set in the first PATCH); summary was
+    # switched to cloud → surfaces the effective cloud model.
     assert second.json() == {
         "transcription_provider": "local",
         "summary_provider": "cloud",
         "transcription_local_path": model_path,
         "summary_local_path": None,
         "transcription_cloud_model": None,
-        "summary_cloud_model": None,
+        "summary_cloud_model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
         "ollama_model": None,
         "deepinfra_api_key_set": False,
     }
+
+
+async def test_first_patch_keeps_effective_local_transcription(
+    make_db_session_dep, monkeypatch
+):
+    """Story 7.2 / BD-22 — régression : avec un défaut opérateur Transcription=Local,
+    basculer SEULEMENT le résumé en Cloud ne doit PAS faire basculer la
+    transcription en Cloud.
+
+    Le champ provider absent du PATCH reste NULL (= hériter du défaut effectif)
+    au lieu de retomber sur l'ancien défaut de colonne `cloud`.
+    """
+    monkeypatch.setattr(
+        "app.services.jdr.auth_router.settings.TRANSCRIPTION_PROVIDER", "local"
+    )
+    monkeypatch.setattr(
+        "app.services.jdr.auth_router.settings.LLM_PROVIDER", "deepinfra"
+    )
+    app = _make_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await _setup_admin(client)
+        # Avant tout enregistrement, le GET reflète déjà le défaut effectif Local.
+        before = await client.get("/services/jdr/settings/models")
+        assert before.json()["transcription_provider"] == "local"
+
+        patched = await client.patch(
+            "/services/jdr/settings/models",
+            json={"summary_provider": "cloud"},
+        )
+        fetched = await client.get("/services/jdr/settings/models")
+
+    assert patched.status_code == 200
+    assert patched.json()["transcription_provider"] == "local"
+    assert patched.json()["summary_provider"] == "cloud"
+    assert fetched.json()["transcription_provider"] == "local"
+    assert fetched.json()["summary_provider"] == "cloud"
 
 
 async def test_non_admin_user_cannot_manage_model_settings(make_db_session_dep):
@@ -325,7 +393,10 @@ async def test_invalid_model_provider_is_rejected(make_db_session_dep):
     assert response.status_code == 422
 
 
-async def test_admin_can_persist_cloud_models(make_db_session_dep):
+async def test_admin_can_persist_cloud_models(make_db_session_dep, monkeypatch):
+    # Providers stay NULL here (only cloud models are patched) → they resolve to
+    # the pinned cloud operator default; the stored cloud models are preferred.
+    _set_operator_cloud_defaults(monkeypatch)
     app = _make_app(make_db_session_dep)
     transport = ASGITransport(app=app)
 
@@ -352,6 +423,55 @@ async def test_admin_can_persist_cloud_models(make_db_session_dep):
         "deepinfra_api_key_set": False,
     }
     assert fetched.json() == patched.json()
+
+
+async def test_invalid_cloud_key_rejected_on_save(make_db_session_dep, monkeypatch):
+    # Story 7.4 / B — a bad DeepInfra key fails the save-time probe → 400, not stored.
+    _mock_cloud_key_probe(monkeypatch, ok=False)
+    app = _make_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await _setup_admin(client)
+        response = await client.patch(
+            "/services/jdr/settings/models",
+            json={
+                "summary_provider": "cloud",
+                "summary_cloud_model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+                "deepinfra_api_key": "bad-key",
+            },
+        )
+        fetched = await client.get("/services/jdr/settings/models")
+
+    assert response.status_code == 400
+    assert response.json()["type"].endswith("/cloud-api-key-invalid")
+    # The bad key was NOT persisted.
+    assert fetched.json()["deepinfra_api_key_set"] is False
+
+
+async def test_valid_cloud_key_passes_probe_and_is_stored(
+    make_db_session_dep, monkeypatch
+):
+    # Story 7.4 / B — a valid key passes the probe and is stored as before.
+    _mock_cloud_key_probe(monkeypatch, ok=True)
+    app = _make_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await _setup_admin(client)
+        response = await client.patch(
+            "/services/jdr/settings/models",
+            json={
+                "summary_provider": "cloud",
+                "summary_cloud_model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+                "deepinfra_api_key": "good-key",
+            },
+        )
+        fetched = await client.get("/services/jdr/settings/models")
+
+    assert response.status_code == 200
+    assert fetched.json()["deepinfra_api_key_set"] is True
+    assert fetched.json()["summary_provider"] == "cloud"
 
 
 async def test_local_path_without_validation_is_rejected(
@@ -529,3 +649,110 @@ async def test_admin_can_persist_ollama_model(make_db_session_dep):
     assert patched.json()["ollama_model"] == "llama3:8b"
     assert "deepinfra_api_key" not in patched.json()
     assert fetched.json()["ollama_model"] == "llama3:8b"
+
+
+async def test_model_catalog_lists_curated_cloud_models(make_db_session_dep):
+    # The backend is the single source of truth: the front renders selectors and
+    # pricing from this payload (ids, tiers, prices) instead of hardcoding them.
+    app = _make_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await _setup_admin(client)
+        response = await client.get("/services/jdr/settings/model-catalog")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"transcription", "summary"}
+
+    summary_ids = [m["id"] for m in body["summary"]]
+    assert summary_ids == [
+        "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "Qwen/Qwen2.5-72B-Instruct",
+        "meta-llama/Meta-Llama-3.1-70B-Instruct",
+    ]
+    economy = body["summary"][0]
+    assert economy["tier"] == "economy"
+    assert economy["pricing"] == {
+        "unit": "per_million_tokens",
+        "input_per_1m": 0.02,
+        "output_per_1m": 0.05,
+    }
+
+    transcription_turbo = body["transcription"][0]
+    assert transcription_turbo["id"] == "openai/whisper-large-v3-turbo"
+    assert transcription_turbo["pricing"] == {
+        "unit": "per_minute",
+        "price_per_minute": 0.0002,
+    }
+
+
+async def test_unknown_summary_cloud_model_is_rejected(make_db_session_dep):
+    app = _make_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await _setup_admin(client)
+        response = await client.patch(
+            "/services/jdr/settings/models",
+            json={"summary_cloud_model": "acme/not-a-real-model"},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["type"].endswith("/unknown-cloud-model")
+
+
+async def test_unknown_transcription_cloud_model_is_rejected(make_db_session_dep):
+    app = _make_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await _setup_admin(client)
+        response = await client.patch(
+            "/services/jdr/settings/models",
+            # The legacy un-prefixed id is intentionally not in the catalog.
+            json={"transcription_cloud_model": "whisper-large-v3"},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["type"].endswith("/unknown-cloud-model")
+
+
+async def test_changing_summary_model_revalidates_stored_key(
+    make_db_session_dep, monkeypatch
+):
+    # Switching to a model the stored key cannot serve (e.g. a gated 70B) must be
+    # caught at save time, not surface as a 401 deep in a worker — even though no
+    # new key is supplied with the change.
+    _set_operator_cloud_defaults(monkeypatch)
+    app = _make_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await _setup_admin(client)
+        _mock_cloud_key_probe(monkeypatch, ok=True)
+        stored = await client.patch(
+            "/services/jdr/settings/models",
+            json={
+                "summary_provider": "cloud",
+                "summary_cloud_model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+                "deepinfra_api_key": "good-for-8b",
+            },
+        )
+        assert stored.status_code == 200
+
+        # No new key in this PATCH: the stored key is re-probed against the 70B.
+        _mock_cloud_key_probe(monkeypatch, ok=False)
+        rejected = await client.patch(
+            "/services/jdr/settings/models",
+            json={"summary_cloud_model": "meta-llama/Meta-Llama-3.1-70B-Instruct"},
+        )
+        fetched = await client.get("/services/jdr/settings/models")
+
+    assert rejected.status_code == 400
+    assert rejected.json()["type"].endswith("/cloud-api-key-invalid")
+    # The unauthorized model was not persisted.
+    assert (
+        fetched.json()["summary_cloud_model"]
+        == "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    )

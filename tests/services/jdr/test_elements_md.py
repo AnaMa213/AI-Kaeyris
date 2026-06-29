@@ -1,8 +1,9 @@
 """US2 — Markdown export of the elements card.
 
-Per T039: ``GET /artifacts/elements.md`` produces four h2 sections named
-``## PNJ``, ``## Lieux``, ``## Items``, ``## Indices``. Empty categories
-still appear so that the document shape is stable.
+Since BD-26 (Epic 8) the card is a flat category-tagged list: ``.md`` renders
+one ``## <category>`` section per category present (the four canonical buckets
+flatten to ``PNJ``/``Lieux``/``Objets``/``Indices``), in first-appearance
+order, omitting empty categories.
 """
 
 from datetime import UTC, datetime
@@ -32,7 +33,7 @@ def _make_artifact(content: dict, *, model_used: str = "mock:llama3.1"):
     )
 
 
-def test_render_elements_md_has_four_h2_sections_in_french():
+def test_render_elements_md_renders_canonical_category_sections():
     session = _make_session()
     artifact = _make_artifact(
         {
@@ -46,7 +47,7 @@ def test_render_elements_md_has_four_h2_sections_in_french():
 
     assert "## PNJ" in md
     assert "## Lieux" in md
-    assert "## Items" in md
+    assert "## Objets" in md  # 'items' bucket flattens to the 'Objets' label
     assert "## Indices" in md
     assert "Gandalf" in md
     assert "Moria" in md
@@ -54,29 +55,33 @@ def test_render_elements_md_has_four_h2_sections_in_french():
     assert "Mellon" in md
 
 
-def test_render_elements_md_keeps_section_order_pnj_lieux_items_indices():
+def test_render_elements_md_keeps_canonical_section_order():
     session = _make_session()
     artifact = _make_artifact(
-        {"npcs": [], "locations": [], "items": [], "clues": []}
+        {
+            "npcs": [{"name": "Gandalf", "description": "Magicien."}],
+            "locations": [{"name": "Moria", "description": "Mines."}],
+            "items": [{"name": "Anneau", "description": "Forgé."}],
+            "clues": [{"name": "Mellon", "description": "Passe."}],
+        }
     )
     md = render_elements_md(session, artifact)
 
-    idx_pnj = md.index("## PNJ")
-    idx_lieux = md.index("## Lieux")
-    idx_items = md.index("## Items")
-    idx_indices = md.index("## Indices")
-    assert idx_pnj < idx_lieux < idx_items < idx_indices
-
-
-def test_render_elements_md_shows_empty_placeholder_for_empty_lists():
-    """US 2.3: empty categories stay visible — not omitted."""
-    session = _make_session()
-    artifact = _make_artifact(
-        {"npcs": [], "locations": [], "items": [], "clues": []}
+    assert (
+        md.index("## PNJ")
+        < md.index("## Lieux")
+        < md.index("## Objets")
+        < md.index("## Indices")
     )
+
+
+def test_render_elements_md_shows_placeholder_when_card_empty():
+    """An empty card shows a single placeholder (categories are now dynamic)."""
+    session = _make_session()
+    artifact = _make_artifact({"elements": []})
     md = render_elements_md(session, artifact)
 
-    assert md.count("_(aucun élément)_") == 4
+    assert md.count("_(aucun élément)_") == 1
 
 
 def test_render_elements_md_renders_entry_as_bold_name_dash_description():
@@ -128,16 +133,17 @@ def test_render_elements_md_filters_entries_without_name():
     assert "Vide" not in md
 
 
-def test_render_elements_md_handles_missing_content_keys():
-    """A legacy artifact without one of the four keys still renders."""
+def test_render_elements_md_handles_legacy_bucket_shape():
+    """A legacy bucket-shaped artifact still renders (only present categories)."""
     session = _make_session()
     artifact = _make_artifact({"npcs": [{"name": "Gimli", "description": "Nain."}]})
     md = render_elements_md(session, artifact)
     assert "## PNJ" in md
-    assert "## Lieux" in md
-    assert "## Items" in md
-    assert "## Indices" in md
     assert "Gimli" in md
+    # Empty canonical categories are omitted now (dynamic grouping).
+    assert "## Lieux" not in md
+    assert "## Objets" not in md
+    assert "## Indices" not in md
 
 
 def test_render_elements_md_includes_session_header_and_footer():

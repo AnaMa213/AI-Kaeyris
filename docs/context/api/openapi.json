@@ -320,35 +320,101 @@
         "title": "ChunkOut",
         "type": "object"
       },
-      "Element": {
-        "description": "One row of the four-category elements card.\n\nThe LLM may return arbitrary keys; we surface only ``name`` and\n``description`` so the public contract is stable across model swaps.",
+      "CloudModel": {
+        "description": "A selectable DeepInfra cloud model with its tier and indicative price.",
         "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "pricing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TranscriptionPricing"
+              },
+              {
+                "$ref": "#/components/schemas/LlmPricing"
+              }
+            ],
+            "title": "Pricing"
+          },
+          "tier": {
+            "$ref": "#/components/schemas/ModelTier"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "tier",
+          "pricing"
+        ],
+        "title": "CloudModel",
+        "type": "object"
+      },
+      "Element": {
+        "description": "One element of the card (BD-26 / Epic 8, Option B — free-form category).\n\n``category`` is MJ-chosen free text (the 4 canonical buckets are seeded as\n``PNJ``/``Lieux``/``Objets``/``Indices`` by the generation flatten). The\n25-word guidance applies to LLM generation only, not to hand-edits, so\n``description`` carries only a generous guard cap (FR-014).",
+        "properties": {
+          "category": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Category",
+            "type": "string"
+          },
           "description": {
             "default": "",
-            "description": "One-sentence description (≤ ~25 words).",
+            "maxLength": 2000,
             "title": "Description",
             "type": "string"
           },
           "name": {
-            "description": "Short label (proper name or descriptor).",
+            "maxLength": 255,
+            "minLength": 1,
             "title": "Name",
             "type": "string"
           }
         },
         "required": [
+          "category",
           "name"
         ],
         "title": "Element",
         "type": "object"
       },
       "ElementsArtifactOut": {
-        "description": "Public projection of an ``Artifact(kind='elements')`` row.\n\nThe four lists are *always* present, even when empty (``[]``). See\nacceptance scenario US 2.3 in ``spec.md``.",
+        "description": "Public projection of an ``Artifact(kind='elements')`` row.\n\nFlat list of category-tagged elements (BD-26). The frontend groups by\n``category``. Always present, even when empty (``[]``).",
         "properties": {
-          "clues": {
+          "edited_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited At"
+          },
+          "edited_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited By"
+          },
+          "elements": {
             "items": {
               "$ref": "#/components/schemas/Element"
             },
-            "title": "Clues",
+            "title": "Elements",
             "type": "array"
           },
           "generated_at": {
@@ -356,30 +422,14 @@
             "title": "Generated At",
             "type": "string"
           },
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/Element"
-            },
-            "title": "Items",
-            "type": "array"
-          },
-          "locations": {
-            "items": {
-              "$ref": "#/components/schemas/Element"
-            },
-            "title": "Locations",
-            "type": "array"
+          "is_edited": {
+            "default": false,
+            "title": "Is Edited",
+            "type": "boolean"
           },
           "model_used": {
             "title": "Model Used",
             "type": "string"
-          },
-          "npcs": {
-            "items": {
-              "$ref": "#/components/schemas/Element"
-            },
-            "title": "Npcs",
-            "type": "array"
           },
           "session_id": {
             "format": "uuid",
@@ -393,6 +443,20 @@
           "generated_at"
         ],
         "title": "ElementsArtifactOut",
+        "type": "object"
+      },
+      "ElementsPutIn": {
+        "description": "Body for ``PUT .../artifacts/elements`` (BD-23/BD-26): full atomic\nreplacement of the elements card with a flat category-tagged list.",
+        "properties": {
+          "elements": {
+            "items": {
+              "$ref": "#/components/schemas/Element"
+            },
+            "title": "Elements",
+            "type": "array"
+          }
+        },
+        "title": "ElementsPutIn",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -597,6 +661,31 @@
         "title": "LiveSessionInit",
         "type": "object"
       },
+      "LlmPricing": {
+        "description": "Per-1M-tokens billing, input and output priced separately (LLMs).",
+        "properties": {
+          "input_per_1m": {
+            "title": "Input Per 1M",
+            "type": "number"
+          },
+          "output_per_1m": {
+            "title": "Output Per 1M",
+            "type": "number"
+          },
+          "unit": {
+            "const": "per_million_tokens",
+            "default": "per_million_tokens",
+            "title": "Unit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "input_per_1m",
+          "output_per_1m"
+        ],
+        "title": "LlmPricing",
+        "type": "object"
+      },
       "LocalModelCategory": {
         "description": "Model validation category exposed by BD-20.",
         "enum": [
@@ -771,6 +860,31 @@
           "pj"
         ],
         "title": "MeOut",
+        "type": "object"
+      },
+      "ModelCatalogOut": {
+        "description": "Curated cloud-model catalog served to the front (single source of truth).\n\nThe front renders its model selectors and pricing from this payload instead\nof hardcoding ids/prices, so the two never drift. Each entry carries its\ntier and indicative price (see :mod:`app.services.jdr.model_catalog`).",
+        "properties": {
+          "summary": {
+            "items": {
+              "$ref": "#/components/schemas/CloudModel"
+            },
+            "title": "Summary",
+            "type": "array"
+          },
+          "transcription": {
+            "items": {
+              "$ref": "#/components/schemas/CloudModel"
+            },
+            "title": "Transcription",
+            "type": "array"
+          }
+        },
+        "required": [
+          "transcription",
+          "summary"
+        ],
+        "title": "ModelCatalogOut",
         "type": "object"
       },
       "ModelProvider": {
@@ -993,13 +1107,51 @@
         "title": "ModelSettingsPatch",
         "type": "object"
       },
+      "ModelTier": {
+        "description": "Cost/quality tiers for paid cloud models (cheapest → most expensive).",
+        "enum": [
+          "economy",
+          "standard",
+          "premium"
+        ],
+        "title": "ModelTier",
+        "type": "string"
+      },
       "NarrativeArtifactOut": {
         "description": "Public projection of an ``Artifact(kind='narrative')`` row.",
         "properties": {
+          "edited_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited At"
+          },
+          "edited_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited By"
+          },
           "generated_at": {
             "format": "date-time",
             "title": "Generated At",
             "type": "string"
+          },
+          "is_edited": {
+            "default": false,
+            "title": "Is Edited",
+            "type": "boolean"
           },
           "model_used": {
             "title": "Model Used",
@@ -1365,10 +1517,38 @@
       "PovArtifactOut": {
         "description": "Public projection of an ``Artifact(kind='pov:<pj_id>')`` row.\n\n``pj_id`` is exposed at the top level for clients that don't want to\nparse the composite ``kind`` field.",
         "properties": {
+          "edited_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited At"
+          },
+          "edited_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited By"
+          },
           "generated_at": {
             "format": "date-time",
             "title": "Generated At",
             "type": "string"
+          },
+          "is_edited": {
+            "default": false,
+            "title": "Is Edited",
+            "type": "boolean"
           },
           "model_used": {
             "title": "Model Used",
@@ -1672,10 +1852,38 @@
       "SummaryArtifactOut": {
         "description": "Public projection of an ``Artifact(kind='summary')`` row.",
         "properties": {
+          "edited_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited At"
+          },
+          "edited_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited By"
+          },
           "generated_at": {
             "format": "date-time",
             "title": "Generated At",
             "type": "string"
+          },
+          "is_edited": {
+            "default": false,
+            "title": "Is Edited",
+            "type": "boolean"
           },
           "model_used": {
             "title": "Model Used",
@@ -1708,6 +1916,21 @@
         ],
         "title": "SystemRole",
         "type": "string"
+      },
+      "TextEditIn": {
+        "description": "Body for the synchronous text-artefact edits (BD-23 / Story 8.1):\n``PATCH .../artifacts/{summary,narrative}`` and ``.../povs/{pj_id}``.\n\nMarkdown stays the single wire/storage format (DP-6). No upper bound on\nlength — long hand-edited artefacts are expected (BD-25 / FR-010).",
+        "properties": {
+          "text": {
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "TextEditIn",
+        "type": "object"
       },
       "TranscriptionEditIn": {
         "description": "Payload accepted by ``PUT /services/jdr/sessions/{id}/transcription``.",
@@ -1808,6 +2031,26 @@
           "completed_at"
         ],
         "title": "TranscriptionOut",
+        "type": "object"
+      },
+      "TranscriptionPricing": {
+        "description": "Per-audio-minute billing (transcription / Whisper models).",
+        "properties": {
+          "price_per_minute": {
+            "title": "Price Per Minute",
+            "type": "number"
+          },
+          "unit": {
+            "const": "per_minute",
+            "default": "per_minute",
+            "title": "Unit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "price_per_minute"
+        ],
+        "title": "TranscriptionPricing",
         "type": "object"
       },
       "TranscriptionSegmentOut": {
@@ -2658,6 +2901,95 @@
         ]
       }
     },
+    "/services/jdr/me/sessions/{session_id}/elements": {
+      "get": {
+        "operationId": "get_my_elements_services_jdr_me_sessions__session_id__elements_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElementsArtifactOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Read the structured-elements card of a session (player view).",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/me/sessions/{session_id}/elements.md": {
+      "get": {
+        "operationId": "get_my_elements_md_services_jdr_me_sessions__session_id__elements_md_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Export the structured-elements card as Markdown (player view).",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
     "/services/jdr/me/sessions/{session_id}/narrative": {
       "get": {
         "operationId": "get_my_narrative_services_jdr_me_sessions__session_id__narrative_get",
@@ -2831,6 +3163,95 @@
           }
         ],
         "summary": "Export the current player's POV as Markdown.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/me/sessions/{session_id}/summary": {
+      "get": {
+        "operationId": "get_my_summary_services_jdr_me_sessions__session_id__summary_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SummaryArtifactOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Read the global summary of a session (player view).",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/me/sessions/{session_id}/summary.md": {
+      "get": {
+        "operationId": "get_my_summary_md_services_jdr_me_sessions__session_id__summary_md_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Export the global summary as Markdown (player view).",
         "tags": [
           "jdr"
         ]
@@ -3204,9 +3625,6 @@
           "404": {
             "description": "Session not found or not visible to the current GM."
           },
-          "409": {
-            "description": "Session has active work and cannot be deleted yet."
-          },
           "422": {
             "content": {
               "application/json": {
@@ -3223,7 +3641,7 @@
             "kaeyris-bearer": []
           }
         ],
-        "summary": "Delete one of the MJ's sessions.",
+        "summary": "Delete one of the MJ's sessions (aborts active work first).",
         "tags": [
           "jdr"
         ]
@@ -3391,6 +3809,18 @@
               "title": "Session Id",
               "type": "string"
             }
+          },
+          {
+            "description": "Confirm overwrite of a manually edited artifact.",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Confirm overwrite of a manually edited artifact.",
+              "title": "Force",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -3421,6 +3851,63 @@
           }
         ],
         "summary": "Trigger the structured-elements card generation for a session.",
+        "tags": [
+          "jdr"
+        ]
+      },
+      "put": {
+        "description": "Atomically replace the whole elements card (BD-23/BD-26).\n\nFull-replace (PUT) rather than per-element CRUD: atomic, idempotent, and it\nmirrors the existing ``PUT /mapping`` pattern. Same ownership /\nartefact-absent / provenance semantics as the text edits.",
+        "operationId": "put_elements_services_jdr_sessions__session_id__artifacts_elements_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElementsPutIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElementsArtifactOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Replace the elements card (synchronous full write, MJ only).",
         "tags": [
           "jdr"
         ]
@@ -3514,6 +4001,63 @@
           "jdr"
         ]
       },
+      "patch": {
+        "description": "Replace the narrative text in one synchronous write (BD-23). Same\nownership / artefact-absent / provenance semantics as ``patch_summary``.",
+        "operationId": "patch_narrative_services_jdr_sessions__session_id__artifacts_narrative_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TextEditIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NarrativeArtifactOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Edit the narrative summary (synchronous write, MJ only).",
+        "tags": [
+          "jdr"
+        ]
+      },
       "post": {
         "operationId": "post_narrative_services_jdr_sessions__session_id__artifacts_narrative_post",
         "parameters": [
@@ -3525,6 +4069,18 @@
               "format": "uuid",
               "title": "Session Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Confirm overwrite of a manually edited artifact.",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Confirm overwrite of a manually edited artifact.",
+              "title": "Force",
+              "type": "boolean"
             }
           }
         ],
@@ -3615,6 +4171,18 @@
               "format": "uuid",
               "title": "Session Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Confirm overwrite of manually edited POV artifacts.",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Confirm overwrite of manually edited POV artifacts.",
+              "title": "Force",
+              "type": "boolean"
             }
           }
         ],
@@ -3707,6 +4275,75 @@
         ]
       }
     },
+    "/services/jdr/sessions/{session_id}/artifacts/povs/{pj_id}": {
+      "patch": {
+        "description": "Replace one PJ's POV text in one synchronous write (BD-23).\n\nResolves session ownership then the owned PJ (404 on either mismatch),\nbefore editing the ``pov:<pj_id>`` artefact.",
+        "operationId": "patch_pov_services_jdr_sessions__session_id__artifacts_povs__pj_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "pj_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pj Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TextEditIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PovArtifactOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Edit one PJ's POV (synchronous write, MJ only).",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
     "/services/jdr/sessions/{session_id}/artifacts/summary": {
       "get": {
         "operationId": "get_summary_services_jdr_sessions__session_id__artifacts_summary_get",
@@ -3754,6 +4391,63 @@
           "jdr"
         ]
       },
+      "patch": {
+        "description": "Replace the summary text in one synchronous write (BD-23).\n\nOwnership enforced by ``resolve_session_for_gm`` (404 if the session is not\nthe caller's). The artefact must already exist (404 ``artifact-not-ready``\notherwise — same semantics as GET). Sets ``is_edited``/``edited_at`` and\nleaves ``model_used``/``generated_at`` untouched (FR-006).",
+        "operationId": "patch_summary_services_jdr_sessions__session_id__artifacts_summary_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TextEditIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SummaryArtifactOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Edit the global session summary (synchronous write, MJ only).",
+        "tags": [
+          "jdr"
+        ]
+      },
       "post": {
         "description": "Enqueue the map-reduce summary job for a non_diarised session.\n\nPre-conditions:\n- session must belong to the MJ (404 otherwise)\n- session must be in non_diarised mode (409 wrong-mode)\n- session must be in state=transcribed (409 session-not-transcribed)\n- session must have at least 1 chunk, unless it has an edited Markdown\n  transcription override (409 no-chunks)\n\nSide effect documented under FR-011: each new summary job resets\nchunks.summary_text and cascade-deletes existing narrative /\nelements / pov:* artefacts for the session. The atomicity is\nenforced by ``_generate_summary`` (see research.md §2).",
         "operationId": "post_summary_services_jdr_sessions__session_id__artifacts_summary_post",
@@ -3766,6 +4460,18 @@
               "format": "uuid",
               "title": "Session Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Confirm overwrite of manually edited artifacts.",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Confirm overwrite of manually edited artifacts.",
+              "title": "Force",
+              "type": "boolean"
             }
           }
         ],
@@ -4442,6 +5148,87 @@
         "summary": "Recover a session wedged in 'transcribing' after a lost worker.",
         "tags": [
           "jdr"
+        ]
+      }
+    },
+    "/services/jdr/sessions/{session_id}/transcription/restart": {
+      "post": {
+        "description": "Re-enqueue transcription from the stored audio without a re-upload.\n\nStory 7.1 / BD-21: after a transcription failure (or to redo a finished\ntranscription) the GM restarts here. The session returns to\n``audio_uploaded`` with a fresh ``current_job_id`` and flows back through the\nnormal pipeline. Refused (409) when the session is not in\n``transcription_failed`` / ``transcribed`` (``transcription-restart-not-allowed``)\nor has no usable audio (``no-audio-to-transcribe``).",
+        "operationId": "restart_transcription_services_jdr_sessions__session_id__transcription_restart_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Session not found or not visible to the current GM."
+          },
+          "409": {
+            "description": "Session is not in a restartable state, or has no audio to re-transcribe."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Re-run transcription on the session's existing audio.",
+        "tags": [
+          "jdr"
+        ]
+      }
+    },
+    "/services/jdr/settings/model-catalog": {
+      "get": {
+        "operationId": "get_model_catalog_services_jdr_settings_model_catalog_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelCatalogOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "kaeyris-bearer": []
+          }
+        ],
+        "summary": "Return the curated catalog of selectable cloud models (ids, tiers, prices).",
+        "tags": [
+          "jdr-auth"
         ]
       }
     },
