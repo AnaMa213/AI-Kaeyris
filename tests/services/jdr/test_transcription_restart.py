@@ -17,6 +17,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from redis import Redis
 from rq.job import Job as RQJob
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
@@ -27,12 +28,17 @@ from app.core.users import hash_password
 from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
+    Artifact,
     AudioSource,
     Campaign,
+    Chunk,
     Pj,
     Role,
     Session,
+    SessionPjMapping,
     SessionState,
+    Transcription,
+    TranscriptionMode,
 )
 from app.services.jdr.router import router as jdr_router
 
@@ -109,6 +115,7 @@ async def _create_session(
     ctx: RestartContext,
     *,
     state: SessionState,
+    transcription_mode: TranscriptionMode = TranscriptionMode.DIARISED,
 ) -> Session:
     session = Session(
         title="Session to re-transcribe",
@@ -116,6 +123,7 @@ async def _create_session(
         gm_key_id=ctx.gm_key.id,
         campaign_id=ctx.campaign_id,
         state=state,
+        transcription_mode=transcription_mode,
     )
     db_session.add(session)
     await db_session.commit()
@@ -223,6 +231,90 @@ async def test_restart_from_transcribed_reenqueues(
 
     assert response.status_code == 200
     assert response.json()["state"] == "audio_uploaded"
+
+
+async def test_restart_from_transcribed_deletes_previous_outputs(
+    restart_ctx, db_session, make_db_session_dep
+):
+    session = await _create_session(
+        db_session,
+        restart_ctx,
+        state=SessionState.TRANSCRIBED,
+        transcription_mode=TranscriptionMode.NON_DIARISED,
+    )
+    await _attach_audio(db_session, session)
+    session_id = session.id
+    pj = Pj(
+        name=f"Mapped PJ {uuid4().hex[:6]}",
+        owner_gm_key_id=restart_ctx.gm_key.id,
+        campaign_id=restart_ctx.campaign_id,
+    )
+    db_session.add(pj)
+    await db_session.flush()
+    session.edited_transcript_md = "# Ancienne transcription corrigee"
+    db_session.add_all(
+        [
+            Transcription(
+                session_id=session_id,
+                segments_json=[{"speaker": "speaker_1", "text": "old"}],
+                language="fr",
+                model_used="old-whisper",
+                provider="mock",
+            ),
+            Chunk(session_id=session_id, ordre=0, text="ancien chunk"),
+            Artifact(
+                session_id=session_id,
+                kind="summary",
+                content_json={"text": "ancien resume"},
+                model_used="old-llm",
+            ),
+            Artifact(
+                session_id=session_id,
+                kind="narrative",
+                content_json={"text": "ancien recit"},
+                model_used="old-llm",
+            ),
+            SessionPjMapping(
+                session_id=session_id,
+                speaker_label="speaker_1",
+                pj_id=pj.id,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            _restart_url(session_id),
+            headers=_auth_headers(restart_ctx.plain_token),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "audio_uploaded"
+
+    db_session.expire_all()
+    refreshed = await db_session.get(Session, session_id)
+    assert refreshed.edited_transcript_md is None
+    assert await db_session.get(Transcription, session_id) is None
+    assert await db_session.get(Artifact, (session_id, "summary")) is None
+    assert await db_session.get(Artifact, (session_id, "narrative")) is None
+    assert (
+        await db_session.scalar(
+            select(Chunk).where(Chunk.session_id == session_id)
+        )
+        is None
+    )
+    assert (
+        await db_session.scalar(
+            select(SessionPjMapping).where(
+                SessionPjMapping.session_id == session_id
+            )
+        )
+        is None
+    )
 
 
 async def test_restart_without_audio_returns_409(

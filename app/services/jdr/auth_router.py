@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import tempfile
+import wave
+from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
@@ -14,6 +17,11 @@ from app.adapters.llm import (
     PermanentLLMError,
     TransientLLMError,
     build_personal_cloud_llm_adapter,
+)
+from app.adapters.transcription import (
+    PermanentTranscriptionError,
+    TransientTranscriptionError,
+    build_personal_cloud_transcription_adapter,
 )
 from app.core.auth import (
     AuthenticatedKey,
@@ -536,6 +544,10 @@ async def patch_model_settings(
         user_id=user.id,
         transcription_provider=payload.transcription_provider,
         summary_provider=payload.summary_provider,
+        set_transcription_provider=(
+            "transcription_provider" in payload.model_fields_set
+        ),
+        set_summary_provider=("summary_provider" in payload.model_fields_set),
         transcription_local_path=payload.transcription_local_path,
         summary_local_path=payload.summary_local_path,
         transcription_cloud_model=payload.transcription_cloud_model,
@@ -650,48 +662,48 @@ def _validate_cloud_models_in_catalog(payload: ModelSettingsPatch) -> None:
 
 
 async def _validate_cloud_api_key_if_needed(*, payload, current) -> None:
-    """Probe the DeepInfra key against the selected model before storing (7.4 / B).
-
-    The probe is a 1-token completion isolating an unauthorized **key for the
-    chosen model**. It runs when either:
-
-    - a new ``deepinfra_api_key`` is supplied (validate the new key), or
-    - the **summary** cloud model is being changed while a key is already stored
-      (re-validate that the stored key is authorized for the new model — without
-      this, switching to a model the key cannot serve, e.g. a gated 70B, only
-      surfaced as a `401` deep in a worker instead of a save-time `400`).
-
-    On a permanent failure the save is rejected with `400 cloud-api-key-invalid`;
-    a transient/network failure does not block the save (it can't confirm the key
-    is bad). If no key or no cloud model is available, the probe is skipped.
-    """
+    """Probe the DeepInfra key against selected cloud models before storing."""
     new_key = payload.deepinfra_api_key
     stored_key = current.deepinfra_api_key if current is not None else None
     effective_key = new_key or stored_key
     if not effective_key:
         return
 
-    summary_model = payload.summary_cloud_model or (
-        current.summary_cloud_model if current is not None else None
+    summary_model = (
+        payload.summary_cloud_model
+        if "summary_cloud_model" in payload.model_fields_set
+        else (current.summary_cloud_model if current is not None else None)
     )
-    # Probe the summary model first (the récit/résumé path, most likely gated),
-    # falling back to the transcription model when no summary model is set.
-    model = summary_model or (
+    transcription_model = (
         payload.transcription_cloud_model
-        or (current.transcription_cloud_model if current is not None else None)
+        if "transcription_cloud_model" in payload.model_fields_set
+        else (current.transcription_cloud_model if current is not None else None)
     )
-    if not model:
-        return
 
     summary_model_changed = bool(
-        payload.summary_cloud_model
+        "summary_cloud_model" in payload.model_fields_set
+        and payload.summary_cloud_model
         and current is not None
         and payload.summary_cloud_model != current.summary_cloud_model
     )
-    if not new_key and not summary_model_changed:
-        return
+    transcription_model_changed = bool(
+        "transcription_cloud_model" in payload.model_fields_set
+        and payload.transcription_cloud_model
+        and current is not None
+        and payload.transcription_cloud_model != current.transcription_cloud_model
+    )
 
-    adapter = build_personal_cloud_llm_adapter(model=model, api_key=effective_key)
+    if summary_model and (new_key or summary_model_changed):
+        await _probe_cloud_llm_key(model=summary_model, api_key=effective_key)
+    if transcription_model and (new_key or transcription_model_changed):
+        await _probe_cloud_transcription_key(
+            model=transcription_model,
+            api_key=effective_key,
+        )
+
+
+async def _probe_cloud_llm_key(*, model: str, api_key: str) -> None:
+    adapter = build_personal_cloud_llm_adapter(model=model, api_key=api_key)
     try:
         await adapter.complete(system="", user="ping", max_tokens=1)
     except PermanentLLMError as exc:
@@ -704,6 +716,54 @@ async def _validate_cloud_api_key_if_needed(*, payload, current) -> None:
     except TransientLLMError:
         # Network/transient: cannot confirm the key is bad → don't block the save.
         return
+
+
+async def _probe_cloud_transcription_key(*, model: str, api_key: str) -> None:
+    adapter = build_personal_cloud_transcription_adapter(
+        model=model,
+        api_key=api_key,
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        probe_path = Path(tmpdir) / "kaeyris-cloud-transcription-probe.wav"
+        _write_silent_probe_wav(probe_path)
+        try:
+            await adapter.transcribe(audio_path=str(probe_path), language_hint="fr")
+        except PermanentTranscriptionError as exc:
+            if not _looks_like_cloud_auth_error(str(exc)):
+                return
+            raise CloudApiKeyInvalidAppError(
+                detail=(
+                    "La clé DeepInfra a été refusée pour la transcription. "
+                    "Vérifie la clé et le modèle cloud."
+                )
+            ) from exc
+        except TransientTranscriptionError:
+            return
+
+
+def _looks_like_cloud_auth_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "401",
+            "403",
+            "authentication",
+            "forbidden",
+            "invalid_api_key",
+            "unauthorized",
+        )
+    )
+
+
+def _write_silent_probe_wav(path: Path) -> None:
+    sample_rate = 16_000
+    silence = b"\x00\x00" * sample_rate
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(silence)
 
 
 def _effective_summary_provider() -> ModelProvider:

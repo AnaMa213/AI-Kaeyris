@@ -75,6 +75,33 @@ def _mock_cloud_key_probe(monkeypatch, *, ok: bool) -> None:
     )
 
 
+def _mock_cloud_transcription_probe(monkeypatch, *, ok: bool) -> None:
+    """Stub the save-time DeepInfra transcription probe — no network."""
+    from app.adapters.transcription import (
+        PermanentTranscriptionError,
+        TranscriptionResult,
+    )
+
+    class _FakeCloudTranscriptionAdapter:
+        provider = "deepinfra"
+        model = "stub"
+
+        async def transcribe(self, *, audio_path, language_hint=None):
+            if ok:
+                return TranscriptionResult(
+                    segments=[],
+                    language=language_hint or "fr",
+                    model_used="deepinfra:stub",
+                    provider="deepinfra",
+                )
+            raise PermanentTranscriptionError("AuthenticationError: invalid_api_key")
+
+    monkeypatch.setattr(
+        "app.services.jdr.auth_router.build_personal_cloud_transcription_adapter",
+        lambda *, model, api_key: _FakeCloudTranscriptionAdapter(),
+    )
+
+
 def _set_operator_cloud_defaults(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.services.jdr.auth_router.settings.TRANSCRIPTION_PROVIDER", "cloud"
@@ -318,6 +345,50 @@ async def test_first_patch_keeps_effective_local_transcription(
     assert fetched.json()["summary_provider"] == "cloud"
 
 
+async def test_patch_null_clears_provider_overrides_to_operator_defaults(
+    make_db_session_dep, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.jdr.auth_router.settings.TRANSCRIPTION_PROVIDER", "local"
+    )
+    monkeypatch.setattr(
+        "app.services.jdr.auth_router.settings.LLM_PROVIDER", "deepinfra"
+    )
+    monkeypatch.setattr(
+        "app.services.jdr.auth_router.settings.LLM_MODEL",
+        "meta-llama/Meta-Llama-3.1-8B-Instruct",
+    )
+    app = _make_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await _setup_admin(client)
+        overridden = await client.patch(
+            "/services/jdr/settings/models",
+            json={
+                "transcription_provider": "cloud",
+                "summary_provider": "ollama",
+            },
+        )
+        cleared = await client.patch(
+            "/services/jdr/settings/models",
+            json={
+                "transcription_provider": None,
+                "summary_provider": None,
+            },
+        )
+        fetched = await client.get("/services/jdr/settings/models")
+
+    assert overridden.status_code == 200
+    assert overridden.json()["transcription_provider"] == "cloud"
+    assert overridden.json()["summary_provider"] == "ollama"
+    assert cleared.status_code == 200
+    assert cleared.json()["transcription_provider"] == "local"
+    assert cleared.json()["summary_provider"] == "cloud"
+    assert fetched.json()["transcription_provider"] == "local"
+    assert fetched.json()["summary_provider"] == "cloud"
+
+
 async def test_non_admin_user_cannot_manage_model_settings(make_db_session_dep):
     app = _make_app(make_db_session_dep)
     transport = ASGITransport(app=app)
@@ -472,6 +543,31 @@ async def test_valid_cloud_key_passes_probe_and_is_stored(
     assert response.status_code == 200
     assert fetched.json()["deepinfra_api_key_set"] is True
     assert fetched.json()["summary_provider"] == "cloud"
+
+
+async def test_invalid_transcription_cloud_key_rejected_on_save(
+    make_db_session_dep, monkeypatch
+):
+    _set_operator_cloud_defaults(monkeypatch)
+    _mock_cloud_transcription_probe(monkeypatch, ok=False)
+    app = _make_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await _setup_admin(client)
+        response = await client.patch(
+            "/services/jdr/settings/models",
+            json={
+                "transcription_provider": "cloud",
+                "transcription_cloud_model": "openai/whisper-large-v3-turbo",
+                "deepinfra_api_key": "bad-for-whisper",
+            },
+        )
+        fetched = await client.get("/services/jdr/settings/models")
+
+    assert response.status_code == 400
+    assert response.json()["type"].endswith("/cloud-api-key-invalid")
+    assert fetched.json()["deepinfra_api_key_set"] is False
 
 
 async def test_local_path_without_validation_is_rejected(
@@ -756,3 +852,35 @@ async def test_changing_summary_model_revalidates_stored_key(
         fetched.json()["summary_cloud_model"]
         == "meta-llama/Meta-Llama-3.1-8B-Instruct"
     )
+
+
+async def test_changing_transcription_model_revalidates_stored_key(
+    make_db_session_dep, monkeypatch
+):
+    _set_operator_cloud_defaults(monkeypatch)
+    app = _make_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await _setup_admin(client)
+        _mock_cloud_transcription_probe(monkeypatch, ok=True)
+        stored = await client.patch(
+            "/services/jdr/settings/models",
+            json={
+                "transcription_provider": "cloud",
+                "transcription_cloud_model": "openai/whisper-large-v3-turbo",
+                "deepinfra_api_key": "good-for-turbo",
+            },
+        )
+        assert stored.status_code == 200
+
+        _mock_cloud_transcription_probe(monkeypatch, ok=False)
+        rejected = await client.patch(
+            "/services/jdr/settings/models",
+            json={"transcription_cloud_model": "openai/whisper-large-v3"},
+        )
+        fetched = await client.get("/services/jdr/settings/models")
+
+    assert rejected.status_code == 400
+    assert rejected.json()["type"].endswith("/cloud-api-key-invalid")
+    assert fetched.json()["transcription_cloud_model"] == "openai/whisper-large-v3-turbo"

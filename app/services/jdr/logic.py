@@ -653,6 +653,7 @@ async def restart_transcription_for_session(
             f"Session {session.id} has no audio to re-transcribe."
         )
 
+    await _delete_transcription_outputs_for_restart(db, session=session)
     await repo.update_state(session.id, SessionState.AUDIO_UPLOADED)
     await enqueue_session_job(
         db,
@@ -664,6 +665,19 @@ async def restart_transcription_for_session(
     await db.commit()
     await db.refresh(session)
     return session
+
+
+async def _delete_transcription_outputs_for_restart(
+    db: AsyncSession,
+    *,
+    session: Session,
+) -> None:
+    """Invalidate every output tied to the previous automatic transcription."""
+    await TranscriptionRepository(db).delete_for_session(session.id)
+    await ChunkRepository(db).delete_for_session(session.id)
+    await MappingRepository(db).delete_for_session(session.id)
+    await ArtifactRepository(db).delete_for_session(session.id)
+    await SessionRepository(db).clear_edited_transcript(session.id)
 
 
 def _delete_session_audio_files(
