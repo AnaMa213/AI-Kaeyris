@@ -21,7 +21,9 @@ from app.services.jdr.db.models import (
     Role,
     Session,
     SessionPjMapping,
+    SessionPlayer,
     SessionState,
+    TranscriptionMode,
 )
 from app.services.jdr.router import router as jdr_router
 
@@ -157,3 +159,87 @@ async def test_get_me_sessions_lists_only_sessions_where_my_pj_is_mapped(
     # The other-PJ session and the unmapped session must NOT appear.
     assert str(fx["session_other_id"]) not in ids
     assert str(fx["session_unmapped_id"]) not in ids
+
+
+async def test_get_me_sessions_uses_player_list_for_non_diarised_sessions(
+    db_session, make_db_session_dep
+):
+    hasher = PasswordHasher()
+    player_plain = "player-non-diarised-listing"
+
+    gm = ApiKey(
+        name=f"gm-{uuid4().hex[:8]}",
+        hash=hasher.hash("gm-non-diarised-listing"),
+        role=Role.GM,
+        status=ApiKeyStatus.ACTIVE,
+    )
+    db_session.add(gm)
+    await db_session.flush()
+
+    campaign = Campaign(name="Non diarised listing", owner_user_id=uuid4())
+    db_session.add(campaign)
+    await db_session.flush()
+
+    pj_a = Pj(name="Aragorn", owner_gm_key_id=gm.id, campaign_id=campaign.id)
+    pj_b = Pj(name="Boromir", owner_gm_key_id=gm.id, campaign_id=campaign.id)
+    db_session.add_all([pj_a, pj_b])
+    await db_session.flush()
+
+    player_a = ApiKey(
+        name=f"player-a-{uuid4().hex[:8]}",
+        hash=hasher.hash(player_plain),
+        role=Role.PLAYER,
+        status=ApiKeyStatus.ACTIVE,
+        pj_id=pj_a.id,
+    )
+    db_session.add(player_a)
+    await db_session.flush()
+
+    visible = Session(
+        title="Non-diarised-visible",
+        recorded_at=datetime.now(UTC),
+        gm_key_id=gm.id,
+        campaign_id=campaign.id,
+        state=SessionState.TRANSCRIBED,
+        transcription_mode=TranscriptionMode.NON_DIARISED,
+    )
+    hidden = Session(
+        title="Non-diarised-other-pj",
+        recorded_at=datetime.now(UTC),
+        gm_key_id=gm.id,
+        campaign_id=campaign.id,
+        state=SessionState.TRANSCRIBED,
+        transcription_mode=TranscriptionMode.NON_DIARISED,
+    )
+    unlisted = Session(
+        title="Non-diarised-no-players",
+        recorded_at=datetime.now(UTC),
+        gm_key_id=gm.id,
+        campaign_id=campaign.id,
+        state=SessionState.TRANSCRIBED,
+        transcription_mode=TranscriptionMode.NON_DIARISED,
+    )
+    db_session.add_all([visible, hidden, unlisted])
+    await db_session.flush()
+
+    db_session.add_all(
+        [
+            SessionPlayer(session_id=visible.id, pj_id=pj_a.id),
+            SessionPlayer(session_id=hidden.id, pj_id=pj_b.id),
+        ]
+    )
+    await db_session.commit()
+
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/services/jdr/me/sessions",
+            headers={"Authorization": f"Bearer {player_plain}"},
+        )
+
+    assert response.status_code == 200
+    ids = {item["session_id"] for item in response.json()["items"]}
+    assert str(visible.id) in ids
+    assert str(hidden.id) not in ids
+    assert str(unlisted.id) not in ids

@@ -466,8 +466,6 @@ class SessionRepository(_BaseRepository):
         )
 
     async def mark_audio_purged(self, session_id: UUID) -> None:
-        from datetime import UTC, datetime
-
         await self._session.execute(
             update(AudioSource)
             .where(AudioSource.session_id == session_id)
@@ -546,8 +544,6 @@ class TranscriptionRepository(_BaseRepository):
         model_used: str,
         provider: str,
     ) -> Transcription:
-        from datetime import UTC, datetime
-
         existing = await self._session.scalar(
             select(Transcription).where(Transcription.session_id == session_id)
         )
@@ -652,8 +648,6 @@ class ArtifactRepository(_BaseRepository):
         content_json: dict,
         model_used: str,
     ) -> Artifact:
-        from datetime import UTC, datetime
-
         existing = await self._session.scalar(
             select(Artifact).where(
                 Artifact.session_id == session_id,
@@ -707,8 +701,6 @@ class ArtifactRepository(_BaseRepository):
         artefact-absent semantics (404). Sets manual-edit provenance and leaves
         ``model_used``/``generated_at`` untouched (FR-006).
         """
-        from datetime import UTC, datetime
-
         existing = await self._session.scalar(
             select(Artifact).where(
                 Artifact.session_id == session_id,

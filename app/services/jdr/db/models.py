@@ -35,6 +35,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    false,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -508,7 +509,7 @@ class Artifact(Base):
     # touches them, it only flips these three. A (re)generation resets them to
     # the "freshly generated, never hand-edited" state (see ArtifactRepository).
     is_edited: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default="0"
+        Boolean, nullable=False, default=False, server_default=false()
     )
     edited_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None

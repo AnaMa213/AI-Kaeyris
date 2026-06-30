@@ -193,6 +193,22 @@ class ArtifactEditedAppError(AppError):
     title = "Artifact edited"
 
 
+class ArtifactBusyAppError(AppError):
+    """Manual edit refused while an artifact generation job is active."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "artifact-busy"
+    title = "Artifact generation in progress"
+
+
+class ElementsEmptyClearUnconfirmedError(AppError):
+    """Empty elements replacement requires explicit clear confirmation."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "elements-empty-clear-unconfirmed"
+    title = "Elements clear not confirmed"
+
+
 class SessionNotTranscribedError(AppError):
     """Triggering an artefact requires the session to be transcribed first."""
 
@@ -470,6 +486,9 @@ _VALID_JOB_PHASES = frozenset({"reducing", "transcribing", "done", "failed"})
 _JOB_EVENTS_POLL_INTERVAL_SECONDS = 1.0
 _TERMINAL_JOB_STATUSES = frozenset({JobStatus.SUCCEEDED, JobStatus.FAILED})
 _JOB_NO_LONGER_AVAILABLE_REASON = "Job is no longer available."
+_ARTIFACT_JOB_KINDS = frozenset(
+    {JobKind.SUMMARY, JobKind.NARRATIVE, JobKind.ELEMENTS, JobKind.POVS}
+)
 
 
 def _project_progress_meta(meta: dict) -> tuple[str | None, int | None]:
@@ -594,6 +613,35 @@ def _job_no_longer_available_out(initial_job_out: JobOut) -> JobOut:
         ended_at=datetime.now(UTC),
         phase=initial_job_out.phase,
         progress_percent=initial_job_out.progress_percent,
+    )
+
+
+def _guard_artifact_edit_not_busy(
+    *, session_row: SessionModel, redis_client: Redis
+) -> None:
+    """Reject manual edits while the session has active artifact generation."""
+    job_id = session_row.current_job_id
+    if job_id is None:
+        return
+
+    try:
+        job = Job.fetch(job_id, connection=redis_client)
+        kind, job_session_id = _resolve_job_identity(job_id=job_id, job=job)
+    except (NoSuchJobError, JobNotFoundError):
+        return
+
+    if job_session_id != session_row.id or kind not in _ARTIFACT_JOB_KINDS:
+        return
+
+    job_out = _project_rq_job_out(job=job, kind=kind, session_id=job_session_id)
+    if job_out.status in _TERMINAL_JOB_STATUSES:
+        return
+
+    raise ArtifactBusyAppError(
+        detail=(
+            "An artifact generation job is still running for this session. "
+            "Retry after it completes."
+        )
     )
 
 
@@ -2133,6 +2181,7 @@ async def patch_summary(
     payload: TextEditIn,
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    redis_client: Annotated[Redis, Depends(get_redis)],
 ) -> SummaryArtifactOut:
     """Replace the summary text in one synchronous write (BD-23).
 
@@ -2144,6 +2193,7 @@ async def patch_summary(
     session_row = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    _guard_artifact_edit_not_busy(session_row=session_row, redis_client=redis_client)
     artifact = await ArtifactRepository(db).update_content(
         session_id,
         kind="summary",
@@ -2176,12 +2226,14 @@ async def patch_narrative(
     payload: TextEditIn,
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    redis_client: Annotated[Redis, Depends(get_redis)],
 ) -> NarrativeArtifactOut:
     """Replace the narrative text in one synchronous write (BD-23). Same
     ownership / artefact-absent / provenance semantics as ``patch_summary``."""
     session_row = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    _guard_artifact_edit_not_busy(session_row=session_row, redis_client=redis_client)
     artifact = await ArtifactRepository(db).update_content(
         session_id,
         kind="narrative",
@@ -2215,6 +2267,7 @@ async def patch_pov(
     payload: TextEditIn,
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    redis_client: Annotated[Redis, Depends(get_redis)],
 ) -> PovArtifactOut:
     """Replace one PJ's POV text in one synchronous write (BD-23).
 
@@ -2227,6 +2280,7 @@ async def patch_pov(
     await _load_owned_pj_or_404(
         db, pj_id=pj_id, gm_key_id=auth.id, campaign_id=session_row.campaign_id
     )
+    _guard_artifact_edit_not_busy(session_row=session_row, redis_client=redis_client)
     artifact = await ArtifactRepository(db).update_content(
         session_id,
         kind=f"pov:{pj_id}",
@@ -2260,6 +2314,15 @@ async def put_elements(
     payload: ElementsPutIn,
     auth: Annotated[AuthenticatedKey, Depends(require_gm)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    redis_client: Annotated[Redis, Depends(get_redis)],
+    confirm_empty: Annotated[
+        bool,
+        Query(
+            description=(
+                "Set true to confirm intentionally clearing every element."
+            )
+        ),
+    ] = False,
 ) -> ElementsArtifactOut:
     """Atomically replace the whole elements card (BD-23/BD-26).
 
@@ -2270,6 +2333,14 @@ async def put_elements(
     session_row = await resolve_session_for_gm(db, session_id=session_id, auth=auth)
     if session_row is None:
         raise SessionNotFoundError(detail=f"Session {session_id} not found.")
+    _guard_artifact_edit_not_busy(session_row=session_row, redis_client=redis_client)
+    if not payload.elements and not confirm_empty:
+        raise ElementsEmptyClearUnconfirmedError(
+            detail=(
+                "Empty elements replacement would clear the whole card. "
+                "Retry with ?confirm_empty=true to confirm."
+            )
+        )
     content_json = {"elements": [e.model_dump() for e in payload.elements]}
     artifact = await ArtifactRepository(db).update_content(
         session_id,

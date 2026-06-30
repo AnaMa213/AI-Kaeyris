@@ -265,7 +265,7 @@ Deux fichiers dans `docs/`, complémentaires et tenus à jour par Codex :
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-[`specs/017-local-model-validation/plan.md`](specs/017-local-model-validation/plan.md).
+[`specs/019-epic8-followups/plan.md`](specs/019-epic8-followups/plan.md).
 Companion artifacts in the same directory: `spec.md`, `research.md`,
 `data-model.md`, `contracts/`, `quickstart.md`.
 <!-- SPECKIT END -->

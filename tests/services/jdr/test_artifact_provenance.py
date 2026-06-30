@@ -365,3 +365,50 @@ async def test_failed_summary_regeneration_preserves_edited_artifacts(
             )
         ).scalars().all()
     assert chunks[0].summary_text == "Ancien resume de chunk."
+
+
+def test_artifact_is_edited_server_default_compiles_to_sql_false():
+    default = Artifact.__table__.c.is_edited.server_default
+
+    assert default is not None
+    assert str(default.arg.compile()).lower() == "false"
+
+
+async def test_generated_artifact_defaults_to_unedited(db_session):
+    gm = ApiKey(
+        name=f"gm-{uuid4().hex[:8]}",
+        hash=PasswordHasher().hash("gm-artifact-provenance"),
+        role=Role.GM,
+        status=ApiKeyStatus.ACTIVE,
+    )
+    db_session.add(gm)
+    await db_session.flush()
+
+    campaign = Campaign(name="Artifact provenance", owner_user_id=uuid4())
+    db_session.add(campaign)
+    await db_session.flush()
+
+    session = Session(
+        title="Generated artifact default",
+        recorded_at=datetime.now(UTC),
+        gm_key_id=gm.id,
+        campaign_id=campaign.id,
+        state=SessionState.TRANSCRIBED,
+    )
+    db_session.add(session)
+    await db_session.flush()
+
+    artifact = Artifact(
+        session_id=session.id,
+        kind="summary",
+        content_json={"text": "Generated summary."},
+        model_used="test",
+        generated_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+    )
+    db_session.add(artifact)
+    await db_session.commit()
+    await db_session.refresh(artifact)
+
+    assert artifact.is_edited is False
+    assert artifact.edited_at is None
+    assert artifact.edited_by is None
