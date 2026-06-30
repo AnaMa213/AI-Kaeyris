@@ -34,6 +34,11 @@ from app.services.jdr.db.models import (
 
 T = TypeVar("T")
 
+# Generous safety cap for synchronous manual text edits. This keeps BD-25 long
+# RPG artifacts viable while rejecting accidental or abusive multi-megabyte
+# requests before they reach storage.
+MAX_ARTIFACT_TEXT_EDIT_CHARS = 2_000_000
+
 
 class JdrSchema(BaseModel):
     """Base schema for JDR JSON output conventions."""
@@ -433,11 +438,12 @@ class TextEditIn(JdrSchema):
     """Body for the synchronous text-artefact edits (BD-23 / Story 8.1):
     ``PATCH .../artifacts/{summary,narrative}`` and ``.../povs/{pj_id}``.
 
-    Markdown stays the single wire/storage format (DP-6). No upper bound on
-    length — long hand-edited artefacts are expected (BD-25 / FR-010).
+    Markdown stays the single wire/storage format (DP-6). Long hand-edited
+    artefacts are expected (BD-25 / FR-010), with a generous safety cap to
+    reject pathological payloads.
     """
 
-    text: str = Field(..., min_length=1)
+    text: str = Field(..., min_length=1, max_length=MAX_ARTIFACT_TEXT_EDIT_CHARS)
 
     @field_validator("text")
     @classmethod

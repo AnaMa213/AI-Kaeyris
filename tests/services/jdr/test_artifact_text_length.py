@@ -24,6 +24,7 @@ from app.services.jdr.db.models import (
     TranscriptionMode,
 )
 from app.services.jdr.router import router as jdr_router
+from app.services.jdr.schemas import MAX_ARTIFACT_TEXT_EDIT_CHARS
 
 
 def _make_jdr_app(make_db_session_dep: Callable[..., Any]) -> FastAPI:
@@ -35,7 +36,7 @@ def _make_jdr_app(make_db_session_dep: Callable[..., Any]) -> FastAPI:
     return app
 
 
-async def test_patch_summary_accepts_long_text_without_schema_cap(
+async def test_patch_summary_accepts_long_text_under_safety_limit(
     db_session, make_db_session_dep
 ):
     plain = "gm-long-summary"
@@ -78,6 +79,7 @@ async def test_patch_summary_accepts_long_text_without_schema_cap(
         f"Scene {idx}: " + "details " * 30 for idx in range(1_000)
     )
     assert len(long_text) > 200_000
+    assert len(long_text) < MAX_ARTIFACT_TEXT_EDIT_CHARS
 
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)
@@ -96,3 +98,61 @@ async def test_patch_summary_accepts_long_text_without_schema_cap(
     assert patch.json()["text"] == long_text
     assert get.status_code == 200
     assert get.json()["text"] == long_text
+
+
+async def test_patch_summary_rejects_text_above_safety_limit_without_mutation(
+    db_session, make_db_session_dep
+):
+    plain = "gm-too-long-summary"
+    gm = ApiKey(
+        name=f"gm-{uuid4().hex[:8]}",
+        hash=PasswordHasher().hash(plain),
+        role=Role.GM,
+        status=ApiKeyStatus.ACTIVE,
+    )
+    db_session.add(gm)
+    await db_session.flush()
+
+    campaign = Campaign(name="Too long edit campaign", owner_user_id=uuid4())
+    db_session.add(campaign)
+    await db_session.flush()
+
+    session = Session(
+        title="Too long summary edit",
+        recorded_at=datetime.now(UTC),
+        gm_key_id=gm.id,
+        campaign_id=campaign.id,
+        state=SessionState.TRANSCRIBED,
+        transcription_mode=TranscriptionMode.NON_DIARISED,
+    )
+    db_session.add(session)
+    await db_session.flush()
+    session_id = session.id
+
+    db_session.add(
+        Artifact(
+            session_id=session_id,
+            kind="summary",
+            content_json={"text": "Initial generated summary."},
+            model_used="test",
+            generated_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        )
+    )
+    await db_session.commit()
+
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        patch = await client.patch(
+            f"/services/jdr/sessions/{session_id}/artifacts/summary",
+            headers={"Authorization": f"Bearer {plain}"},
+            json={"text": "x" * (MAX_ARTIFACT_TEXT_EDIT_CHARS + 1)},
+        )
+        get = await client.get(
+            f"/services/jdr/sessions/{session_id}/artifacts/summary",
+            headers={"Authorization": f"Bearer {plain}"},
+        )
+
+    assert patch.status_code == 422
+    assert get.status_code == 200
+    assert get.json()["text"] == "Initial generated summary."

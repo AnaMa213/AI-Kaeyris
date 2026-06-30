@@ -13,20 +13,27 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import fakeredis
+import pytest
 import pytest_asyncio
 from argon2 import PasswordHasher
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from redis import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from app.core.db import get_db_session
 from app.core.errors import register_exception_handlers
 from app.core.redis_client import get_redis
+from app.jobs import enqueue_job, get_default_queue
+from app.jobs.jdr import generate_summary_job, transcribe_session_job
 from app.services.jdr.db.models import (
     ApiKey,
     ApiKeyStatus,
     Artifact,
     Campaign,
+    Job,
+    JobKind,
+    JobStatus,
     Pj,
     Role,
     Session,
@@ -101,6 +108,23 @@ async def _seed_session_with_artifacts(
                     generated_at=GENERATED_AT,
                 )
             )
+        setup.add(
+            Artifact(
+                session_id=session_id,
+                kind="elements",
+                content_json={
+                    "elements": [
+                        {
+                            "category": "PNJ",
+                            "name": "Gandalf",
+                            "description": "Initial element.",
+                        }
+                    ]
+                },
+                model_used=GEN_MODEL,
+                generated_at=GENERATED_AT,
+            )
+        )
         await setup.commit()
 
     return EditTestContext(
@@ -118,17 +142,62 @@ async def ctx(db_engine: AsyncEngine) -> EditTestContext:
     return await _seed_session_with_artifacts(sm)
 
 
-def _make_jdr_app(make_db_session_dep: Callable[..., Any]) -> FastAPI:
+def _make_jdr_app(
+    make_db_session_dep: Callable[..., Any],
+    redis_client: Redis | None = None,
+) -> FastAPI:
     app = FastAPI()
     register_exception_handlers(app)
     app.include_router(jdr_router)
     app.dependency_overrides[get_db_session] = make_db_session_dep
-    app.dependency_overrides[get_redis] = lambda: fakeredis.FakeStrictRedis()
+    app.dependency_overrides[get_redis] = (
+        lambda: redis_client or fakeredis.FakeStrictRedis()
+    )
     return app
 
 
 def _auth(ctx: EditTestContext) -> dict[str, str]:
     return {"Authorization": f"Bearer {ctx.plain_token}"}
+
+
+async def _attach_current_rq_job(
+    ctx: EditTestContext,
+    *,
+    redis_client: Redis,
+    func: Callable[..., Any],
+    kind: JobKind,
+) -> str:
+    queue = get_default_queue(redis_client)
+    rq_job = enqueue_job(queue, func, ctx.session_id)
+    async with ctx.sessionmaker() as db:
+        session = await db.get(Session, ctx.session_id)
+        db.add(
+            Job(
+                id=rq_job.id,
+                kind=kind,
+                session_id=ctx.session_id,
+                status=JobStatus.QUEUED,
+                queued_at=datetime.now(UTC),
+            )
+        )
+        await db.flush()
+        session.current_job_id = rq_job.id
+        await db.commit()
+    return rq_job.id
+
+
+async def _artifact_snapshot(
+    ctx: EditTestContext, kind: str
+) -> tuple[dict[str, Any], bool, datetime | None, str | None]:
+    async with ctx.sessionmaker() as db:
+        artifact = await db.get(Artifact, (ctx.session_id, kind))
+        assert artifact is not None
+        return (
+            artifact.content_json,
+            artifact.is_edited,
+            artifact.edited_at,
+            artifact.edited_by,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -255,3 +324,98 @@ async def test_patch_summary_cross_tenant_returns_404(ctx, make_db_session_dep):
             json={"text": "tentative d'édition"},
         )
     assert resp.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("method", "path_builder", "payload", "artifact_kind"),
+    [
+        (
+            "patch",
+            lambda ctx: f"/services/jdr/sessions/{ctx.session_id}/artifacts/summary",
+            {"text": "Manual summary update."},
+            "summary",
+        ),
+        (
+            "patch",
+            lambda ctx: f"/services/jdr/sessions/{ctx.session_id}/artifacts/narrative",
+            {"text": "Manual narrative update."},
+            "narrative",
+        ),
+        (
+            "patch",
+            lambda ctx: (
+                f"/services/jdr/sessions/{ctx.session_id}/artifacts/povs/{ctx.pj_id}"
+            ),
+            {"text": "Manual POV update."},
+            "pov",
+        ),
+        (
+            "put",
+            lambda ctx: f"/services/jdr/sessions/{ctx.session_id}/artifacts/elements",
+            {
+                "elements": [
+                    {
+                        "category": "PNJ",
+                        "name": "Bilbo",
+                        "description": "Replacement element.",
+                    }
+                ]
+            },
+            "elements",
+        ),
+    ],
+)
+async def test_manual_artifact_edits_reject_while_artifact_job_is_active(
+    ctx,
+    make_db_session_dep,
+    method,
+    path_builder,
+    payload,
+    artifact_kind,
+):
+    redis_client = fakeredis.FakeStrictRedis()
+    await _attach_current_rq_job(
+        ctx,
+        redis_client=redis_client,
+        func=generate_summary_job,
+        kind=JobKind.SUMMARY,
+    )
+    kind = f"pov:{ctx.pj_id}" if artifact_kind == "pov" else artifact_kind
+    before = await _artifact_snapshot(ctx, kind)
+
+    app = _make_jdr_app(make_db_session_dep, redis_client)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await getattr(client, method)(
+            path_builder(ctx),
+            headers=_auth(ctx),
+            json=payload,
+        )
+
+    assert resp.status_code == 409
+    assert resp.json()["type"].endswith("/artifact-busy")
+    assert await _artifact_snapshot(ctx, kind) == before
+
+
+async def test_non_artifact_active_job_does_not_block_artifact_edit(
+    ctx, make_db_session_dep
+):
+    redis_client = fakeredis.FakeStrictRedis()
+    await _attach_current_rq_job(
+        ctx,
+        redis_client=redis_client,
+        func=transcribe_session_job,
+        kind=JobKind.TRANSCRIPTION,
+    )
+
+    app = _make_jdr_app(make_db_session_dep, redis_client)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.patch(
+            f"/services/jdr/sessions/{ctx.session_id}/artifacts/summary",
+            headers=_auth(ctx),
+            json={"text": "Manual edit despite transcription job."},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["text"] == "Manual edit despite transcription job."

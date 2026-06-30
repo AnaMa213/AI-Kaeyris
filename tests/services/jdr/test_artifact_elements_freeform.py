@@ -182,6 +182,56 @@ async def test_put_elements_round_trip_free_form_category(ctx, make_db_session_d
     assert get.json()["elements"][0]["description"] == long_desc
 
 
+async def test_put_elements_rejects_empty_replacement_without_confirmation(
+    ctx, make_db_session_dep
+):
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        put = await client.put(
+            f"/services/jdr/sessions/{ctx.session_id}/artifacts/elements",
+            headers={"Authorization": f"Bearer {ctx.plain_token}"},
+            json={"elements": []},
+        )
+        get = await client.get(
+            f"/services/jdr/sessions/{ctx.session_id}/artifacts/elements",
+            headers={"Authorization": f"Bearer {ctx.plain_token}"},
+        )
+
+    assert put.status_code == 422
+    assert put.json()["type"].endswith("/elements-empty-clear-unconfirmed")
+    assert get.status_code == 200
+    assert get.json()["elements"] == [
+        {"category": "PNJ", "name": "Gandalf", "description": "Magicien."}
+    ]
+
+
+async def test_put_elements_allows_empty_replacement_with_confirmation(
+    ctx, make_db_session_dep
+):
+    app = _make_jdr_app(make_db_session_dep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        put = await client.put(
+            f"/services/jdr/sessions/{ctx.session_id}/artifacts/elements",
+            params={"confirm_empty": "true"},
+            headers={"Authorization": f"Bearer {ctx.plain_token}"},
+            json={"elements": []},
+        )
+        get = await client.get(
+            f"/services/jdr/sessions/{ctx.session_id}/artifacts/elements",
+            headers={"Authorization": f"Bearer {ctx.plain_token}"},
+        )
+
+    assert put.status_code == 200
+    assert put.json()["elements"] == []
+    assert put.json()["is_edited"] is True
+    assert get.status_code == 200
+    assert get.json()["elements"] == []
+
+
 async def test_put_elements_422_on_blank_category(ctx, make_db_session_dep):
     app = _make_jdr_app(make_db_session_dep)
     transport = ASGITransport(app=app)

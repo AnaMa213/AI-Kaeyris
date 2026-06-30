@@ -26,7 +26,7 @@ from redis import Redis
 from rq.command import send_stop_job_command
 from rq.exceptions import InvalidJobOperation, NoSuchJobError
 from rq.job import Job as RQJob
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile
 
@@ -46,6 +46,7 @@ from app.services.jdr.db.models import (
     Role,
     Session,
     SessionPjMapping,
+    SessionPlayer,
     SessionState,
     TranscriptionMode,
 )
@@ -1060,14 +1061,27 @@ async def revoke_player(
 async def list_player_sessions(
     db: AsyncSession, *, player_pj_id: UUID, campaign_id: UUID | None = None
 ) -> list[Session]:
-    """Return the sessions where the player's PJ is mapped (FR-014).
+    """Return the sessions where the player's PJ participates (FR-014).
 
-    Anything not in this list is invisible to the player.
+    Diarised sessions use speaker-to-PJ mapping; non-diarised sessions use the
+    explicit session player list because no speaker labels are available.
     """
     stmt = (
         select(Session)
-        .join(SessionPjMapping, SessionPjMapping.session_id == Session.id)
-        .where(SessionPjMapping.pj_id == player_pj_id)
+        .outerjoin(SessionPjMapping, SessionPjMapping.session_id == Session.id)
+        .outerjoin(SessionPlayer, SessionPlayer.session_id == Session.id)
+        .where(
+            or_(
+                and_(
+                    Session.transcription_mode == TranscriptionMode.DIARISED,
+                    SessionPjMapping.pj_id == player_pj_id,
+                ),
+                and_(
+                    Session.transcription_mode == TranscriptionMode.NON_DIARISED,
+                    SessionPlayer.pj_id == player_pj_id,
+                ),
+            )
+        )
         .order_by(Session.created_at)
         .distinct()
     )
@@ -1084,18 +1098,33 @@ async def is_pj_mapped_on_session(
     pj_id: UUID,
     campaign_id: UUID | None = None,
 ) -> bool:
-    """True iff the (session_id, *, pj_id) row exists in the mapping."""
+    """True iff the player's PJ participates in the session."""
+    session_stmt = select(Session).where(Session.id == session_id)
+    if campaign_id is not None:
+        session_stmt = session_stmt.where(Session.campaign_id == campaign_id)
+    session = await db.scalar(session_stmt)
+    if session is None:
+        return False
+
+    if session.transcription_mode is TranscriptionMode.NON_DIARISED:
+        stmt = (
+            select(SessionPlayer.session_id)
+            .where(
+                SessionPlayer.session_id == session_id,
+                SessionPlayer.pj_id == pj_id,
+            )
+            .limit(1)
+        )
+        return (await db.scalar(stmt)) is not None
+
     stmt = (
         select(SessionPjMapping.session_id)
-        .join(Session, Session.id == SessionPjMapping.session_id)
         .where(
             SessionPjMapping.session_id == session_id,
             SessionPjMapping.pj_id == pj_id,
         )
         .limit(1)
     )
-    if campaign_id is not None:
-        stmt = stmt.where(Session.campaign_id == campaign_id)
     return (await db.scalar(stmt)) is not None
 
 
