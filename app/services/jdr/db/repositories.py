@@ -631,6 +631,14 @@ class MappingRepository(_BaseRepository):
         await self._session.flush()
         return rows
 
+    async def delete_for_session(self, session_id: UUID) -> int:
+        result = await self._session.execute(
+            delete(SessionPjMapping).where(
+                SessionPjMapping.session_id == session_id
+            )
+        )
+        return result.rowcount
+
 
 class ArtifactRepository(_BaseRepository):
     """``jdr_artifacts`` access. Composite PK on (session_id, kind),
@@ -943,6 +951,8 @@ class ModelSettingsRepository(_BaseRepository):
         user_id: UUID,
         transcription_provider: ModelProvider | None = None,
         summary_provider: ModelProvider | None = None,
+        set_transcription_provider: bool = False,
+        set_summary_provider: bool = False,
         transcription_local_path: str | None = None,
         summary_local_path: str | None = None,
         transcription_cloud_model: str | None = None,
@@ -957,9 +967,9 @@ class ModelSettingsRepository(_BaseRepository):
             row = ModelSettings(user_id=user_id)
             self._session.add(row)
 
-        if transcription_provider is not None:
+        if set_transcription_provider:
             row.transcription_provider = transcription_provider
-        if summary_provider is not None:
+        if set_summary_provider:
             row.summary_provider = summary_provider
         if transcription_local_path is not None:
             row.transcription_local_path = transcription_local_path
